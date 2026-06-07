@@ -157,8 +157,9 @@ ANSWER:"""
     try:
         r = requests.post(
             f"{OLLAMA_URL}/api/generate",
-            json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
-            timeout=110,
+            json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False,
+                  "keep_alive": "30m"},
+            timeout=90,
         )
         r.raise_for_status()
         answer = r.json().get("response", "").strip()

@@ -28,7 +28,10 @@ def healthz():
 @app.api_route("/proxy/{path:path}", methods=["GET", "POST"])
 async def proxy(path: str, request: Request):
     url = f"{ANALYTICS_URL}/{path}"
-    async with httpx.AsyncClient(timeout=120) as client:
+    # Generous timeout: the what-if path can call a cold LLM. This sits above
+    # the analytics->Ollama timeout (90s) and below nginx's (180s) so analytics
+    # always returns its graceful fallback rather than the proxy emitting a 504.
+    async with httpx.AsyncClient(timeout=150) as client:
         if request.method == "POST":
             body = await request.body()
             r = await client.post(url, content=body,

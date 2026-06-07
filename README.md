@@ -127,6 +127,54 @@ dashboard, API, and analytics services are on the internal Docker network only
 > Ollama is still pulling the model, the assistant gracefully returns the
 > retrieved facts until the model is ready.
 
+### Troubleshooting the what-if assistant
+
+A `Scenario failed: analytics returned 504` means the request **timed out**,
+almost always because the Ollama model is still loading. The model is loaded on
+CPU and the very first inference can take a while; the `ollama-pull` service
+pulls **and** warms the model on startup, but if you ask before that finishes
+you may see a slow response or a one-off timeout. It usually succeeds on retry
+once the model is resident (it's kept in memory for 30 minutes).
+
+How to check each piece of the what-if path:
+
+```bash
+# 1. Is the model pulled and warmed? (this one-shot exits 'done' when ready)
+docker compose logs ollama-pull          # look for: warming up model... / done
+docker compose logs -f ollama            # watch model load / inference activity
+
+# 2. Is Ollama itself responding, and is the model present?
+curl http://localhost:11434/api/tags                      # lists installed models
+docker compose exec ollama ollama list                    # same, from inside
+
+# 3. Ask Ollama directly (bypasses the dashboard + analytics)
+curl http://localhost:11434/api/generate \
+  -d '{"model":"llama3.2","prompt":"say ok","stream":false}'
+
+# 4. Hit the analytics what-if endpoint directly (bypasses the dashboard)
+curl -X POST http://localhost:8080/analytics/whatif \
+  -H 'content-type: application/json' \
+  -d '{"question":"What if we cut Produce shrink in half?"}'
+
+# 5. Check the services are healthy
+docker compose ps                         # all should be Up / healthy
+docker compose logs analytics             # look for tracebacks
+```
+
+If step 3 is slow but works, the model just needed to load — retry the
+dashboard. If step 4 returns JSON with a `facts_used` list but the `answer`
+says "model is still warming up," Ollama isn't ready yet (analytics returns its
+grounded fallback rather than erroring). If step 4 itself fails, check
+`docker compose logs analytics`.
+
+The request path has a nested timeout ladder so a slow model degrades to a
+grounded fallback instead of a proxy error: Ollama call **90s** < dashboard
+proxy **150s** < NGINX **180s**. To pre-warm manually:
+
+```bash
+docker compose exec ollama ollama run llama3.2 --keepalive 30m "ok"
+```
+
 ## Sending messages
 
 ```bash

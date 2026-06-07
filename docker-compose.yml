@@ -210,7 +210,10 @@ services:
     image: ollama/ollama:latest
     container_name: gsp-ollama-pull
     depends_on: [ollama]
-    entrypoint: ["/bin/sh", "-c", "sleep 8 && OLLAMA_HOST=http://ollama:11434 ollama pull llama3.2 && echo done"]
+    # Pull the model, then run a tiny warmup generation so it's loaded into
+    # memory (keep_alive 30m). Pulling alone doesn't load it; the first real
+    # what-if would otherwise pay the cold-load cost and risk a timeout.
+    entrypoint: ["/bin/sh", "-c", "sleep 8 && export OLLAMA_HOST=http://ollama:11434 && ollama pull llama3.2 && echo 'warming up model...' && ollama run llama3.2 --keepalive 30m 'ok' >/dev/null 2>&1; echo done"]
     networks: [grocery-net]
     restart: "no"
 
