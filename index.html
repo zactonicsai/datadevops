@@ -1,0 +1,1076 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Grocery Operations Platform — Service Tutorial</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  /* ===== IBM Carbon-inspired design tokens ===== */
+  :root {
+    --base-font: 16px;            /* driven by the font-size scaler (14–36pt) */
+    --ibm-white: #ffffff;
+    --ibm-g10: #f4f4f4;
+    --ibm-g20: #e0e0e0;
+    --ibm-g30: #c6c6c6;
+    --ibm-g50: #8d8d8d;
+    --ibm-g60: #6f6f6f;
+    --ibm-g70: #525252;
+    --ibm-g90: #262626;
+    --ibm-g100: #161616;
+    --ibm-blue: #0f62fe;
+    --ibm-blue-hover: #0353e9;
+    --ibm-blue-light: #d0e2ff;
+    --ibm-cyan: #1192e8;
+    --ibm-teal: #009d9a;
+    --ibm-green: #24a148;
+    --ibm-purple: #8a3ffc;
+    --ibm-magenta: #ee5396;
+    --ibm-red: #da1e28;
+    --ibm-amber: #f1c21b;
+    --ibm-orange: #ff832b;
+
+    /* semantic — light mode defaults */
+    --bg: var(--ibm-white);
+    --bg-soft: var(--ibm-g10);
+    --bg-panel: #ffffff;
+    --bg-code: #f4f4f4;
+    --ink: var(--ibm-g100);
+    --ink-soft: var(--ibm-g70);
+    --ink-faint: var(--ibm-g60);
+    --border: var(--ibm-g20);
+    --border-strong: var(--ibm-g30);
+    --accent: var(--ibm-blue);
+    --accent-soft: var(--ibm-blue-light);
+    --code-kw: #8a3ffc;      /* keyword */
+    --code-str: #0f62fe;     /* string  */
+    --code-com: #6f6f6f;     /* comment */
+    --code-num: #009d9a;     /* number  */
+    --code-fn:  #da1e28;     /* function/key */
+  }
+  html[data-theme="dark"] {
+    --bg: #161616;
+    --bg-soft: #1c1c1c;
+    --bg-panel: #262626;
+    --bg-code: #1c1c1c;
+    --ink: #f4f4f4;
+    --ink-soft: #c6c6c6;
+    --ink-faint: #8d8d8d;
+    --border: #393939;
+    --border-strong: #525252;
+    --accent: #4589ff;
+    --accent-soft: #002d9c;
+    --code-kw: #be95ff;
+    --code-str: #78a9ff;
+    --code-com: #8d8d8d;
+    --code-num: #3ddbd9;
+    --code-fn:  #ff8389;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: 'IBM Plex Sans', system-ui, sans-serif;
+    font-size: var(--base-font);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    transition: background .25s ease, color .25s ease;
+  }
+
+  /* ===== top app bar ===== */
+  .appbar {
+    position: sticky; top: 0; z-index: 50;
+    display: flex; align-items: center; gap: .75rem;
+    background: var(--ink);
+    color: #fff;
+    padding: .55rem 1rem;
+    border-bottom: 1px solid var(--border-strong);
+  }
+  html[data-theme="dark"] .appbar { background: #000; }
+  .appbar .brand { display: flex; align-items: center; gap: .55rem; font-weight: 600; }
+  .appbar .brand .swatch { width: .55rem; height: 1.4rem; background: var(--ibm-blue); display: inline-block; }
+  .appbar .brand small { color: var(--ibm-g30); font-weight: 400; }
+  .appbar .spacer { flex: 1; }
+  .appbar button {
+    font-family: inherit; font-size: .82em;
+    background: transparent; color: #fff;
+    border: 1px solid var(--ibm-g60);
+    padding: .35rem .6rem; cursor: pointer;
+    display: inline-flex; align-items: center; gap: .35rem;
+  }
+  .appbar button:hover { background: rgba(255,255,255,.12); }
+  .appbar .fontctl { display: inline-flex; align-items: center; border: 1px solid var(--ibm-g60); }
+  .appbar .fontctl button { border: none; }
+  .appbar .fontctl .val { font-size: .72em; padding: 0 .4rem; color: var(--ibm-g30); min-width: 2.8rem; text-align: center; }
+
+  /* ===== layout ===== */
+  .wrap { display: flex; max-width: 1200px; margin: 0 auto; }
+  nav.toc {
+    position: sticky; top: 49px; align-self: flex-start;
+    width: 240px; flex: none;
+    height: calc(100vh - 49px); overflow-y: auto;
+    border-right: 1px solid var(--border);
+    padding: 1.2rem .6rem 3rem;
+    background: var(--bg-soft);
+  }
+  nav.toc a {
+    display: block; padding: .4rem .6rem;
+    color: var(--ink-soft); text-decoration: none;
+    font-size: .86em; border-left: 2px solid transparent;
+  }
+  nav.toc a:hover { background: var(--bg); color: var(--ink); }
+  nav.toc a.active { border-left-color: var(--accent); color: var(--ink); font-weight: 600; background: var(--bg); }
+  nav.toc .group { font-size: .72em; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-faint); padding: 1rem .6rem .3rem; font-weight: 600; }
+
+  main { flex: 1; min-width: 0; padding: 1.5rem clamp(1rem, 4vw, 3rem) 6rem; }
+
+  /* ===== typography ===== */
+  h1 { font-size: 2.1em; font-weight: 600; line-height: 1.15; margin: .2em 0 .3em; letter-spacing: -.01em; }
+  h2 { font-size: 1.55em; font-weight: 600; margin: 1.8em 0 .5em; padding-bottom: .3em; border-bottom: 1px solid var(--border); scroll-margin-top: 70px; }
+  h3 { font-size: 1.2em; font-weight: 600; margin: 1.4em 0 .4em; }
+  h4 { font-size: 1.02em; font-weight: 600; margin: 1.1em 0 .3em; color: var(--ink-soft); }
+  p { margin: .6em 0; max-width: 70ch; }
+  a.ref { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-soft); }
+  a.ref:hover { border-bottom-color: var(--accent); }
+  a.ref::after { content: " ↗"; font-size: .8em; opacity: .7; }
+  .lede { font-size: 1.12em; color: var(--ink-soft); max-width: 72ch; }
+  code.inline { font-family: 'IBM Plex Mono', monospace; font-size: .88em; background: var(--bg-code); padding: .08em .35em; border: 1px solid var(--border); border-radius: 2px; }
+
+  /* ===== service header chip ===== */
+  .svc-tag { display: inline-flex; align-items: center; gap: .45rem; font-family: 'IBM Plex Mono', monospace; font-size: .78em; font-weight: 500; padding: .25rem .6rem; border: 1px solid var(--border-strong); border-radius: 2px; background: var(--bg-soft); color: var(--ink-soft); margin-right: .4rem; }
+  .svc-tag .dot { width: .55rem; height: .55rem; border-radius: 50%; }
+  .meta-grid { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; font-size: .9em; margin: .8em 0; }
+  .meta-grid dt { color: var(--ink-faint); font-family: 'IBM Plex Mono', monospace; font-size: .85em; }
+  .meta-grid dd { margin: 0; }
+
+  /* ===== callout boxes ===== */
+  .box { border-left: 3px solid var(--accent); background: var(--bg-soft); padding: .8rem 1rem; margin: 1em 0; border-radius: 0 4px 4px 0; }
+  .box.warn { border-left-color: var(--ibm-amber); }
+  .box.danger { border-left-color: var(--ibm-red); }
+  .box.ok { border-left-color: var(--ibm-green); }
+  .box .box-title { font-weight: 600; font-size: .92em; margin-bottom: .25rem; display: flex; align-items: center; gap: .4rem; }
+
+  /* ===== config tables ===== */
+  table.cfg { width: 100%; border-collapse: collapse; margin: 1em 0; font-size: .9em; }
+  table.cfg th, table.cfg td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+  table.cfg th { background: var(--bg-soft); font-weight: 600; font-size: .85em; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-faint); }
+  table.cfg td:first-child { font-family: 'IBM Plex Mono', monospace; font-size: .9em; color: var(--accent); white-space: nowrap; }
+  table.cfg tr:hover td { background: var(--bg-soft); }
+
+  /* ===== code blocks with line-by-line ===== */
+  .code { font-family: 'IBM Plex Mono', monospace; font-size: .82em; background: var(--bg-code); border: 1px solid var(--border); border-radius: 4px; margin: 1em 0; overflow: hidden; }
+  .code .filename { background: var(--bg-soft); border-bottom: 1px solid var(--border); padding: .4rem .7rem; font-size: .92em; color: var(--ink-soft); display: flex; align-items: center; gap: .5rem; }
+  .code .filename .fdot { width: .5rem; height: .5rem; border-radius: 50%; background: var(--ibm-orange); }
+  .code pre { margin: 0; overflow-x: auto; }
+  .code .ln { display: grid; grid-template-columns: 2.6em 1fr; align-items: start; padding: 0 .4rem; line-height: 1.55; }
+  .code .ln:hover { background: var(--bg-soft); }
+  .code .ln .num { color: var(--ink-faint); text-align: right; padding-right: .8rem; user-select: none; opacity: .6; }
+  .code .ln .src { white-space: pre-wrap; word-break: break-word; }
+  .code .ln.note { cursor: pointer; }
+  .code .ln.note .src { border-bottom: 1px dotted var(--border-strong); }
+  .code .ln.note:hover .src { background: var(--accent-soft); }
+  .code .ann { grid-column: 2 / 3; font-family: 'IBM Plex Sans', sans-serif; font-size: 1.05em; color: var(--ink-soft); background: var(--bg-soft); border-left: 2px solid var(--accent); padding: .5rem .7rem; margin: .3rem 0 .5rem; display: none; border-radius: 0 3px 3px 0; }
+  .code .ann.open { display: block; }
+  .code .ann b { color: var(--ink); }
+  .tok-kw { color: var(--code-kw); }
+  .tok-str { color: var(--code-str); }
+  .tok-com { color: var(--code-com); font-style: italic; }
+  .tok-num { color: var(--code-num); }
+  .tok-fn { color: var(--code-fn); }
+
+  .hint { font-size: .8em; color: var(--ink-faint); margin: .3em 0 1em; display: flex; align-items: center; gap: .4rem; }
+
+  /* ===== "show more" popups ===== */
+  .more-btn { font-family: inherit; font-size: .85em; font-weight: 500; background: var(--accent); color: #fff; border: none; padding: .4rem .8rem; border-radius: 2px; cursor: pointer; display: inline-flex; align-items: center; gap: .4rem; margin: .4em .4em .4em 0; }
+  .more-btn:hover { background: var(--ibm-blue-hover); }
+  .more-btn.ghost { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  .more-btn.ghost:hover { background: var(--accent-soft); }
+
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; align-items: center; justify-content: center; z-index: 100; padding: 1rem; }
+  .modal-overlay.open { display: flex; }
+  .modal { background: var(--bg-panel); color: var(--ink); border: 1px solid var(--border-strong); border-radius: 6px; max-width: 640px; width: 100%; max-height: 85vh; overflow-y: auto; box-shadow: 0 16px 48px rgba(0,0,0,.3); }
+  .modal-head { display: flex; align-items: flex-start; gap: 1rem; padding: 1rem 1.2rem; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg-panel); }
+  .modal-head h3 { margin: 0; font-size: 1.15em; }
+  .modal-head .x { margin-left: auto; background: transparent; border: none; color: var(--ink-soft); font-size: 1.4em; cursor: pointer; line-height: 1; padding: 0 .2rem; }
+  .modal-head .x:hover { color: var(--ink); }
+  .modal-body { padding: 1rem 1.2rem 1.4rem; }
+  .modal-body p { max-width: none; }
+
+  /* ===== misc ===== */
+  .pill-row { display: flex; flex-wrap: wrap; gap: .4rem; margin: .8em 0; }
+  .pill { font-size: .8em; padding: .25rem .6rem; border: 1px solid var(--border-strong); border-radius: 99px; color: var(--ink-soft); background: var(--bg-soft); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 2.5em 0; }
+  .footer { color: var(--ink-faint); font-size: .85em; margin-top: 3em; padding-top: 1.5em; border-top: 1px solid var(--border); }
+  .toc-toggle { display: none; }
+
+  /* ===== mobile ===== */
+  @media (max-width: 860px) {
+    nav.toc {
+      position: fixed; top: 49px; left: 0; bottom: 0; width: 80%; max-width: 300px;
+      transform: translateX(-105%); transition: transform .25s ease; z-index: 60;
+      box-shadow: 4px 0 24px rgba(0,0,0,.2);
+    }
+    nav.toc.open { transform: translateX(0); }
+    .toc-toggle { display: inline-flex; }
+    main { padding-left: 1rem; padding-right: 1rem; }
+    .appbar .brand small { display: none; }
+    .meta-grid { grid-template-columns: 1fr; gap: .1rem .5rem; }
+    .meta-grid dt { margin-top: .4rem; }
+  }
+  @media (max-width: 520px) {
+    .appbar .btn-label { display: none; }
+    h1 { font-size: 1.7em; }
+  }
+</style>
+</head>
+<body>
+<!-- ===================== TOP BAR ===================== -->
+<header class="appbar">
+  <button class="toc-toggle" onclick="toggleToc()" aria-label="Toggle contents">☰</button>
+  <span class="brand"><span class="swatch"></span> Grocery Platform <small>· Service Tutorial</small></span>
+  <span class="spacer"></span>
+  <div class="fontctl" role="group" aria-label="Font size">
+    <button onclick="bumpFont(-2)" aria-label="Decrease font size">A−</button>
+    <span class="val" id="fontVal">12&nbsp;pt</span>
+    <button onclick="bumpFont(2)" aria-label="Increase font size">A+</button>
+  </div>
+  <button onclick="toggleTheme()" aria-label="Toggle light/dark"><span id="themeGlyph">◐</span> <span class="btn-label" id="themeLabel">Dark</span></button>
+</header>
+
+<div class="wrap">
+<!-- ===================== TABLE OF CONTENTS ===================== -->
+<nav class="toc" id="toc">
+  <a href="#overview">Overview</a>
+  <a href="#architecture">Architecture &amp; data flow</a>
+  <a href="#compose">The compose file</a>
+  <div class="group">Messaging backbone</div>
+  <a href="#kafka">Kafka (KRaft)</a>
+  <a href="#kafka-setup">kafka-setup</a>
+  <a href="#zookeeper">ZooKeeper (NiFi)</a>
+  <a href="#nifi">Apache NiFi</a>
+  <div class="group">Application services</div>
+  <a href="#message-api">message-api</a>
+  <a href="#ingest-worker">ingest-worker</a>
+  <a href="#analytics">analytics</a>
+  <a href="#dashboard">dashboard</a>
+  <a href="#lb">NGINX load balancer</a>
+  <div class="group">Data &amp; storage</div>
+  <a href="#postgres">PostgreSQL</a>
+  <a href="#minio">MinIO</a>
+  <a href="#seed">seed</a>
+  <div class="group">What-if assistant</div>
+  <a href="#chromadb">ChromaDB</a>
+  <a href="#ollama">Ollama</a>
+  <div class="group">Putting it together</div>
+  <a href="#lifecycle">Request lifecycles</a>
+  <a href="#startup">Startup order</a>
+</nav>
+
+<main id="content">
+<!-- ===================== OVERVIEW ===================== -->
+<h1 id="overview">How the Grocery Operations Platform works</h1>
+<p class="lede">An event-driven analytics platform for a grocery store, built from 17 containerized services. This page explains what every service does, the exact configuration that wires them together, and walks the key code line by line. Tap any underlined line of code to reveal a plain-English explanation, and use the <b>Show more</b> buttons for deeper background.</p>
+
+<div class="pill-row">
+  <span class="pill">17 services</span>
+  <span class="pill">Kafka (KRaft) backbone</span>
+  <span class="pill">Python / FastAPI</span>
+  <span class="pill">PostgreSQL + MinIO</span>
+  <span class="pill">Ollama + ChromaDB RAG</span>
+  <span class="pill">NGINX single entry</span>
+</div>
+
+<div class="box">
+  <div class="box-title">How to read this page</div>
+  <p style="margin:0">Each service section has three layers: a <b>plain-language summary</b> of what it does, a <b>configuration table</b> for every setting, and an <b>annotated code/config listing</b>. Lines with a dotted underline are clickable — tap to expand the explanation inline. The <b>A−/A+</b> control in the top bar scales every font on the page; the <b>Dark</b> button switches between light and dark IBM themes.</p>
+</div>
+
+<!-- ===================== ARCHITECTURE ===================== -->
+<h2 id="architecture">Architecture &amp; data flow</h2>
+<p>The platform follows a classic event-driven pipeline. Messages enter through a single API, flow through Kafka, get persisted to a database, and are read back by an analytics service that powers a dashboard. Everything sits behind one NGINX load balancer, so the browser only ever talks to one address.</p>
+
+<p>There are five logical groups:</p>
+<h4>1. Messaging backbone</h4>
+<p>A three-broker <b>Kafka</b> cluster running in <b>KRaft mode</b> (no ZooKeeper) is the event bus. A one-shot <code class="inline">kafka-setup</code> job creates the 12 grocery topics. A separate single <b>ZooKeeper</b> exists only to give <b>Apache NiFi</b> its state coordination.</p>
+<h4>2. Application services</h4>
+<p><code class="inline">message-api</code> (3 replicas) accepts text/JSON/binary messages and produces them to Kafka. <code class="inline">ingest-worker</code> consumes those events and writes them to PostgreSQL. <code class="inline">analytics</code> reads the database and computes KPIs, forecasts, charts and what-if answers. <code class="inline">dashboard</code> serves the UI. The <code class="inline">lb</code> (NGINX) routes the browser to all of them.</p>
+<h4>3. Data &amp; storage</h4>
+<p><b>PostgreSQL</b> is the system of record; <b>MinIO</b> stores uploaded binary files; the one-shot <code class="inline">seed</code> job loads ~90 days of demo data with built-in business scenarios.</p>
+<h4>4. What-if assistant</h4>
+<p><b>Ollama</b> runs a local LLM (llama3.2); <b>ChromaDB</b> stores vector embeddings of the store's metrics so the assistant can retrieve relevant facts before answering.</p>
+<h4>5. The edge</h4>
+<p><b>NGINX</b> is the single entry point on port 8080, load-balancing the three message-api replicas and routing each URL prefix to the right service.</p>
+
+<p>A standalone diagram is included alongside this file as <code class="inline">architecture.svg</code>. The full request walkthroughs are in the <a href="#lifecycle" class="ref" style="border:none">Request lifecycles</a> section at the end.</p>
+
+<button class="more-btn ghost" onclick="openModal('why-events')">Show more: why event-driven?</button>
+<button class="more-btn ghost" onclick="openModal('why-single-entry')">Show more: why one load balancer?</button>
+
+<!-- ===================== COMPOSE ===================== -->
+<h2 id="compose">The compose file</h2>
+<p>Everything is orchestrated by a single <code class="inline">docker-compose.yml</code>. Two features at the top of the file are worth understanding before the services themselves: the <b>version</b> declaration and a <b>YAML anchor</b> that shares common Kafka settings across the three brokers.</p>
+
+<div class="code">
+  <div class="filename"><span class="fdot"></span> docker-compose.yml — shared Kafka anchor</div>
+  <pre>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">10</span><span class="src"><span class="tok-fn">x-kafka-common</span>: <span class="tok-kw">&amp;kafka-common</span></span></div>
+<div class="ann">An <b>extension field</b> (the <code class="inline">x-</code> prefix) holding settings common to all three Kafka brokers. <code class="inline">&amp;kafka-common</code> defines a YAML <b>anchor</b> — a reusable block we can stamp into each broker with <code class="inline">&lt;&lt;: *kafka-common</code>, so we write the image and health check once instead of three times.</div>
+<div class="ln"><span class="num">11</span><span class="src">  <span class="tok-fn">image</span>: confluentinc/cp-kafka:7.6.1</span></div>
+<div class="ln"><span class="num">12</span><span class="src">  <span class="tok-fn">restart</span>: unless-stopped</span></div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">13</span><span class="src">  <span class="tok-fn">healthcheck</span>:</span></div>
+<div class="ann">A health check lets other services wait for this one to be genuinely ready (<code class="inline">condition: service_healthy</code>) rather than merely started. Docker runs the test command on an interval and marks the container <i>healthy</i> only once it passes.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">14</span><span class="src">    <span class="tok-fn">test</span>: [<span class="tok-str">"CMD"</span>, <span class="tok-str">"bash"</span>, <span class="tok-str">"-c"</span>, <span class="tok-str">"kafka-broker-api-versions --bootstrap-server localhost:29092 ..."</span>]</span></div>
+<div class="ann">Probes the broker's <b>INTERNAL</b> listener on port 29092. We deliberately use 29092 (not the host-facing 9092/9093/9094) because <b>all three brokers</b> bind 29092 identically — using a per-broker host port would make the shared health check fail on two of them.</div>
+<div class="ln"><span class="num">15</span><span class="src">    <span class="tok-fn">interval</span>: <span class="tok-num">15s</span></span></div>
+<div class="ln"><span class="num">16</span><span class="src">    <span class="tok-fn">start_period</span>: <span class="tok-num">40s</span></span></div>
+<div class="ann">Grace window: failures during the first 40 seconds don't count against the retry budget, giving the JVM-based broker time to boot before health is judged.</div>
+  </pre>
+</div>
+<p class="hint">▸ Tap any underlined line above to expand its explanation.</p>
+
+<div class="box">
+  <div class="box-title">Reference</div>
+  <p style="margin:0">Compose file syntax: <a class="ref" href="https://docs.docker.com/reference/compose-file/">docs.docker.com/reference/compose-file</a> · YAML anchors &amp; extension fields: <a class="ref" href="https://docs.docker.com/reference/compose-file/fragments/">Fragments</a> · Health checks: <a class="ref" href="https://docs.docker.com/reference/dockerfile/#healthcheck">HEALTHCHECK</a></p>
+</div>
+
+<!-- ===================== KAFKA ===================== -->
+<h2 id="kafka">Kafka cluster (KRaft mode)</h2>
+<span class="svc-tag"><span class="dot" style="background:#da1e28"></span> kafka1 · kafka2 · kafka3</span>
+<span class="svc-tag">confluentinc/cp-kafka:7.6.1</span>
+
+<dl class="meta-grid">
+  <dt>role</dt><dd>Distributed event log — the backbone every message flows through</dd>
+  <dt>mode</dt><dd>KRaft (Kafka Raft) — no ZooKeeper; brokers manage their own metadata</dd>
+  <dt>replicas</dt><dd>3 brokers, each also a controller (combined mode)</dd>
+  <dt>host ports</dt><dd>9092, 9093, 9094 (one EXTERNAL listener per broker)</dd>
+  <dt>internal port</dt><dd>29092 (inter-broker), 29093 (controller quorum)</dd>
+  <dt>durability</dt><dd>replication factor 3, min in-sync replicas 2</dd>
+</dl>
+
+<p>Kafka is an append-only log of <b>events</b>. Producers append messages to <b>topics</b>; consumers read them at their own pace. Topics are split into <b>partitions</b> for parallelism, and each partition is <b>replicated</b> across brokers for durability. This cluster runs in <b>KRaft mode</b>, where the brokers themselves form a Raft consensus group to manage cluster metadata — replacing the older ZooKeeper-based design.</p>
+
+<button class="more-btn" onclick="openModal('kafka-concepts')">Show more: topics, partitions &amp; offsets</button>
+<button class="more-btn" onclick="openModal('kraft')">Show more: what is KRaft &amp; why combined mode?</button>
+<button class="more-btn" onclick="openModal('listeners')">Show more: the three listeners explained</button>
+
+<h3>Configuration — every setting on a broker</h3>
+<table class="cfg">
+  <tr><th>Setting</th><th>Value (kafka1)</th><th>What it does</th></tr>
+  <tr><td>KAFKA_NODE_ID</td><td>1</td><td>Unique id for this node within the cluster. kafka2=2, kafka3=3.</td></tr>
+  <tr><td>KAFKA_PROCESS_ROLES</td><td>broker,controller</td><td>This node is <i>both</i> a data broker and a metadata controller (combined mode).</td></tr>
+  <tr><td>CLUSTER_ID</td><td>OFXVWG8FR8...</td><td>A 22-char base64 UUID shared by all brokers; identifies this one logical cluster. Must match across nodes.</td></tr>
+  <tr><td>KAFKA_CONTROLLER_QUORUM_VOTERS</td><td>1@kafka1:29093,2@kafka2:29093,3@kafka3:29093</td><td>The Raft voter set — lists every controller by <code class="inline">id@host:port</code>. All three brokers vote; a quorum of 2 keeps the cluster alive, tolerating one failure.</td></tr>
+  <tr><td>KAFKA_CONTROLLER_LISTENER_NAMES</td><td>CONTROLLER</td><td>Which listener carries Raft controller traffic.</td></tr>
+  <tr><td>KAFKA_LISTENERS</td><td>CONTROLLER://0.0.0.0:29093, INTERNAL://0.0.0.0:29092, EXTERNAL://0.0.0.0:9092</td><td>The sockets this broker binds: controller quorum, inter-broker, and host-facing.</td></tr>
+  <tr><td>KAFKA_ADVERTISED_LISTENERS</td><td>INTERNAL://kafka1:29092, EXTERNAL://localhost:9092</td><td>The addresses Kafka <i>tells clients</i> to connect back on. Internal clients use the Docker DNS name; host clients use localhost.</td></tr>
+  <tr><td>KAFKA_LISTENER_SECURITY_PROTOCOL_MAP</td><td>CONTROLLER:PLAINTEXT, INTERNAL:PLAINTEXT, EXTERNAL:PLAINTEXT</td><td>Security protocol per listener. All PLAINTEXT here (local/demo; no TLS).</td></tr>
+  <tr><td>KAFKA_INTER_BROKER_LISTENER_NAME</td><td>INTERNAL</td><td>Which listener brokers use to talk to each other.</td></tr>
+  <tr><td>KAFKA_DEFAULT_REPLICATION_FACTOR</td><td>3</td><td>New topics get 3 copies of each partition by default.</td></tr>
+  <tr><td>KAFKA_MIN_INSYNC_REPLICAS</td><td>2</td><td>A write with <code class="inline">acks=all</code> must reach at least 2 replicas before it's acknowledged — survives one broker loss without data loss.</td></tr>
+  <tr><td>KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR</td><td>3</td><td>The internal consumer-offsets topic is also replicated 3×.</td></tr>
+  <tr><td>KAFKA_NUM_PARTITIONS</td><td>3</td><td>Default partitions for auto-created topics.</td></tr>
+  <tr><td>KAFKA_AUTO_CREATE_TOPICS_ENABLE</td><td>true</td><td>Producing to a missing topic creates it (we also pre-create explicitly).</td></tr>
+</table>
+
+<div class="code">
+  <div class="filename"><span class="fdot"></span> docker-compose.yml — kafka1 (KRaft)</div>
+  <pre>
+<div class="ln"><span class="num">77</span><span class="src">  <span class="tok-fn">kafka1</span>:</span></div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">78</span><span class="src">    <span class="tok-kw">&lt;&lt;</span>: <span class="tok-kw">*kafka-common</span></span></div>
+<div class="ann">Merges in the shared anchor from line 10 — pulls in the image, restart policy, and health check. Anything below overrides or adds to it.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">84</span><span class="src">      <span class="tok-fn">KAFKA_NODE_ID</span>: <span class="tok-num">1</span></span></div>
+<div class="ann">Every node needs a unique numeric id. This is how the Raft quorum and replica assignment refer to each broker.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">85</span><span class="src">      <span class="tok-fn">KAFKA_PROCESS_ROLES</span>: <span class="tok-str">"broker,controller"</span></span></div>
+<div class="ann"><b>Combined mode:</b> this process is both a broker (stores partition data, serves clients) and a controller (participates in the metadata Raft quorum). For a 3-node demo this is simplest; production usually splits these into dedicated roles.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">86</span><span class="src">      <span class="tok-fn">CLUSTER_ID</span>: <span class="tok-str">"${CLUSTER_ID:-OFXVWG8FR8anxcz23e7kMw}"</span></span></div>
+<div class="ann">The shared cluster identifier, with an env-override and a baked-in default. KRaft requires a pre-generated base64 UUID (from <code class="inline">kafka-storage random-uuid</code>); all three brokers must use the <b>same</b> value or they won't form one cluster.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">87</span><span class="src">      <span class="tok-fn">KAFKA_CONTROLLER_QUORUM_VOTERS</span>: <span class="tok-str">"1@kafka1:29093,2@kafka2:29093,3@kafka3:29093"</span></span></div>
+<div class="ann">The Raft voter roster. Each entry is <code class="inline">nodeId@host:port</code> on the controller listener. With three voters the quorum is two, so the cluster keeps making progress if any single controller is down.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">90</span><span class="src">      <span class="tok-fn">KAFKA_LISTENERS</span>: <span class="tok-str">"CONTROLLER://0.0.0.0:29093,INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092"</span></span></div>
+<div class="ann">Three sockets the broker listens on, all bound to <code class="inline">0.0.0.0</code> (all interfaces inside the container): the controller quorum (29093), inter-broker traffic (29092), and the host-facing port (9092).</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">91</span><span class="src">      <span class="tok-fn">KAFKA_ADVERTISED_LISTENERS</span>: <span class="tok-str">"INTERNAL://kafka1:29092,EXTERNAL://localhost:9092"</span></span></div>
+<div class="ann">The crux of Kafka networking: after a client connects, the broker hands back these addresses to use for actual data. Containers reach it at <code class="inline">kafka1:29092</code> (Docker DNS); your laptop reaches it at <code class="inline">localhost:9092</code>. The controller listener isn't advertised because only the brokers use it.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">96</span><span class="src">      <span class="tok-fn">KAFKA_MIN_INSYNC_REPLICAS</span>: <span class="tok-num">2</span></span></div>
+<div class="ann">Paired with the producer's <code class="inline">acks=all</code>, a write isn't acknowledged until 2 of the 3 replicas have it. This is the durability guarantee — one broker can die without losing acknowledged messages.</div>
+<div class="ln"><span class="num">99</span><span class="src">      <span class="tok-fn">KAFKA_DEFAULT_REPLICATION_FACTOR</span>: <span class="tok-num">3</span></span></div>
+<div class="ln"><span class="num">101</span><span class="src">    <span class="tok-fn">ports</span>: [<span class="tok-str">"9092:9092"</span>]</span></div>
+<div class="ann">Publishes this broker's EXTERNAL port to the host so tools on your machine can connect to <code class="inline">localhost:9092</code>. kafka2→9093, kafka3→9094.</div>
+  </pre>
+</div>
+
+<div class="box warn">
+  <div class="box-title">⚠ First-launch note</div>
+  <p style="margin:0">Because KRaft stores cluster metadata on disk keyed by <code class="inline">CLUSTER_ID</code>, if you ever reuse volumes from an older ZooKeeper-based run the brokers will refuse to format. Clear them with <code class="inline">docker compose down -v</code> before the first KRaft boot.</p>
+</div>
+
+<div class="box">
+  <div class="box-title">Official references</div>
+  <p style="margin:0">Kafka docs: <a class="ref" href="https://kafka.apache.org/documentation/">kafka.apache.org/documentation</a> · KRaft: <a class="ref" href="https://kafka.apache.org/documentation/#kraft">KRaft section</a> · Confluent Docker config: <a class="ref" href="https://docs.confluent.io/platform/current/installation/docker/config-reference.html">Image Configuration Reference</a> · Listeners explained: <a class="ref" href="https://www.confluent.io/blog/kafka-listeners-explained/">Kafka Listeners Explained</a></p>
+</div>
+
+<!-- ===================== KAFKA-SETUP ===================== -->
+<h2 id="kafka-setup">kafka-setup (topic creation)</h2>
+<span class="svc-tag"><span class="dot" style="background:#6f6f6f"></span> kafka-setup</span>
+<span class="svc-tag">one-shot</span>
+<dl class="meta-grid">
+  <dt>role</dt><dd>Creates the 12 grocery topics once the brokers are healthy, then exits</dd>
+  <dt>restart</dt><dd>"no" — it runs once and is done</dd>
+</dl>
+<p>Kafka can auto-create topics, but explicit creation lets us control partitions and replication. This short-lived container waits for the cluster, runs a shell script, and exits. It depends on all three brokers being <i>healthy</i> (not just started).</p>
+
+<div class="code">
+  <div class="filename"><span class="fdot"></span> kafka-config/create-topics.sh</div>
+  <pre>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">5</span><span class="src"><span class="tok-fn">BROKER</span>=<span class="tok-str">"kafka1:29092"</span></span></div>
+<div class="ann">Targets the INTERNAL listener of one broker. Topic creation is a cluster-wide operation, so contacting any single broker is enough — it forwards to the controller.</div>
+<div class="ln"><span class="num">7</span><span class="src"><span class="tok-fn">TOPICS</span>=(</span></div>
+<div class="ln"><span class="num">8</span><span class="src">  <span class="tok-str">"grocery.sales" "grocery.inventory" "grocery.vendor_delivery" ...</span></span></div>
+<div class="ann">One topic per dataset: sales, inventory, vendor_delivery, customer_feedback, shelf_space, ad_program, marketing, discount_program, expiry, binary, text, json — 12 in total.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">22</span><span class="src"><span class="tok-kw">for</span> i <span class="tok-kw">in</span> $(seq 1 30); <span class="tok-kw">do</span></span></div>
+<div class="ann">A readiness loop: try up to 30 times (with sleeps) to reach the broker before creating topics, so a slow cluster start doesn't fail the job.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">34</span><span class="src">  kafka-topics --bootstrap-server <span class="tok-str">"$BROKER"</span> --create --if-not-exists \</span></div>
+<div class="ann"><code class="inline">--if-not-exists</code> makes the script idempotent — re-running it is harmless. Each topic is created with the partition and replication settings below.</div>
+<div class="ln"><span class="num">37</span><span class="src">    --partitions <span class="tok-num">3</span> --replication-factor <span class="tok-num">3</span></span></div>
+<div class="ann">3 partitions (parallel consumption) × 3 replicas (durability) — matching the 3-broker cluster.</div>
+  </pre>
+</div>
+
+<div class="box">
+  <div class="box-title">Reference</div>
+  <p style="margin:0"><a class="ref" href="https://kafka.apache.org/documentation/#basic_ops_add_topic">Managing topics</a> · <a class="ref" href="https://docs.confluent.io/kafka/operations-tools/kafka-tools.html">kafka-topics CLI</a></p>
+</div>
+
+<!-- ===================== ZOOKEEPER ===================== -->
+<h2 id="zookeeper">ZooKeeper (for NiFi only)</h2>
+<span class="svc-tag"><span class="dot" style="background:#da1e28"></span> zookeeper-nifi</span>
+<span class="svc-tag">confluentinc/cp-zookeeper:7.6.1</span>
+<dl class="meta-grid">
+  <dt>role</dt><dd>State coordination for Apache NiFi — <i>not</i> used by Kafka anymore</dd>
+  <dt>nodes</dt><dd>Single node (always has quorum; no ensemble to misconfigure)</dd>
+  <dt>port</dt><dd>2181 (client)</dd>
+</dl>
+<p>Since Kafka moved to KRaft, ZooKeeper is no longer needed for the message bus. But NiFi still relies on ZooKeeper to coordinate its cluster state, so we keep a single dedicated node. A lone node trivially satisfies quorum, which sidesteps the multi-node election problems that plague small ensembles.</p>
+
+<button class="more-btn" onclick="openModal('zk-quorum')">Show more: why a single node (and not two)?</button>
+
+<table class="cfg">
+  <tr><th>Setting</th><th>Value</th><th>What it does</th></tr>
+  <tr><td>ZOOKEEPER_SERVER_ID</td><td>1</td><td>Node id within the ensemble (just one here).</td></tr>
+  <tr><td>ZOOKEEPER_CLIENT_PORT</td><td>2181</td><td>The port NiFi connects to.</td></tr>
+  <tr><td>ZOOKEEPER_TICK_TIME</td><td>2000</td><td>Base time unit (ms) for heartbeats and timeouts.</td></tr>
+  <tr><td>ZOOKEEPER_4LW_COMMANDS_WHITELIST</td><td>ruok,srvr,stat</td><td>Allows the "four-letter word" commands used by the health check (<code class="inline">ruok</code> → <code class="inline">imok</code>).</td></tr>
+</table>
+
+<div class="code">
+  <div class="filename"><span class="fdot"></span> docker-compose.yml — zookeeper-nifi health check</div>
+  <pre>
+<div class="ln note" onclick="toggleLine(this)"><span class="num"> </span><span class="src">    <span class="tok-fn">test</span>: [<span class="tok-str">"CMD-SHELL"</span>, <span class="tok-str">"echo ruok | nc -w 2 localhost 2181 | grep -q imok"</span>]</span></div>
+<div class="ann">Sends the <code class="inline">ruok</code> ("are you OK?") four-letter command over the client port; a healthy ZooKeeper replies <code class="inline">imok</code>. The <code class="inline">grep -q imok</code> turns that into a pass/fail the orchestrator can read. This requires <code class="inline">ruok</code> to be in the whitelist above.</div>
+  </pre>
+</div>
+
+<div class="box">
+  <div class="box-title">Reference</div>
+  <p style="margin:0"><a class="ref" href="https://zookeeper.apache.org/doc/current/zookeeperAdmin.html">ZooKeeper Administrator's Guide</a> · <a class="ref" href="https://zookeeper.apache.org/doc/current/zookeeperAdmin.html#sc_zkCommands">Four-letter words</a></p>
+</div>
+
+<!-- ===================== NIFI ===================== -->
+<h2 id="nifi">Apache NiFi</h2>
+<span class="svc-tag"><span class="dot" style="background:#ee5396"></span> nifi</span>
+<span class="svc-tag">apache/nifi:2.6.0</span>
+<dl class="meta-grid">
+  <dt>role</dt><dd>Visual dataflow tool — drag-and-drop pipelines for routing/transforming data</dd>
+  <dt>access</dt><dd>Through the load balancer at <code class="inline">/nifi/</code></dd>
+  <dt>security</dt><dd>Unsecured HTTP (local use only) — HTTPS/keystore explicitly disabled</dd>
+  <dt>state</dt><dd>Uses the dedicated <code class="inline">zookeeper-nifi</code> node</dd>
+</dl>
+<p>NiFi provides a browser-based canvas for building data pipelines visually. Here it's included so you can wire additional flows into the platform (e.g. pull from an external source and produce into Kafka). The official image only supports standalone mode, and getting it to run cleanly over plain HTTP behind a path-prefixed proxy takes specific settings.</p>
+
+<button class="more-btn" onclick="openModal('nifi-http')">Show more: the HTTPS-disable gotcha</button>
+
+<table class="cfg">
+  <tr><th>Setting</th><th>Value</th><th>What it does</th></tr>
+  <tr><td>NIFI_WEB_HTTP_HOST</td><td>0.0.0.0</td><td>Listen on all interfaces.</td></tr>
+  <tr><td>NIFI_WEB_HTTP_PORT</td><td>8080</td><td>Serve the UI over plain HTTP on 8080.</td></tr>
+  <tr><td>NIFI_WEB_HTTPS_PORT</td><td>"" (blank)</td><td>Must be explicitly blanked or the image reverts to HTTPS and demands a keystore.</td></tr>
+  <tr><td>NIFI_SECURITY_KEYSTORE...</td><td>"" (blank)</td><td>All keystore/truststore vars cleared so NiFi doesn't try to load certs.</td></tr>
+  <tr><td>NIFI_WEB_PROXY_CONTEXT_PATH</td><td>/nifi</td><td>Tells NiFi it's served under the <code class="inline">/nifi</code> path prefix behind a proxy.</td></tr>
+  <tr><td>NIFI_WEB_PROXY_HOST</td><td>localhost:8080,localhost</td><td>Whitelists the Host headers the proxy will send, or NiFi rejects the request.</td></tr>
+  <tr><td>NIFI_ZK_CONNECT_STRING</td><td>zookeeper-nifi:2181</td><td>Points NiFi's state management at the dedicated ZooKeeper.</td></tr>
+</table>
+
+<div class="box">
+  <div class="box-title">Official references</div>
+  <p style="margin:0">NiFi docs: <a class="ref" href="https://nifi.apache.org/documentation/">nifi.apache.org/documentation</a> · Docker image: <a class="ref" href="https://hub.docker.com/r/apache/nifi">hub.docker.com/r/apache/nifi</a> · Admin guide (proxy config): <a class="ref" href="https://nifi.apache.org/docs/nifi-docs/html/administration-guide.html">Administration Guide</a></p>
+</div>
+
+<!-- ===================== MESSAGE-API ===================== -->
+<h2 id="message-api">message-api</h2>
+<span class="svc-tag"><span class="dot" style="background:#8a3ffc"></span> message-api ×3</span>
+<span class="svc-tag">FastAPI · kafka-python-ng</span>
+<dl class="meta-grid">
+  <dt>role</dt><dd>The single ingress for all messages: text, JSON, and binary uploads</dd>
+  <dt>replicas</dt><dd>3 (load-balanced by NGINX via Docker DNS)</dd>
+  <dt>produces to</dt><dd>Kafka topic <code class="inline">grocery.&lt;dataset&gt;</code></dd>
+  <dt>binary path</dt><dd>file → MinIO, metadata → <code class="inline">grocery.binary</code></dd>
+</dl>
+<p>A FastAPI app that validates an incoming message, wraps it with metadata, and produces it to the matching Kafka topic. Binary files are streamed into MinIO and only their metadata flows through Kafka (Kafka is for events, not large blobs). Each response includes <code class="inline">served_by</code> — the container hostname — so you can watch the load balancer rotate across the three replicas.</p>
+
+<button class="more-btn" onclick="openModal('kafka-python-ng')">Show more: why kafka-python-<i>ng</i>?</button>
+<button class="more-btn" onclick="openModal('lazy-producer')">Show more: the lazy producer pattern</button>
+
+<table class="cfg">
+  <tr><th>Env var</th><th>Value</th><th>Purpose</th></tr>
+  <tr><td>KAFKA_BOOTSTRAP</td><td>kafka1:29092,kafka2:29092,kafka3:29092</td><td>Seed brokers the producer connects to (it discovers the rest).</td></tr>
+  <tr><td>MINIO_ENDPOINT</td><td>minio:9000</td><td>Where binary uploads are stored.</td></tr>
+  <tr><td>MINIO_BUCKET</td><td>grocery-uploads</td><td>Bucket created on first use.</td></tr>
+  <tr><td>deploy.replicas</td><td>3</td><td>Three identical instances behind the load balancer.</td></tr>
+</table>
+
+<h3>Code, line by line</h3>
+<div class="code">
+  <div class="filename"><span class="fdot"></span> services/message-api/app/main.py</div>
+  <pre>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">22</span><span class="src"><span class="tok-kw">from</span> kafka <span class="tok-kw">import</span> KafkaProducer</span></div>
+<div class="ann">Imports the producer client. The package is <code class="inline">kafka-python-ng</code> (a maintained fork) but it keeps the original <code class="inline">kafka</code> import name — see the "Show more" above for why the original fails on Python 3.12.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">25</span><span class="src"><span class="tok-fn">KAFKA_BOOTSTRAP</span> = os.getenv(<span class="tok-str">"KAFKA_BOOTSTRAP"</span>, <span class="tok-str">"kafka1:29092"</span>)</span></div>
+<div class="ann">Reads the broker list from the environment (set in compose), with a sensible default. The producer only needs a few seed brokers; it learns the full cluster topology automatically.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">31</span><span class="src"><span class="tok-fn">HOSTNAME</span> = socket.gethostname()</span></div>
+<div class="ann">The container's hostname. Returned in every response as <code class="inline">served_by</code> — this is what lets you prove the load balancer is rotating across the three replicas (each has a different hostname).</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">33</span><span class="src"><span class="tok-fn">VALID_DATASETS</span> = {<span class="tok-str">"sales"</span>, <span class="tok-str">"inventory"</span>, <span class="tok-str">"vendor_delivery"</span>, ...}</span></div>
+<div class="ann">An allow-list of acceptable dataset names. A message for anything outside this set is rejected with HTTP 400 — preventing typos from silently creating junk topics.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">45</span><span class="src"><span class="tok-kw">def</span> <span class="tok-fn">get_producer</span>() -> KafkaProducer:</span></div>
+<div class="ann">A <b>lazy singleton</b>: the producer is created on first use and reused thereafter. This avoids a hard dependency on Kafka being reachable at import time, so the web app can start even if a broker is briefly slow.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">48</span><span class="src">        _producer = KafkaProducer(</span></div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">50</span><span class="src">            value_serializer=<span class="tok-kw">lambda</span> v: json.dumps(v).encode(<span class="tok-str">"utf-8"</span>),</span></div>
+<div class="ann">Every message we send is a Python dict; this serializer turns it into UTF-8 JSON bytes on the way out, so consumers receive clean JSON.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">51</span><span class="src">            acks=<span class="tok-str">"all"</span>,</span></div>
+<div class="ann"><b>Durability:</b> wait until <i>all</i> in-sync replicas confirm the write before considering it done. Combined with the broker's <code class="inline">min.insync.replicas=2</code>, an acknowledged message survives one broker failure.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">52</span><span class="src">            retries=<span class="tok-num">5</span>,</span></div>
+<div class="ann">Transient send failures are retried up to 5 times before surfacing an error — smooths over brief leader elections or network blips.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">92</span><span class="src"><span class="tok-kw">@app.post</span>(<span class="tok-str">"/api/messages"</span>)</span></div>
+<div class="ann">The main endpoint for text and JSON messages. FastAPI validates the body against the <code class="inline">Message</code> Pydantic model automatically.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">94</span><span class="src">    <span class="tok-kw">if</span> msg.dataset <span class="tok-kw">not in</span> VALID_DATASETS:</span></div>
+<div class="ann">First guard: reject unknown datasets with 400. Validation happens before we touch Kafka, so bad input never reaches the bus.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">99</span><span class="src">    payload = { <span class="tok-str">"id"</span>: str(uuid.uuid4()), <span class="tok-str">"dataset"</span>: ..., <span class="tok-str">"received_at"</span>: ... }</span></div>
+<div class="ann">Wraps the user's content with server-side metadata: a unique id, the dataset, a UTC timestamp, and <code class="inline">served_by</code>. This envelope is what actually gets published.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">117</span><span class="src">        fut = get_producer().send(topic, payload)</span></div>
+<div class="ann">Produces asynchronously — <code class="inline">send()</code> returns a future immediately and the client batches in the background.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">118</span><span class="src">        meta = fut.get(timeout=<span class="tok-num">10</span>)</span></div>
+<div class="ann">Blocks up to 10s for the broker's acknowledgement, then reads back the <b>partition</b> and <b>offset</b> the message landed at — returned to the caller as proof of where it was stored.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">132</span><span class="src"><span class="tok-kw">@app.post</span>(<span class="tok-str">"/api/upload"</span>)</span></div>
+<div class="ann">The binary path. Accepts a multipart file upload plus a <code class="inline">dataset</code> form field.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">143</span><span class="src">        get_minio().put_object(MINIO_BUCKET, object_key, ...)</span></div>
+<div class="ann">Streams the file bytes into MinIO under a unique object key. The large payload lives in object storage; only lightweight metadata goes on Kafka next.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">164</span><span class="src">        fut = get_producer().send(<span class="tok-str">"grocery.binary"</span>, payload)</span></div>
+<div class="ann">Publishes just the metadata (object key, filename, size, content-type) to the <code class="inline">grocery.binary</code> topic — so downstream consumers know a file arrived and where to find it.</div>
+  </pre>
+</div>
+<p class="hint">▸ Showing the meaningful lines; tap any to expand. Full file is 177 lines.</p>
+
+<div class="box">
+  <div class="box-title">References</div>
+  <p style="margin:0">FastAPI: <a class="ref" href="https://fastapi.tiangolo.com/">fastapi.tiangolo.com</a> · kafka-python-ng: <a class="ref" href="https://pypi.org/project/kafka-python-ng/">PyPI</a> · Producer config: <a class="ref" href="https://kafka.apache.org/documentation/#producerconfigs">Producer Configs</a> · MinIO Python SDK: <a class="ref" href="https://min.io/docs/minio/linux/developers/python/API.html">Python Client API</a></p>
+</div>
+
+<!-- ===================== INGEST-WORKER ===================== -->
+<h2 id="ingest-worker">ingest-worker</h2>
+<span class="svc-tag"><span class="dot" style="background:#8a3ffc"></span> ingest-worker</span>
+<span class="svc-tag">kafka-python-ng · psycopg2</span>
+<dl class="meta-grid">
+  <dt>role</dt><dd>Consumes every grocery topic and writes events to PostgreSQL</dd>
+  <dt>consumer group</dt><dd>grocery-ingest (lets you scale consumers later)</dd>
+  <dt>writes to</dt><dd><code class="inline">message_log</code> (all events) + typed tables for known datasets</dd>
+</dl>
+<p>The other half of the pipeline. It subscribes to all 12 topics, and for every message it (a) appends the raw event to a <code class="inline">message_log</code> audit table, and (b) for recognized datasets like sales or feedback, inserts a typed row into the proper table. It has retry loops so it survives the database or Kafka not being ready at the instant it starts.</p>
+
+<div class="code">
+  <div class="filename"><span class="fdot"></span> services/ingest-worker/app/main.py</div>
+  <pre>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">15</span><span class="src"><span class="tok-kw">from</span> kafka <span class="tok-kw">import</span> KafkaConsumer</span></div>
+<div class="ann">The consumer side of the same <code class="inline">kafka-python-ng</code> library used by message-api.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">20</span><span class="src"><span class="tok-fn">TOPICS</span> = [<span class="tok-str">"grocery.sales"</span>, <span class="tok-str">"grocery.inventory"</span>, ...]</span></div>
+<div class="ann">The full list of 12 topics this worker subscribes to — matching everything message-api can produce.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">28</span><span class="src"><span class="tok-kw">def</span> <span class="tok-fn">connect_db</span>():</span></div>
+<div class="ann">Wraps the Postgres connection in a retry loop (up to ~30 attempts with sleeps) so the worker waits patiently for the database during startup instead of crashing.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">~</span><span class="src">consumer = KafkaConsumer(*TOPICS, group_id=<span class="tok-str">"grocery-ingest"</span>, auto_offset_reset=<span class="tok-str">"earliest"</span>)</span></div>
+<div class="ann">Joins the <code class="inline">grocery-ingest</code> consumer group and starts from the <b>earliest</b> offset, so no historical messages are skipped on a fresh start. The group id means you could run multiple workers and Kafka would split the partitions among them.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">~</span><span class="src"><span class="tok-kw">for</span> message <span class="tok-kw">in</span> consumer:</span></div>
+<div class="ann">The main loop blocks waiting for messages and yields each one as it arrives — the classic Kafka consumer pattern.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">~</span><span class="src">cur.execute(<span class="tok-str">"INSERT INTO message_log ..."</span>)</span></div>
+<div class="ann">Every event is recorded in <code class="inline">message_log</code> (dataset, type, topic, JSON payload). Recognized datasets additionally get a typed insert (e.g. a real row in <code class="inline">sales</code>), wrapped in try/except so a malformed message can't halt the stream.</div>
+  </pre>
+</div>
+
+<div class="box">
+  <div class="box-title">References</div>
+  <p style="margin:0">Consumer config: <a class="ref" href="https://kafka.apache.org/documentation/#consumerconfigs">Consumer Configs</a> · Consumer groups: <a class="ref" href="https://kafka.apache.org/documentation/#intro_consumers">Consumers</a> · psycopg2: <a class="ref" href="https://www.psycopg.org/docs/">psycopg.org/docs</a></p>
+</div>
+
+<!-- ===================== ANALYTICS ===================== -->
+<h2 id="analytics">analytics</h2>
+<span class="svc-tag"><span class="dot" style="background:#009d9a"></span> analytics</span>
+<span class="svc-tag">FastAPI · pandas · scikit-learn</span>
+<dl class="meta-grid">
+  <dt>role</dt><dd>Reads PostgreSQL and computes KPIs, forecasts, SVG charts, reports, and what-if answers</dd>
+  <dt>internal port</dt><dd>8002 (reached via the dashboard's proxy)</dd>
+  <dt>modules</dt><dd>data · forecast · charts · reports · whatif</dd>
+</dl>
+<p>The analytical brain. It's a FastAPI app split into focused modules: <code class="inline">data.py</code> runs SQL + pandas to compute metrics, <code class="inline">forecast.py</code> uses scikit-learn linear regression for projections, <code class="inline">charts.py</code> hand-renders SVG (so charts export cleanly and follow the theme), <code class="inline">reports.py</code> bundles JSON reports, and <code class="inline">whatif.py</code> runs the retrieval-augmented LLM assistant.</p>
+
+<button class="more-btn" onclick="openModal('why-svg')">Show more: why hand-rolled SVG charts?</button>
+<button class="more-btn" onclick="openModal('transparent-forecast')">Show more: transparent forecasting</button>
+
+<table class="cfg">
+  <tr><th>Endpoint</th><th>Returns</th></tr>
+  <tr><td>/metrics/kpi</td><td>Headline numbers: revenue, gross/net profit, margin %, shrink %, growth</td></tr>
+  <tr><td>/metrics/profit/category</td><td>Profit and margin per category (with loss folded in)</td></tr>
+  <tr><td>/metrics/profit/shelf</td><td>Profit per linear foot of shelf space</td></tr>
+  <tr><td>/metrics/loss</td><td>Shrink broken down by cause and by category</td></tr>
+  <tr><td>/metrics/expiring · /lowstock · /vendors</td><td>Operational watchlists</td></tr>
+  <tr><td>/metrics/promotions · /ads · /feedback</td><td>Marketing ROI and customer sentiment</td></tr>
+  <tr><td>/forecast/demand · /forecast/profit</td><td>14-day demand &amp; 30-day profit projections (with what-if multipliers)</td></tr>
+  <tr><td>/charts/{name}.svg</td><td>Server-rendered SVG charts</td></tr>
+  <tr><td>/reports · /reports/{name}</td><td>Five bundled JSON reports</td></tr>
+  <tr><td>POST /whatif</td><td>LLM scenario answer grounded in retrieved facts</td></tr>
+</table>
+
+<div class="code">
+  <div class="filename"><span class="fdot"></span> services/analytics/app/data.py — engine setup</div>
+  <pre>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">8</span><span class="src"><span class="tok-fn">DATABASE_URL</span> = os.getenv(<span class="tok-str">"DATABASE_URL"</span>, ...).replace(<span class="tok-str">"postgresql://"</span>, <span class="tok-str">"postgresql+psycopg2://"</span>)</span></div>
+<div class="ann">Reads the connection string and rewrites the scheme so SQLAlchemy explicitly uses the psycopg2 driver. The double-write is harmless if it's already in that form.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">17</span><span class="src">        _engine = create_engine(DATABASE_URL, pool_pre_ping=<span class="tok-num">True</span>)</span></div>
+<div class="ann"><code class="inline">pool_pre_ping=True</code> tests each pooled connection with a lightweight ping before use, so a connection dropped by the database is transparently replaced instead of throwing.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">22</span><span class="src"><span class="tok-kw">def</span> <span class="tok-fn">df</span>(sql, params=<span class="tok-num">None</span>):</span></div>
+<div class="ann">A tiny helper that runs SQL and returns a pandas DataFrame — every metric function builds on this, keeping the SQL/pandas boundary clean.</div>
+  </pre>
+</div>
+
+<div class="code">
+  <div class="filename"><span class="fdot"></span> services/analytics/app/charts.py — empty-data guard</div>
+  <pre>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">~</span><span class="src"><span class="tok-kw">def</span> <span class="tok-fn">line_chart</span>(labels, series, ...):</span></div>
+<div class="ann">Charts are generated as raw SVG strings — no chart library — so they inherit the page's <code class="inline">currentColor</code> (theme-aware) and export as clean vectors.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">~</span><span class="src">    <span class="tok-kw">if not</span> labels <span class="tok-kw">or not</span> series <span class="tok-kw">or not</span> any(s.get(<span class="tok-str">"values"</span>) <span class="tok-kw">for</span> s <span class="tok-kw">in</span> series):</span></div>
+<div class="ann">An <b>empty-data guard</b>: if there's nothing to plot (e.g. before seeding), it returns a tidy "No data yet" placeholder instead of crashing on an empty list — which previously caused 500s on a fresh database.</div>
+  </pre>
+</div>
+
+<div class="box">
+  <div class="box-title">References</div>
+  <p style="margin:0">pandas: <a class="ref" href="https://pandas.pydata.org/docs/">pandas.pydata.org/docs</a> · scikit-learn LinearRegression: <a class="ref" href="https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LinearRegression.html">API</a> · SQLAlchemy engine: <a class="ref" href="https://docs.sqlalchemy.org/en/20/core/engines.html">Engine Configuration</a> · SVG: <a class="ref" href="https://developer.mozilla.org/en-US/docs/Web/SVG">MDN SVG</a></p>
+</div>
+
+<!-- ===================== DASHBOARD ===================== -->
+<h2 id="dashboard">dashboard</h2>
+<span class="svc-tag"><span class="dot" style="background:#009d9a"></span> dashboard</span>
+<span class="svc-tag">FastAPI · httpx · static HTML/Tailwind</span>
+<dl class="meta-grid">
+  <dt>role</dt><dd>Serves the IBM-styled UI and proxies analytics so the browser is single-origin</dd>
+  <dt>internal port</dt><dd>8003 (reached via the load balancer at <code class="inline">/</code>)</dd>
+  <dt>theming</dt><dd>Light/dark, JSON &amp; SVG export, role tabs</dd>
+</dl>
+<p>The dashboard server does two jobs: it serves the static HTML/JS UI, and it <b>proxies</b> analytics calls. The browser only ever talks to the dashboard's origin; <code class="inline">/proxy/&lt;path&gt;</code> forwards to the analytics service internally. This keeps the front-end on a single origin (no CORS) and hides the internal service from the browser.</p>
+
+<div class="code">
+  <div class="filename"><span class="fdot"></span> services/dashboard/app/main.py — the proxy</div>
+  <pre>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">~</span><span class="src"><span class="tok-kw">@app.api_route</span>(<span class="tok-str">"/proxy/{path:path}"</span>, methods=[<span class="tok-str">"GET"</span>, <span class="tok-str">"POST"</span>])</span></div>
+<div class="ann">A catch-all proxy route. Whatever path the browser requests under <code class="inline">/proxy/</code> is forwarded to the analytics service, so the UI can call analytics without the browser knowing analytics exists.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">~</span><span class="src">    <span class="tok-kw">async with</span> httpx.AsyncClient(timeout=<span class="tok-num">150</span>) <span class="tok-kw">as</span> client:</span></div>
+<div class="ann">A 150-second timeout, deliberately set <b>above</b> the analytics→Ollama timeout (90s) and <b>below</b> NGINX's (180s). This nesting guarantees that a slow what-if call returns analytics' graceful fallback rather than the proxy emitting a 504.</div>
+  </pre>
+</div>
+
+<div class="box ok">
+  <div class="box-title">The font-size &amp; theme controls you're using</div>
+  <p style="margin:0">This very tutorial mirrors the dashboard's approach: a light/dark theme toggle driven by a <code class="inline">data-theme</code> attribute and CSS variables, and an A−/A+ control that scales a single <code class="inline">--base-font</code> variable so every element resizes together. All client-side, no reload.</p>
+</div>
+
+<div class="box">
+  <div class="box-title">References</div>
+  <p style="margin:0">httpx: <a class="ref" href="https://www.python-httpx.org/">python-httpx.org</a> · Tailwind CSS: <a class="ref" href="https://tailwindcss.com/docs">tailwindcss.com/docs</a> · IBM Carbon Design: <a class="ref" href="https://carbondesignsystem.com/">carbondesignsystem.com</a></p>
+</div>
+
+<!-- ===================== LB ===================== -->
+<h2 id="lb">NGINX load balancer</h2>
+<span class="svc-tag"><span class="dot" style="background:#1192e8"></span> lb</span>
+<span class="svc-tag">nginx:1.27-alpine</span>
+<dl class="meta-grid">
+  <dt>role</dt><dd>Single entry point on port 8080; routes URL prefixes and load-balances message-api</dd>
+  <dt>host port</dt><dd>8080 → 80</dd>
+</dl>
+<p>One front door for everything. NGINX routes by URL prefix to the right internal service and round-robins requests across the three message-api replicas. Because it uses Docker's embedded DNS resolver, it picks up all replicas automatically.</p>
+
+<button class="more-btn" onclick="openModal('nginx-resolver')">Show more: the Docker DNS resolver trick</button>
+
+<table class="cfg">
+  <tr><th>Location</th><th>Routes to</th><th>Notes</th></tr>
+  <tr><td>/</td><td>dashboard:8003</td><td>The UI (and its /proxy to analytics). 180s read timeout for slow what-if calls.</td></tr>
+  <tr><td>/api/</td><td>message-api:8001</td><td>Round-robined across 3 replicas via Docker DNS.</td></tr>
+  <tr><td>/analytics/</td><td>analytics:8002</td><td>Path rewritten to strip the prefix; 180s timeout.</td></tr>
+  <tr><td>/nifi/</td><td>nifi:8080</td><td>WebSocket + X-Forwarded headers for NiFi behind a path prefix.</td></tr>
+  <tr><td>/healthz</td><td>(returns "ok")</td><td>Liveness probe for the LB itself.</td></tr>
+</table>
+
+<div class="code">
+  <div class="filename"><span class="fdot"></span> nginx/nginx.conf</div>
+  <pre>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">~</span><span class="src">resolver <span class="tok-num">127.0.0.11</span> valid=<span class="tok-num">10s</span> ipv6=off;</span></div>
+<div class="ann"><code class="inline">127.0.0.11</code> is Docker's built-in DNS. Re-resolving every 10s means NGINX discovers all three message-api replica IPs dynamically — without this, it would resolve once at startup and pin to a single replica.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">~</span><span class="src">client_max_body_size <span class="tok-num">100M</span>;</span></div>
+<div class="ann">Raises the upload limit so binary file uploads through <code class="inline">/api/upload</code> aren't rejected (NGINX defaults to a tiny 1MB).</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">~</span><span class="src"><span class="tok-fn">location</span> /api/ { <span class="tok-fn">set</span> $api message-api:8001; proxy_pass http://$api; }</span></div>
+<div class="ann">Using a <code class="inline">set</code> variable for the upstream forces NGINX to use the resolver above at request time (rather than caching one IP at boot), which is what enables the round-robin across replicas.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">~</span><span class="src"><span class="tok-fn">location</span> /analytics/ { rewrite ^/analytics/(.*) /$1 break; ... }</span></div>
+<div class="ann">Strips the <code class="inline">/analytics/</code> prefix before forwarding, so the analytics service sees clean paths like <code class="inline">/metrics/kpi</code>.</div>
+  </pre>
+</div>
+
+<div class="box">
+  <div class="box-title">References</div>
+  <p style="margin:0">NGINX proxy module: <a class="ref" href="https://nginx.org/en/docs/http/ngx_http_proxy_module.html">ngx_http_proxy_module</a> · resolver directive: <a class="ref" href="https://nginx.org/en/docs/http/ngx_http_core_module.html#resolver">resolver</a> · Docker embedded DNS: <a class="ref" href="https://docs.docker.com/engine/network/#dns-services">DNS services</a></p>
+</div>
+
+<!-- ===================== POSTGRES ===================== -->
+<h2 id="postgres">PostgreSQL</h2>
+<span class="svc-tag"><span class="dot" style="background:#24a148"></span> postgres</span>
+<span class="svc-tag">postgres:16-alpine</span>
+<dl class="meta-grid">
+  <dt>role</dt><dd>The system of record — all operational data lives here</dd>
+  <dt>host port</dt><dd>5432</dd>
+  <dt>schema</dt><dd>11 tables, auto-loaded on first boot</dd>
+</dl>
+<p>A standard PostgreSQL 16 instance. On first startup it runs <code class="inline">init/schema.sql</code> (mounted into the image's init directory) to create the 11 tables. The ingest-worker writes here; analytics and the seed job read and write here.</p>
+
+<table class="cfg">
+  <tr><th>Setting</th><th>Value</th><th>What it does</th></tr>
+  <tr><td>POSTGRES_USER / PASSWORD / DB</td><td>grocery / grocery_pw / grocery</td><td>Bootstraps the role and database on first run.</td></tr>
+  <tr><td>volume mount</td><td>./init/schema.sql → /docker-entrypoint-initdb.d/</td><td>Any <code class="inline">.sql</code> here runs automatically the first time the data directory is empty.</td></tr>
+  <tr><td>healthcheck</td><td>pg_isready -U grocery</td><td>Marks the DB healthy only once it accepts connections — gates the seed and ingest-worker.</td></tr>
+  <tr><td>volume</td><td>pg-data</td><td>Persists data across restarts.</td></tr>
+</table>
+
+<h4>The 11 tables</h4>
+<p><code class="inline">shelves</code>, <code class="inline">vendors</code>, <code class="inline">products</code>, <code class="inline">sales</code>, <code class="inline">inventory</code> (with expire dates), <code class="inline">vendor_deliveries</code>, <code class="inline">customer_feedback</code>, <code class="inline">ad_programs</code>, <code class="inline">discount_programs</code>, <code class="inline">loss_events</code>, and <code class="inline">message_log</code> (the raw event audit trail).</p>
+
+<div class="box warn">
+  <div class="box-title">⚠ The init script runs only once</div>
+  <p style="margin:0"><code class="inline">/docker-entrypoint-initdb.d</code> scripts execute <b>only when the data directory is empty</b>. If you change the schema, you must wipe the volume (<code class="inline">docker compose down -v</code>) for it to re-run.</p>
+</div>
+
+<div class="box">
+  <div class="box-title">References</div>
+  <p style="margin:0">PostgreSQL docs: <a class="ref" href="https://www.postgresql.org/docs/16/">postgresql.org/docs/16</a> · Official image (init scripts): <a class="ref" href="https://hub.docker.com/_/postgres">hub.docker.com/_/postgres</a></p>
+</div>
+
+<!-- ===================== MINIO ===================== -->
+<h2 id="minio">MinIO</h2>
+<span class="svc-tag"><span class="dot" style="background:#f1c21b"></span> minio</span>
+<span class="svc-tag">S3-compatible object store</span>
+<dl class="meta-grid">
+  <dt>role</dt><dd>Stores uploaded binary files (Kafka carries only their metadata)</dd>
+  <dt>host ports</dt><dd>9000 (S3 API), 9001 (web console)</dd>
+  <dt>bucket</dt><dd>grocery-uploads (created by message-api on first use)</dd>
+</dl>
+<p>MinIO is an S3-compatible object store. When you upload a file to <code class="inline">/api/upload</code>, the message-api streams the bytes here and publishes only the object key + metadata to Kafka. This keeps large blobs out of the event log (Kafka is optimized for many small messages, not big files).</p>
+
+<table class="cfg">
+  <tr><th>Setting</th><th>Value</th><th>What it does</th></tr>
+  <tr><td>MINIO_ROOT_USER / PASSWORD</td><td>minioadmin / minioadmin</td><td>Admin credentials (demo defaults — change for real use).</td></tr>
+  <tr><td>command</td><td>server /data --console-address ":9001"</td><td>Serves the S3 API on 9000 and the web console on 9001.</td></tr>
+  <tr><td>healthcheck</td><td>mc ready local</td><td>Confirms the server is accepting requests.</td></tr>
+</table>
+
+<div class="box">
+  <div class="box-title">References</div>
+  <p style="margin:0">MinIO docs: <a class="ref" href="https://min.io/docs/minio/container/index.html">min.io/docs</a> · S3 API compatibility: <a class="ref" href="https://min.io/docs/minio/linux/developers/python/API.html">SDK reference</a></p>
+</div>
+
+<!-- ===================== SEED ===================== -->
+<h2 id="seed">seed</h2>
+<span class="svc-tag"><span class="dot" style="background:#6f6f6f"></span> seed</span>
+<span class="svc-tag">python:3.12-slim · one-shot</span>
+<dl class="meta-grid">
+  <dt>role</dt><dd>Loads ~90 days of demo data with built-in business scenarios, then exits</dd>
+  <dt>idempotent</dt><dd>Skips if data already exists (unless SEED_FORCE=1)</dd>
+  <dt>gates</dt><dd>analytics waits for this to complete, so the dashboard has data on first load</dd>
+</dl>
+<p>So the dashboard isn't empty on first launch, this one-shot container installs psycopg2 and runs <code class="inline">scripts/seed_data.py</code> as soon as PostgreSQL is healthy. The analytics service waits for it to finish. The seed is idempotent — it skips if sales rows already exist.</p>
+
+<h4>The five built-in scenarios</h4>
+<p>The data is deliberately shaped so each dashboard view tells a story:</p>
+<table class="cfg">
+  <tr><th>Scenario</th><th>What it demonstrates</th></tr>
+  <tr><td>Margin squeeze (Meat)</td><td>Vendor cost ramps up ~18% over the window → Meat shows the lowest, eroding margin.</td></tr>
+  <tr><td>Shrink problem (Produce)</td><td>Heavy spoilage loss makes Produce dominate the loss breakdown; store shrink exceeds the warning threshold.</td></tr>
+  <tr><td>Winning promo (Snack Attack)</td><td>20%-off Snacks with strong lift → clearly positive incremental margin.</td></tr>
+  <tr><td>Losing promo (Frozen Fest)</td><td>Deep 30%-off Frozen with weak lift → negative incremental margin.</td></tr>
+  <tr><td>Expiry crisis (Dairy + Bakery)</td><td>A cluster of stock expiring within days lights up "expiring soon."</td></tr>
+</table>
+
+<div class="code">
+  <div class="filename"><span class="fdot"></span> scripts/seed_data.py — idempotency guard</div>
+  <pre>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">~</span><span class="src"><span class="tok-kw">def</span> <span class="tok-fn">already_seeded</span>(cur):</span></div>
+<div class="ann">Checks whether the <code class="inline">sales</code> table already has rows. If so — and <code class="inline">SEED_FORCE</code> isn't set — the script prints a message and exits without touching anything, so restarting the container is a no-op.</div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">~</span><span class="src"><span class="tok-fn">SCENARIOS</span> = { <span class="tok-str">"margin_squeeze_category"</span>: <span class="tok-str">"Meat"</span>, ... }</span></div>
+<div class="ann">All scenario "knobs" live in one dict at the top of the file — change a category or a discount here and the generated data (and the stories the dashboard tells) change accordingly.</div>
+  </pre>
+</div>
+<p>To regenerate from scratch: <code class="inline">docker compose run --rm -e SEED_FORCE=1 seed</code></p>
+
+<!-- ===================== CHROMADB ===================== -->
+<h2 id="chromadb">ChromaDB</h2>
+<span class="svc-tag"><span class="dot" style="background:#f1c21b"></span> chromadb</span>
+<span class="svc-tag">chromadb/chroma:0.5.5</span>
+<dl class="meta-grid">
+  <dt>role</dt><dd>Vector store for the what-if assistant's retrieval step (RAG)</dd>
+  <dt>port</dt><dd>8000</dd>
+  <dt>collection</dt><dd>grocery_facts</dd>
+</dl>
+<p>ChromaDB is a vector database. The analytics service turns each store metric into a short fact sentence, embeds it, and stores it in ChromaDB. When you ask a what-if question, it retrieves the most semantically relevant facts to feed the LLM — this is the "retrieval" in retrieval-augmented generation.</p>
+
+<button class="more-btn" onclick="openModal('rag')">Show more: how RAG works here</button>
+
+<table class="cfg">
+  <tr><th>Setting</th><th>Value</th><th>What it does</th></tr>
+  <tr><td>IS_PERSISTENT</td><td>TRUE</td><td>Persists the vector index to a volume across restarts.</td></tr>
+  <tr><td>ANONYMIZED_TELEMETRY</td><td>FALSE</td><td>Disables Chroma's usage telemetry.</td></tr>
+</table>
+
+<div class="box ok">
+  <div class="box-title">Graceful degradation</div>
+  <p style="margin:0">If ChromaDB is unreachable, the assistant doesn't fail — analytics falls back to using <i>all</i> metric facts directly (no vector search). The endpoint always returns a useful, grounded answer.</p>
+</div>
+
+<div class="box">
+  <div class="box-title">References</div>
+  <p style="margin:0">Chroma docs: <a class="ref" href="https://docs.trychroma.com/">docs.trychroma.com</a> · Embeddings &amp; collections: <a class="ref" href="https://docs.trychroma.com/docs/collections/manage-collections">Collections</a></p>
+</div>
+
+<!-- ===================== OLLAMA ===================== -->
+<h2 id="ollama">Ollama</h2>
+<span class="svc-tag"><span class="dot" style="background:#f1c21b"></span> ollama + ollama-pull</span>
+<span class="svc-tag">llama3.2</span>
+<dl class="meta-grid">
+  <dt>role</dt><dd>Runs a local LLM that answers what-if questions over the retrieved facts</dd>
+  <dt>port</dt><dd>11434</dd>
+  <dt>model</dt><dd>llama3.2 (pulled &amp; warmed by a one-shot helper)</dd>
+</dl>
+<p>Ollama runs large language models locally — fully offline, no external API. A companion one-shot <code class="inline">ollama-pull</code> container downloads the llama3.2 model and runs a tiny warm-up inference so it's resident in memory before the first real question. The analytics what-if endpoint sends the model a prompt built from the retrieved store facts.</p>
+
+<button class="more-btn" onclick="openModal('cold-model')">Show more: the cold-model timeout &amp; how to check it</button>
+
+<table class="cfg">
+  <tr><th>Item</th><th>Detail</th></tr>
+  <tr><td>ollama-pull entrypoint</td><td>pulls llama3.2, then runs a warm-up generation with <code class="inline">--keepalive 30m</code></td></tr>
+  <tr><td>keep_alive (in analytics)</td><td>30m — keeps the model loaded between questions so there's no repeated cold start</td></tr>
+  <tr><td>timeout ladder</td><td>Ollama call 90s &lt; dashboard proxy 150s &lt; NGINX 180s</td></tr>
+</table>
+
+<div class="box">
+  <div class="box-title">References</div>
+  <p style="margin:0">Ollama: <a class="ref" href="https://ollama.com/">ollama.com</a> · API: <a class="ref" href="https://github.com/ollama/ollama/blob/main/docs/api.md">REST API docs</a> · Model library: <a class="ref" href="https://ollama.com/library/llama3.2">llama3.2</a></p>
+</div>
+
+<hr>
+
+<!-- ===================== LIFECYCLE ===================== -->
+<h2 id="lifecycle">Request lifecycles — how the services work together</h2>
+<p>The configuration makes more sense once you trace a request end to end. Here are the three main flows.</p>
+
+<h3>1. Sending a message (text or JSON)</h3>
+<p>You <code class="inline">POST</code> to <code class="inline">http://localhost:8080/api/messages</code>. <b>NGINX</b> matches the <code class="inline">/api/</code> location and round-robins to one of the three <b>message-api</b> replicas (you'll see different <code class="inline">served_by</code> hostnames). That replica validates the dataset, wraps your content in a metadata envelope, and <b>produces</b> it to the matching <b>Kafka</b> topic with <code class="inline">acks=all</code>. Kafka replicates it across brokers and returns the partition + offset. Meanwhile the <b>ingest-worker</b>, subscribed to that topic, <b>consumes</b> the message and <b>inserts</b> it into <b>PostgreSQL</b> (both the audit log and, for known datasets, a typed table).</p>
+
+<h3>2. Uploading a binary file</h3>
+<p>You <code class="inline">POST</code> a multipart file to <code class="inline">/api/upload</code>. NGINX (with its raised 100MB body limit) forwards to a message-api replica, which <b>streams the bytes into MinIO</b> under a unique object key and <b>publishes only the metadata</b> (key, filename, size) to the <code class="inline">grocery.binary</code> topic. The large payload never touches Kafka — the event log stays lean.</p>
+
+<h3>3. Asking a what-if question</h3>
+<p>The browser <code class="inline">POST</code>s to the <b>dashboard</b>'s <code class="inline">/proxy/whatif</code>, which forwards to <b>analytics</b>. Analytics retrieves the most relevant store facts from <b>ChromaDB</b> (or falls back to all facts if Chroma is down), builds a prompt, and asks <b>Ollama</b> to reason over them. The answer flows back through the proxy to the UI. The nested timeouts ensure that even a slow model degrades to a grounded fallback rather than an error.</p>
+
+<button class="more-btn ghost" onclick="openModal('see-it')">Show more: try each flow yourself (curl commands)</button>
+
+<!-- ===================== STARTUP ===================== -->
+<h2 id="startup">Startup order</h2>
+<p>Compose's <code class="inline">depends_on</code> with health conditions sequences the boot so nothing races a dependency that isn't ready:</p>
+<ol>
+  <li><b>zookeeper-nifi</b> and the three <b>kafka</b> brokers start. Kafka forms its KRaft quorum among themselves.</li>
+  <li>Once the brokers are <i>healthy</i>, <b>kafka-setup</b> creates the topics and exits.</li>
+  <li><b>postgres</b> starts and runs the schema; once <i>healthy</i>, the <b>seed</b> job loads demo data and exits.</li>
+  <li><b>analytics</b> waits for both postgres <i>and</i> the seed job to complete — so it never serves an empty database.</li>
+  <li><b>ollama</b> starts; <b>ollama-pull</b> downloads and warms the model.</li>
+  <li><b>message-api</b>, <b>ingest-worker</b>, <b>dashboard</b>, and finally <b>nifi</b> come up.</li>
+  <li><b>lb</b> (NGINX) starts last, once its upstreams exist, and opens port 8080.</li>
+</ol>
+
+<div class="box">
+  <div class="box-title">Quick start</div>
+  <p style="margin:0"><code class="inline">docker compose up -d --build</code> → wait for <code class="inline">ollama-pull</code> to finish the model download → open <code class="inline">http://localhost:8080</code>. The dashboard already has data thanks to the auto-seed.</p>
+</div>
+
+<div class="footer">
+  <p>Grocery Operations Intelligence Platform — service tutorial. Generated as a static, single-file HTML page (IBM Carbon-inspired theme). All explanations reflect the configuration in <code class="inline">docker-compose.yml</code> and the service source. Tap any underlined code line to expand; use A−/A+ to scale text from small to very large; toggle light/dark in the top bar.</p>
+</div>
+
+</main>
+</div>
+
+<!-- ===================== MODAL ===================== -->
+<div class="modal-overlay" id="modal" onclick="if(event.target===this)closeModal()">
+  <div class="modal" role="dialog" aria-modal="true">
+    <div class="modal-head"><h3 id="modalTitle">Detail</h3><button class="x" onclick="closeModal()" aria-label="Close">×</button></div>
+    <div class="modal-body" id="modalBody"></div>
+  </div>
+</div>
+
+<script>
+/* ===== theme ===== */
+function toggleTheme(){
+  const h=document.documentElement;
+  const dark = h.getAttribute('data-theme')==='dark';
+  h.setAttribute('data-theme', dark?'light':'dark');
+  document.getElementById('themeGlyph').textContent = dark?'◐':'◑';
+  document.getElementById('themeLabel').textContent = dark?'Dark':'Light';
+}
+/* ===== font scaler: 14pt .. 36pt (user-specified). Displayed in pt; the
+   page renders in px via 1pt = 1.3333px, starting near a comfortable 12pt. ===== */
+let fontPt = 12;
+const FONT_MIN = 14, FONT_MAX = 36;   /* the A+/A− bounds, per the spec */
+function applyFont(){
+  const px = (fontPt * 4 / 3).toFixed(1);   /* 1pt = 1.3333px */
+  document.documentElement.style.setProperty('--base-font', px+'px');
+  document.getElementById('fontVal').innerHTML = fontPt+'&nbsp;pt';
+}
+function bumpFont(d){
+  fontPt = Math.max(FONT_MIN - 2, Math.min(FONT_MAX, fontPt+d));
+  applyFont();
+}
+/* ===== mobile toc ===== */
+function toggleToc(){ document.getElementById('toc').classList.toggle('open'); }
+/* ===== line annotations ===== */
+function toggleLine(el){
+  const ann = el.nextElementSibling;
+  if(ann && ann.classList.contains('ann')) ann.classList.toggle('open');
+}
+/* ===== modals ===== */
+const MODALS = {};
+function openModal(id){
+  const m = MODALS[id];
+  if(!m) return;
+  document.getElementById('modalTitle').textContent = m.title;
+  document.getElementById('modalBody').innerHTML = m.body;
+  document.getElementById('modal').classList.add('open');
+}
+function closeModal(){ document.getElementById('modal').classList.remove('open'); }
+document.addEventListener('keydown', e=>{ if(e.key==='Escape') closeModal(); });
+
+Object.assign(MODALS, {
+  'why-events': { title: 'Why an event-driven architecture?', body: `
+    <p>Instead of services calling each other directly, producers append <b>events</b> to Kafka and consumers read them independently. This <b>decouples</b> the parts: the message-api doesn't know or care who consumes its events, and the ingest-worker can be restarted, scaled, or replaced without touching the API.</p>
+    <p>It also gives you a <b>durable buffer</b>. If the database is briefly down, messages pile up safely in Kafka and the worker catches up when it recovers — nothing is lost. And because the log is replayable, you could add a brand-new consumer tomorrow and have it process all historical events from the beginning.</p>` },
+
+  'why-single-entry': { title: 'Why one load balancer?', body: `
+    <p>Only NGINX publishes a host port (8080). Every other service is on the internal Docker network, reachable only through the LB. This means the browser deals with a <b>single origin</b> — no CORS headaches, and the internal topology stays hidden.</p>
+    <p>It also gives one place to handle cross-cutting concerns: the upload size limit, the long timeouts for the LLM path, and round-robin load-balancing of the three message-api replicas all live in one config file.</p>` },
+
+  'kafka-concepts': { title: 'Topics, partitions & offsets', body: `
+    <p>A <b>topic</b> is a named stream of events (here, one per dataset — <code>grocery.sales</code>, <code>grocery.inventory</code>, …). Producers append to the end; the data is retained for a configured time regardless of who has read it.</p>
+    <p>Each topic is split into <b>partitions</b> (3 here). Partitions are the unit of parallelism: different consumers in a group can each own different partitions and process them simultaneously. Ordering is guaranteed <i>within</i> a partition, not across them.</p>
+    <p>Every message in a partition gets a monotonically increasing <b>offset</b> — its position in the log. Consumers track which offset they've reached, so they can resume exactly where they left off after a restart. The message-api returns the partition and offset of each write as a receipt.</p>` },
+
+  'kraft': { title: 'What is KRaft, and why combined mode?', body: `
+    <p>Historically Kafka stored its cluster metadata (which topics exist, where partitions live, who's the leader) in a separate ZooKeeper ensemble. <b>KRaft</b> (Kafka Raft) removes that dependency — the brokers themselves run the Raft consensus protocol to manage metadata. Fewer moving parts, faster failover, and ZooKeeper is being removed from Kafka entirely in version 4.0.</p>
+    <p>In KRaft, some nodes are <b>controllers</b> (they vote in the metadata quorum) and some are <b>brokers</b> (they store data). In <b>combined mode</b> — used here — each node plays both roles. That's ideal for a small 3-node demo: you get a 3-voter controller quorum (tolerating one failure) without running separate controller containers. For large production clusters, Confluent recommends dedicated controller nodes so metadata and data workloads don't compete.</p>` },
+
+  'listeners': { title: 'The three listeners explained', body: `
+    <p>A Kafka broker can listen on multiple sockets, each for a different audience. This cluster defines three:</p>
+    <p><b>CONTROLLER (29093)</b> — carries the KRaft Raft traffic between controllers. Internal to the cluster; never advertised to clients.</p>
+    <p><b>INTERNAL (29092)</b> — used by brokers to talk to each other and by in-cluster clients (message-api, ingest-worker, kafka-setup). Advertised as <code>kafka1:29092</code> etc. using Docker DNS names.</p>
+    <p><b>EXTERNAL (9092/9093/9094)</b> — the host-facing port so tools on your laptop can connect. Advertised as <code>localhost:909x</code>.</p>
+    <p>The reason two address sets exist: a container and your laptop need <i>different</i> hostnames to reach the same broker. <code>advertised.listeners</code> is how Kafka tells each client which address to use — the single most common source of "it connects but then can't produce" confusion.</p>` },
+
+  'kafka-python-ng': { title: 'Why kafka-python-ng?', body: `
+    <p>The original <code>kafka-python</code> (2.0.2) imports <code>kafka.vendor.six.moves</code>, a module that was <b>removed in Python 3.12</b>. On the 3.12 base image, simply importing it crashes with <code>ModuleNotFoundError</code>.</p>
+    <p><code>kafka-python-ng</code> is the actively maintained fork that fixes 3.12 compatibility. It's a <b>drop-in replacement</b> — the import is still <code>from kafka import KafkaProducer</code> — so no application code changes were needed, only the dependency.</p>` },
+
+  'lazy-producer': { title: 'The lazy producer pattern', body: `
+    <p>The Kafka producer (and MinIO client) are created on <b>first use</b>, not at import time, via a small <code>get_producer()</code> function that caches a module-level singleton.</p>
+    <p>Why it matters: if the producer were built at import, the web app couldn't even start unless Kafka was already reachable — a startup-ordering trap. Lazy creation lets FastAPI boot immediately and only contacts Kafka when the first message actually arrives, by which time the brokers are up. The singleton means we reuse one connection pool rather than reconnecting per request.</p>` },
+
+  'why-svg': { title: 'Why hand-rolled SVG charts?', body: `
+    <p>The analytics service builds chart SVG as plain strings rather than using a charting library. Two payoffs:</p>
+    <p><b>Theme-aware:</b> the SVG uses <code>currentColor</code>, so the same chart renders correctly in both light and dark mode and inherits the page's text color — no separate theming logic.</p>
+    <p><b>Clean export:</b> because it's real vector SVG, the dashboard's "export SVG" produces a crisp, scalable file suitable for a slide deck, with no canvas rasterization or library runtime.</p>
+    <p>The trade-off is that the chart code handles its own layout math — including the empty-data guard that returns a "No data yet" placeholder instead of dividing by zero on an empty dataset.</p>` },
+
+  'transparent-forecast': { title: 'Transparent forecasting', body: `
+    <p>Forecasts use scikit-learn's <b>LinearRegression</b> rather than a black-box model. Demand is a linear trend times a day-of-week seasonal factor; profit projection is a linear fit on daily gross profit with optional what-if multipliers.</p>
+    <p>The point is <b>explainability</b>: the endpoint returns the model's slope and the assumptions alongside the numbers, so an investor or manager can see exactly how a projection was derived rather than trusting an opaque forecast. The what-if multipliers (e.g. "revenue ×1.05") let you ask "what if sales grew 5%?" and watch the projection move.</p>` },
+
+  'nginx-resolver': { title: 'The Docker DNS resolver trick', body: `
+    <p>When you scale message-api to 3 replicas, Docker's DNS returns <i>all three</i> IPs for the name <code>message-api</code>. But NGINX, by default, resolves an upstream hostname <b>once at startup</b> and caches it — pinning all traffic to a single replica.</p>
+    <p>The fix is two-fold: point NGINX at Docker's embedded resolver (<code>127.0.0.11</code>) with a short <code>valid=10s</code> TTL, and reference the upstream through a <code>set $api …</code> variable. Using a variable forces NGINX to re-resolve the name at <b>request time</b>, so it cycles through all replica IPs — true round-robin load balancing that adapts as replicas come and go.</p>` },
+
+  'zk-quorum': { title: 'Why a single ZooKeeper node (not two)?', body: `
+    <p>ZooKeeper uses majority quorum. A <b>two-node</b> ensemble has a quorum of 2 — meaning it tolerates <i>zero</i> failures (lose either node and you're below quorum). It's actually <i>less</i> available than a single node, and ensembles should always be an odd number (1, 3, 5).</p>
+    <p>Since this ZooKeeper only serves a single standalone NiFi, one node is the right call: it always has quorum, needs no inter-node election config, and avoids the "connection refused until quorum forms" failure mode that bites misconfigured 2-node setups. For a fault-tolerant production NiFi cluster you'd run 3 or 5.</p>` },
+
+  'nifi-http': { title: 'The HTTPS-disable gotcha', body: `
+    <p>The official NiFi image defaults to <b>HTTPS</b> and, on startup, will generate or demand a keystore. To run it over plain HTTP for local use, it's not enough to set the HTTP port — you must also <b>explicitly blank</b> the HTTPS host/port and all the keystore/truststore variables. Otherwise NiFi's start script re-applies the HTTPS defaults and fails looking for a certificate.</p>
+    <p>On top of that, NiFi is strict about proxies: served under a path prefix (<code>/nifi</code>), it needs <code>NIFI_WEB_PROXY_CONTEXT_PATH</code> set and the incoming Host header whitelisted via <code>NIFI_WEB_PROXY_HOST</code>, or it rejects the request. The NGINX <code>/nifi</code> location also forwards the WebSocket upgrade and <code>X-Forwarded-*</code> headers the UI needs.</p>` },
+
+  'rag': { title: 'How retrieval-augmented generation works here', body: `
+    <p>An LLM only knows what's in its training data — it has no idea about <i>your</i> store's numbers. RAG bridges that gap by <b>retrieving</b> relevant facts and putting them in the prompt.</p>
+    <p>The flow: analytics turns each metric into a short fact sentence ("Category Meat: margin 14.7%…"), embeds them, and stores them in <b>ChromaDB</b>. When you ask "what if we cut Produce shrink in half?", it embeds your question, finds the most semantically similar facts via vector search, and builds a prompt that says "using ONLY these facts, answer…". <b>Ollama</b> then reasons over real numbers rather than hallucinating.</p>
+    <p>If ChromaDB is down, it skips vector search and feeds <i>all</i> the facts directly — the set is small enough that the model can still reason over the whole thing.</p>` },
+
+  'cold-model': { title: 'The cold-model timeout & how to check it', body: `
+    <p>The first inference loads the model into memory, which on CPU can take a while. If you ask before it's ready, you might see a slow response or a one-off timeout (the dreaded 504). The <code>ollama-pull</code> job warms the model on startup, and <code>keep_alive: 30m</code> keeps it resident so subsequent questions are fast.</p>
+    <p>To check the what-if path piece by piece:</p>
+    <p><b>1.</b> <code>docker compose logs ollama-pull</code> — is the model pulled and warmed?<br>
+    <b>2.</b> <code>curl http://localhost:11434/api/tags</code> — is the model installed?<br>
+    <b>3.</b> <code>curl http://localhost:11434/api/generate -d '{"model":"llama3.2","prompt":"ok","stream":false}'</code> — does Ollama respond directly?<br>
+    <b>4.</b> <code>curl -X POST http://localhost:8080/analytics/whatif -H 'content-type: application/json' -d '{"question":"..."}'</code> — does analytics respond (bypassing the UI)?</p>
+    <p>If step 4 returns JSON with a <code>facts_used</code> list but the answer says "model is still warming up," Ollama just isn't loaded yet — retry shortly.</p>` },
+
+  'see-it': { title: 'Try each flow yourself', body: `
+    <p><b>Text message:</b></p>
+    <p><code>curl -X POST http://localhost:8080/api/messages -H 'Content-Type: application/json' -d '{"dataset":"text","type":"text","text":"morning shift note"}'</code></p>
+    <p><b>JSON message (a sale):</b></p>
+    <p><code>curl -X POST http://localhost:8080/api/messages -H 'Content-Type: application/json' -d '{"dataset":"sales","type":"json","data":{"sku":"A100","units":3}}'</code></p>
+    <p><b>Binary upload:</b></p>
+    <p><code>curl -X POST http://localhost:8080/api/upload -F dataset=binary -F description="planogram" -F file=@plan.pdf</code></p>
+    <p><b>What-if:</b></p>
+    <p><code>curl -X POST http://localhost:8080/analytics/whatif -H 'content-type: application/json' -d '{"question":"What if we cut Produce shrink in half?"}'</code></p>
+    <p>Run the message command a few times and watch <code>served_by</code> change — that's the load balancer rotating across the three replicas.</p>` },
+});
+
+
+/* ===== scroll-spy for TOC ===== */
+window.addEventListener('DOMContentLoaded', ()=>{
+  applyFont();
+  const links = [...document.querySelectorAll('nav.toc a')];
+  const map = {};
+  links.forEach(a=>{ const id=a.getAttribute('href').slice(1); map[id]=a; });
+  const obs = new IntersectionObserver((entries)=>{
+    entries.forEach(en=>{
+      if(en.isIntersecting){
+        links.forEach(l=>l.classList.remove('active'));
+        const a = map[en.target.id]; if(a) a.classList.add('active');
+      }
+    });
+  }, { rootMargin: '-70px 0px -70% 0px' });
+  document.querySelectorAll('main h2[id]').forEach(h=>obs.observe(h));
+  // close mobile toc on nav click
+  links.forEach(a=>a.addEventListener('click', ()=>{ if(window.innerWidth<=860) document.getElementById('toc').classList.remove('open'); }));
+});
+</script>
+</body>
+</html>
