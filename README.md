@@ -14,13 +14,15 @@ A standalone diagram is included at [`docs/architecture.svg`](docs/architecture.
                          │  /nifi/   → Apache NiFi UI    │
                          └──────────────────────────────┘
                                        │
-   message-api (x3) ──► Kafka (3 brokers / 2 zookeepers) ──► ingest-worker ──► Postgres
-        │  (binary uploads → MinIO)         ▲                                       ▲
-        ▼                                   │ (shared ensemble)                     │
-   analytics ◄────────────────── reads ─────┴─ NiFi (state mgmt) ───────────────────┘
+   message-api (x3) ──► Kafka (3 brokers, KRaft) ──► ingest-worker ──► Postgres
+        │  (binary uploads → MinIO)                                          ▲
+        ▼                                                                    │
+   analytics ◄──────────────────────────────── reads metrics ───────────────┘
         │   ChromaDB (facts) + Ollama (llama3.2)  ◄── what-if RAG
         ▼
    SVG charts · JSON reports · forecasts
+
+   NiFi ──► zookeeper-nifi   (ZooKeeper kept only for NiFi state management)
 ```
 
 | Service        | Tech                                   | Port (host) | Purpose                                  |
@@ -31,8 +33,9 @@ A standalone diagram is included at [`docs/architecture.svg`](docs/architecture.
 | ingest-worker  | kafka-python-ng consumer + psycopg2    | —           | Persist Kafka events to Postgres         |
 | analytics      | FastAPI + pandas + scikit-learn        | (via LB)    | KPIs, profit, forecast, charts, what-if  |
 | nifi           | apache/nifi 2.6.0                      | (via LB)    | Visual dataflow; uses the ZK ensemble    |
-| kafka1/2/3     | confluent cp-kafka 7.6.1 (RF=3, ISR=2) | 9092-9094   | Event backbone                           |
-| zookeeper1/2   | confluent cp-zookeeper 7.6.1           | —           | Coordination for Kafka **and** NiFi      |
+| seed           | python:3.12-slim (one-shot)            | —           | Auto-loads demo data + scenarios on boot |
+| kafka1/2/3     | confluent cp-kafka 7.6.1, KRaft (RF=3) | 9092-9094   | Event backbone (broker+controller)       |
+| zookeeper-nifi | confluent cp-zookeeper 7.6.1           | —           | State coordination for NiFi only         |
 | postgres       | postgres:16                            | 5432        | Operational data store                   |
 | minio          | MinIO                                  | 9000/9001   | Binary upload object store               |
 | chromadb       | chromadb 0.5.5                         | 8000        | Vector store for what-if facts           |
@@ -44,11 +47,17 @@ A standalone diagram is included at [`docs/architecture.svg`](docs/architecture.
 > 3.12, so it crashes on the 3.12 base image. `kafka-python-ng` is a drop-in
 > replacement (same `from kafka import ...` API) that works on 3.12+.
 
-> **ZooKeeper note:** Confluent images are pinned to 7.6.1, the last line
-> with first-class ZooKeeper support (ZooKeeper is removed in Confluent
-> Platform 8.0 / Apache Kafka 4.0). Both Kafka and NiFi share the same
-> two-node ensemble. NiFi runs unsecured over HTTP for local use and uses
-> the ensemble for its state management (embedded ZooKeeper disabled).
+> **Kafka runs in KRaft mode** (no ZooKeeper). The three brokers each run as a
+> combined `broker,controller`, forming a 3-voter controller quorum that
+> tolerates one node failure. They share a fixed `CLUSTER_ID` (override by
+> exporting `CLUSTER_ID` to a 22-char base64 UUID from `kafka-storage
+> random-uuid`). Combined mode is ideal for a local/demo stack; for production
+> Confluent recommends dedicated controller nodes.
+>
+> **ZooKeeper is kept only for NiFi.** A single `zookeeper-nifi` node provides
+> NiFi's state-management coordination (embedded ZooKeeper disabled). A single
+> node always has quorum, so it sidesteps multi-node ensemble setup. Images are
+> pinned to Confluent 7.6.1, the last line with first-class ZooKeeper support.
 
 ## Quick start
 
@@ -60,14 +69,44 @@ docker compose up -d --build
 #    pull is a few GB and can take several minutes on first run).
 docker compose logs -f ollama-pull   # ctrl-C once it reports success
 
-# 3. Seed demonstration data (90 days of grocery operations)
-pip install psycopg2-binary
-DATABASE_URL=postgresql://grocery:grocery_pw@localhost:5432/grocery \
-  python scripts/seed_data.py
-
-# 4. Open the dashboard
+# 3. Open the dashboard — it already has data
 open http://localhost:8080
 ```
+
+**Seeding is automatic.** A one-shot `seed` service loads ~90 days of demo data
+(plus the scenarios below) as soon as Postgres is healthy, and `analytics` waits
+for it to finish — so the dashboard has data on first load with no manual step.
+The seed is idempotent: it skips if the database already has sales rows, so
+restarts are a no-op.
+
+To wipe and reseed (e.g. to regenerate the scenarios):
+
+```bash
+docker compose run --rm -e SEED_FORCE=1 seed
+```
+
+You can also run it from the host against the published Postgres port if you
+prefer:
+
+```bash
+pip install psycopg2-binary
+DATABASE_URL=postgresql://grocery:grocery_pw@localhost:5432/grocery \
+  SEED_FORCE=1 python scripts/seed_data.py
+```
+
+### Seeded scenarios
+
+The demo data is shaped so each stakeholder view tells a clear story. These are
+configured in the `SCENARIOS` block at the top of `scripts/seed_data.py`:
+
+1. **Margin squeeze (Meat)** — vendor unit cost ramps up ~18% across the window, so Meat shows the lowest, eroding margin even though revenue holds. That vendor is also less reliable (late/short deliveries on the scorecard).
+2. **Shrink problem (Produce)** — heavy expiry/spoilage loss makes Produce dominate the loss breakdown and pushes store-wide shrink above the dashboard's warning threshold.
+3. **Winning promo (Snack Attack)** — a 20%-off Snacks promo with strong lift shows clearly positive incremental margin / ROI.
+4. **Losing promo (Frozen Fest)** — a deep 30%-off Frozen promo with weak lift shows negative incremental margin (a discount that didn't pay for itself).
+5. **Expiry crisis (Dairy + Bakery)** — a cluster of stock expiring within a few days lights up "expiring soon."
+
+Customer feedback corroborates the Produce story (more low-rated "freshness"
+complaints), so the manager view lines up with the loss data.
 
 Everything is reached through the single load-balancer port **8080** — the
 dashboard, API, and analytics services are on the internal Docker network only
@@ -77,6 +116,11 @@ dashboard, API, and analytics services are on the internal Docker network only
 - Apache NiFi UI: `http://localhost:8080/nifi/` (unsecured/HTTP for local use)
 - Message API: `http://localhost:8080/api/...`
 - Analytics API: `http://localhost:8080/analytics/...`
+
+> If you ever see "No data yet" across the dashboard, the database hasn't been
+> seeded — check `docker compose logs seed`, or run the force-reseed command
+> above. Charts render a clean "No data yet" placeholder rather than erroring
+> when a table is empty.
 
 > The what-if assistant builds its ChromaDB index from your metrics on
 > first use; the dashboard warms it automatically in the background. If
@@ -124,4 +168,3 @@ the load balancer round-robin across the three `message-api` instances.
 - Analytics logic was validated end-to-end against a real PostgreSQL 16 with seeded data: KPI summary, every metric query, demand/profit forecasts (multipliers move projections in the right direction), all five reports, and SVG chart generation.
 - Charts are hand-rendered SVG (no chart library) so they export cleanly and inherit the current theme color via `currentColor`.
 - The forecast models are intentionally transparent (linear regression with visible slope/assumptions) so an investor can see how projections are derived.
-"# datadevops" 

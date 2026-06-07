@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="680" height="940" viewBox="0 0 680 940" font-family="'IBM Plex Sans', system-ui, sans-serif" role="img" aria-label="Grocery Operations Intelligence Platform architecture">
 <title>Grocery Operations Intelligence Platform architecture</title>
-<desc>A browser sends requests to an NGINX load balancer, which routes to a dashboard, three message-API replicas, an analytics service, and the Apache NiFi UI. The message API produces events to a Kafka cluster of three brokers coordinated by two Zookeepers, with binary uploads going to MinIO. Apache NiFi shares the same Zookeeper ensemble for state management. An ingest worker consumes Kafka events into PostgreSQL. The analytics service reads Postgres and uses ChromaDB and Ollama for the what-if assistant, serving SVG charts and JSON reports back to the dashboard.</desc>
+<desc>A browser sends requests to an NGINX load balancer, which routes to a dashboard, three message-API replicas, an analytics service, and the Apache NiFi UI. The message API produces events to a Kafka cluster of three brokers running in KRaft mode (each a combined broker and controller, no ZooKeeper), with binary uploads going to MinIO. A separate single ZooKeeper node provides state management for Apache NiFi only. An ingest worker consumes Kafka events into PostgreSQL. The analytics service reads Postgres and uses ChromaDB and Ollama for the what-if assistant, serving SVG charts and JSON reports back to the dashboard.</desc>
 <style>
   .t{font-size:14px;font-weight:500}
   .ts{font-size:12px;font-weight:400}
@@ -62,16 +62,17 @@
 <text class="ts tx-amber2" x="145" y="480" text-anchor="middle" dominant-baseline="central">binary object store</text>
 
 <rect x="160" y="300" width="340" height="124" rx="14" stroke-width="0.5" class="lbl-coral"/>
-<text class="t tx-coral" x="330" y="322" text-anchor="middle">Kafka cluster + Zookeeper</text>
+<text class="t tx-coral" x="330" y="322" text-anchor="middle">Kafka cluster (KRaft)</text>
 <text class="ts tx-coral2" x="330" y="340" text-anchor="middle">3 brokers · RF=3 · 12 topics</text>
-<rect x="184" y="358" width="148" height="48" rx="8" stroke-width="0.5" class="lbl-red"/>
-<text class="ts tx-red" x="258" y="382" text-anchor="middle" dominant-baseline="central">Brokers 1·2·3</text>
-<rect x="348" y="358" width="130" height="48" rx="8" stroke-width="0.5" class="lbl-red"/>
-<text class="ts tx-red" x="413" y="382" text-anchor="middle" dominant-baseline="central">Zookeeper x2</text>
+<rect x="184" y="358" width="312" height="48" rx="8" stroke-width="0.5" class="lbl-red"/>
+<text class="ts tx-red" x="340" y="382" text-anchor="middle" dominant-baseline="central">Broker+controller 1·2·3 — no ZooKeeper</text>
 
-<path d="M600 266 L600 382 L478 382" class="arr-dash" marker-end="url(#arrowpink)"/>
-<text class="ts albl-pink" x="512" y="300" text-anchor="middle">shared ZK</text>
-<text class="ts albl-pink" x="512" y="316" text-anchor="middle">(state mgmt)</text>
+<rect x="544" y="356" width="112" height="52" rx="8" stroke-width="0.5" class="lbl-red"/>
+<text class="ts tx-red" x="600" y="374" text-anchor="middle" dominant-baseline="central">zookeeper</text>
+<text class="ts tx-red" x="600" y="390" text-anchor="middle" dominant-baseline="central">(NiFi only)</text>
+<path d="M600 266 L600 356" class="arr-dash" marker-end="url(#arrowpink)"/>
+<text class="ts albl-pink" x="600" y="300" text-anchor="middle">NiFi state</text>
+<text class="ts albl-pink" x="600" y="316" text-anchor="middle">mgmt</text>
 
 <line x1="330" y1="424" x2="330" y2="454" class="arr" marker-end="url(#arrow)"/>
 <text class="ts albl" x="339" y="442" text-anchor="start">consume</text>

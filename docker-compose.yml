@@ -2,16 +2,19 @@ version: "3.8"
 
 # =============================================================================
 # Grocery Operations Intelligence Platform
-# Single-file orchestration: 2x Zookeeper, 3x Kafka, NGINX load balancer,
-# message-api (scaled x3), ingest worker, analytics, dashboard, Postgres,
-# MinIO (binary store), ChromaDB (vectors) and Ollama (local LLM).
+# Single-file orchestration: 3x Kafka (KRaft mode, no ZooKeeper), one ZooKeeper
+# dedicated to NiFi, NGINX load balancer, message-api (scaled x3), ingest
+# worker, analytics, dashboard, Postgres, MinIO (binary store), ChromaDB
+# (vectors) and Ollama (local LLM).
 # =============================================================================
 
 x-kafka-common: &kafka-common
   image: confluentinc/cp-kafka:7.6.1
   restart: unless-stopped
+  # KRaft cluster id — shared by all brokers. Override by exporting CLUSTER_ID
+  # (must be a 22-char base64 UUID, e.g. from `kafka-storage random-uuid`).
   healthcheck:
-    test: ["CMD", "bash", "-c", "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+    test: ["CMD", "bash", "-c", "kafka-broker-api-versions --bootstrap-server localhost:29092 >/dev/null 2>&1"]
     interval: 15s
     timeout: 10s
     retries: 10
@@ -19,24 +22,20 @@ x-kafka-common: &kafka-common
 
 services:
   # ---------------------------------------------------------------------------
-  # Zookeeper ensemble (2 nodes)
+  # ZooKeeper — dedicated to NiFi only (Kafka now runs in KRaft mode and needs
+  # no ZooKeeper). A single node is fine for a standalone NiFi's state
+  # management and avoids multi-node quorum complexity.
   # ---------------------------------------------------------------------------
-  zookeeper1:
+  zookeeper-nifi:
     image: confluentinc/cp-zookeeper:7.6.1
-    container_name: gsp-zookeeper1
+    container_name: gsp-zookeeper-nifi
     restart: unless-stopped
     environment:
       ZOOKEEPER_SERVER_ID: 1
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
-      ZOOKEEPER_INIT_LIMIT: 5
-      ZOOKEEPER_SYNC_LIMIT: 2
       # allow the 'ruok' four-letter word so the healthcheck below can probe it
       ZOOKEEPER_4LW_COMMANDS_WHITELIST: "ruok,srvr,stat"
-      # Each node MUST list ITSELF as 0.0.0.0 and peers by hostname, or the
-      # quorum/election ports can't bind and the ensemble never forms (the
-      # client port 2181 then stays closed -> brokers get "Connection refused").
-      ZOOKEEPER_SERVERS: 0.0.0.0:2888:3888;zookeeper2:2888:3888
     healthcheck:
       test: ["CMD-SHELL", "echo ruok | nc -w 2 localhost 2181 | grep -q imok"]
       interval: 10s
@@ -44,48 +43,27 @@ services:
       retries: 12
       start_period: 20s
     volumes:
-      - zk1-data:/var/lib/zookeeper/data
-      - zk1-log:/var/lib/zookeeper/log
-    networks: [grocery-net]
-
-  zookeeper2:
-    image: confluentinc/cp-zookeeper:7.6.1
-    container_name: gsp-zookeeper2
-    restart: unless-stopped
-    environment:
-      ZOOKEEPER_SERVER_ID: 2
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
-      ZOOKEEPER_INIT_LIMIT: 5
-      ZOOKEEPER_SYNC_LIMIT: 2
-      ZOOKEEPER_4LW_COMMANDS_WHITELIST: "ruok,srvr,stat"
-      ZOOKEEPER_SERVERS: zookeeper1:2888:3888;0.0.0.0:2888:3888
-    healthcheck:
-      test: ["CMD-SHELL", "echo ruok | nc -w 2 localhost 2181 | grep -q imok"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 20s
-    volumes:
-      - zk2-data:/var/lib/zookeeper/data
-      - zk2-log:/var/lib/zookeeper/log
+      - zk-nifi-data:/var/lib/zookeeper/data
+      - zk-nifi-log:/var/lib/zookeeper/log
     networks: [grocery-net]
 
   # ---------------------------------------------------------------------------
-  # Kafka cluster (3 brokers, replication factor 3)
+  # Kafka cluster (3 brokers, KRaft mode — combined broker+controller)
   # ---------------------------------------------------------------------------
   kafka1:
     <<: *kafka-common
     container_name: gsp-kafka1
-    depends_on:
-      zookeeper1: {condition: service_healthy}
-      zookeeper2: {condition: service_healthy}
     environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: "zookeeper1:2181,zookeeper2:2181"
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      # --- KRaft: this node is both broker and controller ---
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      CLUSTER_ID: "${CLUSTER_ID:-OFXVWG8FR8anxcz23e7kMw}"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka1:29093,2@kafka2:29093,3@kafka3:29093"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      # --- listeners: CONTROLLER (KRaft) + INTERNAL (inter-broker) + EXTERNAL (host) ---
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_LISTENERS: "CONTROLLER://0.0.0.0:29093,INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092"
       KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka1:29092,EXTERNAL://localhost:9092"
-      KAFKA_LISTENERS: "INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092"
       KAFKA_INTER_BROKER_LISTENER_NAME: "INTERNAL"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
@@ -101,15 +79,15 @@ services:
   kafka2:
     <<: *kafka-common
     container_name: gsp-kafka2
-    depends_on:
-      zookeeper1: {condition: service_healthy}
-      zookeeper2: {condition: service_healthy}
     environment:
-      KAFKA_BROKER_ID: 2
-      KAFKA_ZOOKEEPER_CONNECT: "zookeeper1:2181,zookeeper2:2181"
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_NODE_ID: 2
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      CLUSTER_ID: "${CLUSTER_ID:-OFXVWG8FR8anxcz23e7kMw}"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka1:29093,2@kafka2:29093,3@kafka3:29093"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_LISTENERS: "CONTROLLER://0.0.0.0:29093,INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9093"
       KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka2:29092,EXTERNAL://localhost:9093"
-      KAFKA_LISTENERS: "INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9093"
       KAFKA_INTER_BROKER_LISTENER_NAME: "INTERNAL"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
@@ -125,15 +103,15 @@ services:
   kafka3:
     <<: *kafka-common
     container_name: gsp-kafka3
-    depends_on:
-      zookeeper1: {condition: service_healthy}
-      zookeeper2: {condition: service_healthy}
     environment:
-      KAFKA_BROKER_ID: 3
-      KAFKA_ZOOKEEPER_CONNECT: "zookeeper1:2181,zookeeper2:2181"
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_NODE_ID: 3
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      CLUSTER_ID: "${CLUSTER_ID:-OFXVWG8FR8anxcz23e7kMw}"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka1:29093,2@kafka2:29093,3@kafka3:29093"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_LISTENERS: "CONTROLLER://0.0.0.0:29093,INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9094"
       KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka3:29092,EXTERNAL://localhost:9094"
-      KAFKA_LISTENERS: "INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9094"
       KAFKA_INTER_BROKER_LISTENER_NAME: "INTERNAL"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
@@ -267,8 +245,7 @@ services:
     container_name: gsp-nifi
     restart: unless-stopped
     depends_on:
-      zookeeper1: {condition: service_healthy}
-      zookeeper2: {condition: service_healthy}
+      zookeeper-nifi: {condition: service_healthy}
     environment:
       # --- run unsecured on HTTP (no TLS/keystore) ---
       NIFI_WEB_HTTP_HOST: "0.0.0.0"
@@ -284,8 +261,8 @@ services:
       # served behind the LB under the /nifi/ path
       NIFI_WEB_PROXY_CONTEXT_PATH: "/nifi"
       NIFI_WEB_PROXY_HOST: "localhost:8080,localhost"
-      # --- use OUR Zookeeper ensemble for cluster state (not embedded) ---
-      NIFI_ZK_CONNECT_STRING: "zookeeper1:2181,zookeeper2:2181"
+      # --- use the dedicated ZooKeeper for cluster state (not embedded) ---
+      NIFI_ZK_CONNECT_STRING: "zookeeper-nifi:2181"
       NIFI_ZK_ROOT_NODE: "/nifi"
       NIFI_ELECTION_MAX_WAIT: "30 sec"
       NIFI_ELECTION_MAX_CANDIDATES: "1"
@@ -385,10 +362,8 @@ networks:
     driver: bridge
 
 volumes:
-  zk1-data: {}
-  zk1-log: {}
-  zk2-data: {}
-  zk2-log: {}
+  zk-nifi-data: {}
+  zk-nifi-log: {}
   kafka1-data: {}
   kafka2-data: {}
   kafka3-data: {}

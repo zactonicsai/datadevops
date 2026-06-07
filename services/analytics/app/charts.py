@@ -19,7 +19,22 @@ def _txt(x, y, s, size=12, anchor="start", weight="400", fill="currentColor", op
             f'{escape(str(s))}</text>')
 
 
+def _empty_svg(width, height, title=""):
+    """A clean placeholder shown when there is no data to plot (e.g. before the
+    database has been seeded), so charts never crash on empty input."""
+    parts = [f'<svg viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg" '
+             f'role="img" class="gsp-chart">']
+    if title:
+        parts.append(_txt(20, 22, title, size=14, weight="600"))
+    parts.append(_txt(width / 2, height / 2, "No data yet", size=13,
+                      anchor="middle", opacity="0.55"))
+    parts.append('</svg>')
+    return "".join(parts)
+
+
 def bar_chart(labels, values, width=520, height=300, title="", value_prefix=""):
+    if not values or not labels:
+        return _empty_svg(width, height, title)
     pad_l, pad_r, pad_t, pad_b = 60, 20, 40 if title else 16, 60
     pw, ph = width - pad_l - pad_r, height - pad_t - pad_b
     vmax = max(values) if values and max(values) > 0 else 1
@@ -56,6 +71,8 @@ def bar_chart(labels, values, width=520, height=300, title="", value_prefix=""):
 
 def line_chart(labels, series, width=620, height=300, title="", value_prefix=""):
     """series: list of dicts {name, values, color?}"""
+    if not labels or not series or not any(s.get("values") for s in series):
+        return _empty_svg(width, height, title)
     pad_l, pad_r, pad_t, pad_b = 60, 20, 44 if title else 20, 50
     pw, ph = width - pad_l - pad_r, height - pad_t - pad_b
     all_vals = [v for s in series for v in s["values"]] or [0, 1]
@@ -100,6 +117,8 @@ def line_chart(labels, series, width=620, height=300, title="", value_prefix="")
 
 
 def donut_chart(labels, values, width=300, height=300, title=""):
+    if not values or not labels or sum(values) <= 0:
+        return _empty_svg(width, height, title)
     import math
     cx, cy, r, rin = width / 2, height / 2 + (10 if title else 0), 95, 55
     total = sum(values) or 1
