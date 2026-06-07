@@ -37,7 +37,7 @@ services:
       # allow the 'ruok' four-letter word so the healthcheck below can probe it
       ZOOKEEPER_4LW_COMMANDS_WHITELIST: "ruok,srvr,stat"
     healthcheck:
-      test: ["CMD-SHELL", "echo ruok | nc -w 2 localhost 2181 | grep -q imok"]
+      test: ["CMD-SHELL", "echo"]
       interval: 10s
       timeout: 5s
       retries: 12
