@@ -11,7 +11,7 @@ x-kafka-common: &kafka-common
   image: confluentinc/cp-kafka:7.6.1
   restart: unless-stopped
   healthcheck:
-    test: ["CMD", "bash", "-c", "echo"]
+    test: ["CMD", "bash", "-c", "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1"]
     interval: 15s
     timeout: 10s
     retries: 10
@@ -31,7 +31,18 @@ services:
       ZOOKEEPER_TICK_TIME: 2000
       ZOOKEEPER_INIT_LIMIT: 5
       ZOOKEEPER_SYNC_LIMIT: 2
-      ZOOKEEPER_SERVERS: zookeeper1:2888:3888;zookeeper2:2888:3888
+      # allow the 'ruok' four-letter word so the healthcheck below can probe it
+      ZOOKEEPER_4LW_COMMANDS_WHITELIST: "ruok,srvr,stat"
+      # Each node MUST list ITSELF as 0.0.0.0 and peers by hostname, or the
+      # quorum/election ports can't bind and the ensemble never forms (the
+      # client port 2181 then stays closed -> brokers get "Connection refused").
+      ZOOKEEPER_SERVERS: 0.0.0.0:2888:3888;zookeeper2:2888:3888
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc -w 2 localhost 2181 | grep -q imok"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
     volumes:
       - zk1-data:/var/lib/zookeeper/data
       - zk1-log:/var/lib/zookeeper/log
@@ -47,7 +58,14 @@ services:
       ZOOKEEPER_TICK_TIME: 2000
       ZOOKEEPER_INIT_LIMIT: 5
       ZOOKEEPER_SYNC_LIMIT: 2
-      ZOOKEEPER_SERVERS: zookeeper1:2888:3888;zookeeper2:2888:3888
+      ZOOKEEPER_4LW_COMMANDS_WHITELIST: "ruok,srvr,stat"
+      ZOOKEEPER_SERVERS: zookeeper1:2888:3888;0.0.0.0:2888:3888
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc -w 2 localhost 2181 | grep -q imok"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
     volumes:
       - zk2-data:/var/lib/zookeeper/data
       - zk2-log:/var/lib/zookeeper/log
@@ -59,7 +77,9 @@ services:
   kafka1:
     <<: *kafka-common
     container_name: gsp-kafka1
-    depends_on: [zookeeper1, zookeeper2]
+    depends_on:
+      zookeeper1: {condition: service_healthy}
+      zookeeper2: {condition: service_healthy}
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: "zookeeper1:2181,zookeeper2:2181"
@@ -81,7 +101,9 @@ services:
   kafka2:
     <<: *kafka-common
     container_name: gsp-kafka2
-    depends_on: [zookeeper1, zookeeper2]
+    depends_on:
+      zookeeper1: {condition: service_healthy}
+      zookeeper2: {condition: service_healthy}
     environment:
       KAFKA_BROKER_ID: 2
       KAFKA_ZOOKEEPER_CONNECT: "zookeeper1:2181,zookeeper2:2181"
@@ -103,7 +125,9 @@ services:
   kafka3:
     <<: *kafka-common
     container_name: gsp-kafka3
-    depends_on: [zookeeper1, zookeeper2]
+    depends_on:
+      zookeeper1: {condition: service_healthy}
+      zookeeper2: {condition: service_healthy}
     environment:
       KAFKA_BROKER_ID: 3
       KAFKA_ZOOKEEPER_CONNECT: "zookeeper1:2181,zookeeper2:2181"
@@ -213,6 +237,25 @@ services:
     restart: "no"
 
   # ---------------------------------------------------------------------------
+  # Auto-seed — loads ~90 days of demo data + scenarios once Postgres is healthy
+  # so the dashboard has data on first load (no manual step). Idempotent: the
+  # script skips if the DB is already seeded. Set SEED_FORCE=1 to force a reseed.
+  # ---------------------------------------------------------------------------
+  seed:
+    image: python:3.12-slim
+    container_name: gsp-seed
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      DATABASE_URL: "postgresql://grocery:grocery_pw@postgres:5432/grocery"
+      SEED_FORCE: "0"
+    volumes:
+      - ./scripts:/scripts:ro
+    command: ["/bin/sh", "-c", "pip install --no-cache-dir psycopg2-binary==2.9.9 >/dev/null && python /scripts/seed_data.py"]
+    restart: "no"
+    networks: [grocery-net]
+
+  # ---------------------------------------------------------------------------
   # Apache NiFi — visual dataflow, using the SAME Zookeeper ensemble for state
   # management (nifi.state.management.embedded.zookeeper.start=false). Runs
   # unsecured over HTTP for local use: the HTTPS_* vars and keystore must be
@@ -223,7 +266,9 @@ services:
     image: apache/nifi:2.6.0
     container_name: gsp-nifi
     restart: unless-stopped
-    depends_on: [zookeeper1, zookeeper2]
+    depends_on:
+      zookeeper1: {condition: service_healthy}
+      zookeeper2: {condition: service_healthy}
     environment:
       # --- run unsecured on HTTP (no TLS/keystore) ---
       NIFI_WEB_HTTP_HOST: "0.0.0.0"
@@ -298,6 +343,7 @@ services:
     restart: unless-stopped
     depends_on:
       postgres: {condition: service_healthy}
+      seed: {condition: service_completed_successfully}
       chromadb: {condition: service_started}
       ollama: {condition: service_started}
     environment:
