@@ -7,3 +7,4 @@ sqlalchemy==2.0.30
 psycopg2-binary==2.9.9
 chromadb==0.5.5
 requests==2.32.3
+prometheus-fastapi-instrumentator==7.0.0

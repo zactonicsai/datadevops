@@ -1,0 +1,36 @@
+# Prometheus configuration for the Grocery Operations Platform.
+# Scrapes the FastAPI services, which expose Prometheus metrics at /metrics
+# via the prometheus-client middleware, plus Prometheus' own metrics.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    platform: grocery-ops
+
+scrape_configs:
+  # Prometheus monitoring itself
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Message API — request counts, latencies, in-flight (3 replicas behind the
+  # service name; Docker DNS round-robins, so over time all replicas are seen)
+  - job_name: message-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["message-api:8001"]
+        labels: { service: message-api }
+
+  # Analytics — metric/forecast/what-if endpoint instrumentation
+  - job_name: analytics
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["analytics:8002"]
+        labels: { service: analytics }
+
+  # Dashboard — UI + proxy traffic
+  - job_name: dashboard
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["dashboard:8003"]
+        labels: { service: dashboard }

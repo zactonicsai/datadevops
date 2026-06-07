@@ -10,6 +10,10 @@ ANALYTICS_URL = os.getenv("ANALYTICS_URL", "http://analytics:8002")
 HERE = os.path.dirname(__file__)
 
 app = FastAPI(title="Grocery Dashboard")
+
+# Prometheus metrics at /metrics (scraped by Prometheus).
+from prometheus_fastapi_instrumentator import Instrumentator
+Instrumentator(should_group_status_codes=False).instrument(app).expose(app)
 app.mount("/static", StaticFiles(directory=os.path.join(HERE, "static")), name="static")
 
 

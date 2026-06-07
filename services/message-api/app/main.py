@@ -38,6 +38,11 @@ VALID_DATASETS = {
 
 app = FastAPI(title="Grocery Message API", version="1.0.0")
 
+# Expose Prometheus metrics at /metrics (scraped by Prometheus). Real status
+# codes (not grouped) so dashboards can match e.g. status=~"5..".
+from prometheus_fastapi_instrumentator import Instrumentator
+Instrumentator(should_group_status_codes=False).instrument(app).expose(app)
+
 _producer: Optional[KafkaProducer] = None
 _minio: Optional[Minio] = None
 

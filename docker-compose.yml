@@ -36,6 +36,8 @@ services:
       ZOOKEEPER_TICK_TIME: 2000
       # allow the 'ruok' four-letter word so the healthcheck below can probe it
       ZOOKEEPER_4LW_COMMANDS_WHITELIST: "ruok,srvr,stat"
+      NIFI_OPTS: "-Dzookeeper.4lw.commands.whitelist=ruok,srvr,stat"
+      KAFKA_OPTS: "-Dzookeeper.4lw.commands.whitelist=ruok,srvr,stat"
     healthcheck:
       test: ["CMD-SHELL", "echo ruok | nc -w 2 localhost 2181 | grep -q imok"]
       interval: 10s
@@ -250,20 +252,19 @@ services:
     depends_on:
       zookeeper-nifi: {condition: service_healthy}
     environment:
-      # --- run unsecured on HTTP (no TLS/keystore) ---
-      NIFI_WEB_HTTP_HOST: "0.0.0.0"
-      NIFI_WEB_HTTP_PORT: "8080"
-      NIFI_WEB_HTTPS_HOST: ""
-      NIFI_WEB_HTTPS_PORT: ""
-      NIFI_SECURITY_KEYSTORE: ""
-      NIFI_SECURITY_KEYSTOREPASSWD: ""
-      NIFI_SECURITY_KEYPASSWD: ""
-      NIFI_SECURITY_TRUSTSTORE: ""
-      NIFI_SECURITY_TRUSTSTOREPASSWD: ""
-      NIFI_REMOTE_INPUT_SECURE: "false"
-      # served behind the LB under the /nifi/ path
-      NIFI_WEB_PROXY_CONTEXT_PATH: "/nifi"
-      NIFI_WEB_PROXY_HOST: "localhost:8080,localhost"
+      # --- HTTPS with single-user auth (NiFi 2.x secure-by-default) ---
+      # NiFi auto-generates a self-signed cert on first boot when no keystore
+      # exists, and binds HTTPS on 8443. We set fixed single-user credentials;
+      # the PASSWORD MUST be >= 12 chars or NiFi ignores it and generates a
+      # random one (find it with: docker compose logs nifi | grep Generated).
+      NIFI_WEB_HTTPS_HOST: "0.0.0.0"
+      NIFI_WEB_HTTPS_PORT: "8443"
+      SINGLE_USER_CREDENTIALS_USERNAME: "admin"
+      SINGLE_USER_CREDENTIALS_PASSWORD: "groceryAdmin2024"
+      NIFI_REMOTE_INPUT_SECURE: "true"
+      # Whitelist the host:port the browser uses, or NiFi rejects the request.
+      NIFI_WEB_PROXY_CONTEXT_PATH: "/"
+      NIFI_WEB_PROXY_HOST: "localhost:8443,localhost,127.0.0.1:8443,127.0.0.1"
       # --- use the dedicated ZooKeeper for cluster state (not embedded) ---
       NIFI_ZK_CONNECT_STRING: "zookeeper-nifi:2181"
       NIFI_ZK_ROOT_NODE: "/nifi"
@@ -278,7 +279,11 @@ services:
       - nifi-flowfile:/opt/nifi/nifi-current/flowfile_repository
       - nifi-provenance:/opt/nifi/nifi-current/provenance_repository
       - nifi-database:/opt/nifi/nifi-current/database_repository
-    expose: ["8080"]
+    expose: ["8443"]
+    # NiFi terminates TLS itself; published directly on the host. Access at:
+    #   https://localhost:8443/nifi   (login admin / groceryAdmin2024)
+    # Your browser will warn about the self-signed cert — that's expected.
+    ports: ["8443:8443"]
     networks: [grocery-net]
 
   # ---------------------------------------------------------------------------
@@ -360,6 +365,43 @@ services:
     ports: ["8080:80"]
     networks: [grocery-net]
 
+  # ---------------------------------------------------------------------------
+  # Monitoring — Prometheus scrapes the services' /metrics; Grafana visualizes.
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: gsp-prometheus
+    restart: unless-stopped
+    depends_on: [message-api, analytics, dashboard]
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    ports: ["9090:9090"]
+    networks: [grocery-net]
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: gsp-grafana
+    restart: unless-stopped
+    depends_on: [prometheus]
+    environment:
+      GF_SECURITY_ADMIN_USER: "admin"
+      GF_SECURITY_ADMIN_PASSWORD: "grocery"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # Allow embedding the Grafana panels/UI in an iframe from the dashboard.
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports: ["3000:3000"]
+    networks: [grocery-net]
+
 networks:
   grocery-net:
     driver: bridge
@@ -380,3 +422,5 @@ volumes:
   nifi-flowfile: {}
   nifi-provenance: {}
   nifi-database: {}
+  prometheus-data: {}
+  grafana-data: {}

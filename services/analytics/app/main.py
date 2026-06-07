@@ -7,6 +7,10 @@ from . import data, forecast, reports, charts, whatif
 
 app = FastAPI(title="Grocery Analytics", version="1.0.0")
 
+# Prometheus metrics at /metrics (scraped by Prometheus).
+from prometheus_fastapi_instrumentator import Instrumentator
+Instrumentator(should_group_status_codes=False).instrument(app).expose(app)
+
 
 @app.get("/health")
 def health():

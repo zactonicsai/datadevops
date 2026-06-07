@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Grocery Operations Platform — Service Tutorial</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  /* ===== IBM Carbon-inspired design tokens ===== */
+  :root {
+    --base-font: 16px;            /* driven by the font-size scaler (14–36pt) */
+    --ibm-white: #ffffff;
+    --ibm-g10: #f4f4f4;
+    --ibm-g20: #e0e0e0;
+    --ibm-g30: #c6c6c6;
+    --ibm-g50: #8d8d8d;
+    --ibm-g60: #6f6f6f;
+    --ibm-g70: #525252;
+    --ibm-g90: #262626;
+    --ibm-g100: #161616;
+    --ibm-blue: #0f62fe;
+    --ibm-blue-hover: #0353e9;
+    --ibm-blue-light: #d0e2ff;
+    --ibm-cyan: #1192e8;
+    --ibm-teal: #009d9a;
+    --ibm-green: #24a148;
+    --ibm-purple: #8a3ffc;
+    --ibm-magenta: #ee5396;
+    --ibm-red: #da1e28;
+    --ibm-amber: #f1c21b;
+    --ibm-orange: #ff832b;
+
+    /* semantic — light mode defaults */
+    --bg: var(--ibm-white);
+    --bg-soft: var(--ibm-g10);
+    --bg-panel: #ffffff;
+    --bg-code: #f4f4f4;
+    --ink: var(--ibm-g100);
+    --ink-soft: var(--ibm-g70);
+    --ink-faint: var(--ibm-g60);
+    --border: var(--ibm-g20);
+    --border-strong: var(--ibm-g30);
+    --accent: var(--ibm-blue);
+    --accent-soft: var(--ibm-blue-light);
+    --code-kw: #8a3ffc;      /* keyword */
+    --code-str: #0f62fe;     /* string  */
+    --code-com: #6f6f6f;     /* comment */
+    --code-num: #009d9a;     /* number  */
+    --code-fn:  #da1e28;     /* function/key */
+  }
+  html[data-theme="dark"] {
+    --bg: #161616;
+    --bg-soft: #1c1c1c;
+    --bg-panel: #262626;
+    --bg-code: #1c1c1c;
+    --ink: #f4f4f4;
+    --ink-soft: #c6c6c6;
+    --ink-faint: #8d8d8d;
+    --border: #393939;
+    --border-strong: #525252;
+    --accent: #4589ff;
+    --accent-soft: #002d9c;
+    --code-kw: #be95ff;
+    --code-str: #78a9ff;
+    --code-com: #8d8d8d;
+    --code-num: #3ddbd9;
+    --code-fn:  #ff8389;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: 'IBM Plex Sans', system-ui, sans-serif;
+    font-size: var(--base-font);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    transition: background .25s ease, color .25s ease;
+  }
+
+  /* ===== top app bar ===== */
+  .appbar {
+    position: sticky; top: 0; z-index: 50;
+    display: flex; align-items: center; gap: .75rem;
+    background: var(--ink);
+    color: #fff;
+    padding: .55rem 1rem;
+    border-bottom: 1px solid var(--border-strong);
+  }
+  html[data-theme="dark"] .appbar { background: #000; }
+  .appbar .brand { display: flex; align-items: center; gap: .55rem; font-weight: 600; }
+  .appbar .brand .swatch { width: .55rem; height: 1.4rem; background: var(--ibm-blue); display: inline-block; }
+  .appbar .brand small { color: var(--ibm-g30); font-weight: 400; }
+  .appbar .spacer { flex: 1; }
+  .appbar button {
+    font-family: inherit; font-size: .82em;
+    background: transparent; color: #fff;
+    border: 1px solid var(--ibm-g60);
+    padding: .35rem .6rem; cursor: pointer;
+    display: inline-flex; align-items: center; gap: .35rem;
+  }
+  .appbar button:hover { background: rgba(255,255,255,.12); }
+  .appbar .fontctl { display: inline-flex; align-items: center; border: 1px solid var(--ibm-g60); }
+  .appbar .fontctl button { border: none; }
+  .appbar .fontctl .val { font-size: .72em; padding: 0 .4rem; color: var(--ibm-g30); min-width: 2.8rem; text-align: center; }
+
+  /* ===== layout ===== */
+  .wrap { display: flex; max-width: 1200px; margin: 0 auto; }
+  nav.toc {
+    position: sticky; top: 49px; align-self: flex-start;
+    width: 240px; flex: none;
+    height: calc(100vh - 49px); overflow-y: auto;
+    border-right: 1px solid var(--border);
+    padding: 1.2rem .6rem 3rem;
+    background: var(--bg-soft);
+  }
+  nav.toc a {
+    display: block; padding: .4rem .6rem;
+    color: var(--ink-soft); text-decoration: none;
+    font-size: .86em; border-left: 2px solid transparent;
+  }
+  nav.toc a:hover { background: var(--bg); color: var(--ink); }
+  nav.toc a.active { border-left-color: var(--accent); color: var(--ink); font-weight: 600; background: var(--bg); }
+  nav.toc .group { font-size: .72em; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-faint); padding: 1rem .6rem .3rem; font-weight: 600; }
+
+  main { flex: 1; min-width: 0; padding: 1.5rem clamp(1rem, 4vw, 3rem) 6rem; }
+
+  /* ===== typography ===== */
+  h1 { font-size: 2.1em; font-weight: 600; line-height: 1.15; margin: .2em 0 .3em; letter-spacing: -.01em; }
+  h2 { font-size: 1.55em; font-weight: 600; margin: 1.8em 0 .5em; padding-bottom: .3em; border-bottom: 1px solid var(--border); scroll-margin-top: 70px; }
+  h3 { font-size: 1.2em; font-weight: 600; margin: 1.4em 0 .4em; }
+  h4 { font-size: 1.02em; font-weight: 600; margin: 1.1em 0 .3em; color: var(--ink-soft); }
+  p { margin: .6em 0; max-width: 70ch; }
+  a.ref { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-soft); }
+  a.ref:hover { border-bottom-color: var(--accent); }
+  a.ref::after { content: " ↗"; font-size: .8em; opacity: .7; }
+  .lede { font-size: 1.12em; color: var(--ink-soft); max-width: 72ch; }
+  code.inline { font-family: 'IBM Plex Mono', monospace; font-size: .88em; background: var(--bg-code); padding: .08em .35em; border: 1px solid var(--border); border-radius: 2px; }
+
+  /* ===== service header chip ===== */
+  .svc-tag { display: inline-flex; align-items: center; gap: .45rem; font-family: 'IBM Plex Mono', monospace; font-size: .78em; font-weight: 500; padding: .25rem .6rem; border: 1px solid var(--border-strong); border-radius: 2px; background: var(--bg-soft); color: var(--ink-soft); margin-right: .4rem; }
+  .svc-tag .dot { width: .55rem; height: .55rem; border-radius: 50%; }
+  .meta-grid { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; font-size: .9em; margin: .8em 0; }
+  .meta-grid dt { color: var(--ink-faint); font-family: 'IBM Plex Mono', monospace; font-size: .85em; }
+  .meta-grid dd { margin: 0; }
+
+  /* ===== callout boxes ===== */
+  .box { border-left: 3px solid var(--accent); background: var(--bg-soft); padding: .8rem 1rem; margin: 1em 0; border-radius: 0 4px 4px 0; }
+  .box.warn { border-left-color: var(--ibm-amber); }
+  .box.danger { border-left-color: var(--ibm-red); }
+  .box.ok { border-left-color: var(--ibm-green); }
+  .box .box-title { font-weight: 600; font-size: .92em; margin-bottom: .25rem; display: flex; align-items: center; gap: .4rem; }
+
+  /* ===== config tables ===== */
+  table.cfg { width: 100%; border-collapse: collapse; margin: 1em 0; font-size: .9em; }
+  table.cfg th, table.cfg td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+  table.cfg th { background: var(--bg-soft); font-weight: 600; font-size: .85em; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-faint); }
+  table.cfg td:first-child { font-family: 'IBM Plex Mono', monospace; font-size: .9em; color: var(--accent); white-space: nowrap; }
+  table.cfg tr:hover td { background: var(--bg-soft); }
+
+  /* ===== code blocks with line-by-line ===== */
+  .code { font-family: 'IBM Plex Mono', monospace; font-size: .82em; background: var(--bg-code); border: 1px solid var(--border); border-radius: 4px; margin: 1em 0; overflow: hidden; }
+  .code .filename { background: var(--bg-soft); border-bottom: 1px solid var(--border); padding: .4rem .7rem; font-size: .92em; color: var(--ink-soft); display: flex; align-items: center; gap: .5rem; }
+  .code .filename .fdot { width: .5rem; height: .5rem; border-radius: 50%; background: var(--ibm-orange); }
+  .code pre { margin: 0; overflow-x: auto; }
+  .code .ln { display: grid; grid-template-columns: 2.6em 1fr; align-items: start; padding: 0 .4rem; line-height: 1.55; }
+  .code .ln:hover { background: var(--bg-soft); }
+  .code .ln .num { color: var(--ink-faint); text-align: right; padding-right: .8rem; user-select: none; opacity: .6; }
+  .code .ln .src { white-space: pre-wrap; word-break: break-word; }
+  .code .ln.note { cursor: pointer; }
+  .code .ln.note .src { border-bottom: 1px dotted var(--border-strong); }
+  .code .ln.note:hover .src { background: var(--accent-soft); }
+  .code .ann { grid-column: 2 / 3; font-family: 'IBM Plex Sans', sans-serif; font-size: 1.05em; color: var(--ink-soft); background: var(--bg-soft); border-left: 2px solid var(--accent); padding: .5rem .7rem; margin: .3rem 0 .5rem; display: none; border-radius: 0 3px 3px 0; }
+  .code .ann.open { display: block; }
+  .code .ann b { color: var(--ink); }
+  .tok-kw { color: var(--code-kw); }
+  .tok-str { color: var(--code-str); }
+  .tok-com { color: var(--code-com); font-style: italic; }
+  .tok-num { color: var(--code-num); }
+  .tok-fn { color: var(--code-fn); }
+
+  .hint { font-size: .8em; color: var(--ink-faint); margin: .3em 0 1em; display: flex; align-items: center; gap: .4rem; }
+
+  /* ===== "show more" popups ===== */
+  .more-btn { font-family: inherit; font-size: .85em; font-weight: 500; background: var(--accent); color: #fff; border: none; padding: .4rem .8rem; border-radius: 2px; cursor: pointer; display: inline-flex; align-items: center; gap: .4rem; margin: .4em .4em .4em 0; }
+  .more-btn:hover { background: var(--ibm-blue-hover); }
+  .more-btn.ghost { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  .more-btn.ghost:hover { background: var(--accent-soft); }
+
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; align-items: center; justify-content: center; z-index: 100; padding: 1rem; }
+  .modal-overlay.open { display: flex; }
+  .modal { background: var(--bg-panel); color: var(--ink); border: 1px solid var(--border-strong); border-radius: 6px; max-width: 640px; width: 100%; max-height: 85vh; overflow-y: auto; box-shadow: 0 16px 48px rgba(0,0,0,.3); }
+  .modal-head { display: flex; align-items: flex-start; gap: 1rem; padding: 1rem 1.2rem; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg-panel); }
+  .modal-head h3 { margin: 0; font-size: 1.15em; }
+  .modal-head .x { margin-left: auto; background: transparent; border: none; color: var(--ink-soft); font-size: 1.4em; cursor: pointer; line-height: 1; padding: 0 .2rem; }
+  .modal-head .x:hover { color: var(--ink); }
+  .modal-body { padding: 1rem 1.2rem 1.4rem; }
+  .modal-body p { max-width: none; }
+
+  /* ===== misc ===== */
+  .pill-row { display: flex; flex-wrap: wrap; gap: .4rem; margin: .8em 0; }
+  .pill { font-size: .8em; padding: .25rem .6rem; border: 1px solid var(--border-strong); border-radius: 99px; color: var(--ink-soft); background: var(--bg-soft); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 2.5em 0; }
+  .footer { color: var(--ink-faint); font-size: .85em; margin-top: 3em; padding-top: 1.5em; border-top: 1px solid var(--border); }
+  .toc-toggle { display: none; }
+
+  /* ===== mobile ===== */
+  @media (max-width: 860px) {
+    nav.toc {
+      position: fixed; top: 49px; left: 0; bottom: 0; width: 80%; max-width: 300px;
+      transform: translateX(-105%); transition: transform .25s ease; z-index: 60;
+      box-shadow: 4px 0 24px rgba(0,0,0,.2);
+    }
+    nav.toc.open { transform: translateX(0); }
+    .toc-toggle { display: inline-flex; }
+    main { padding-left: 1rem; padding-right: 1rem; }
+    .appbar .brand small { display: none; }
+    .meta-grid { grid-template-columns: 1fr; gap: .1rem .5rem; }
+    .meta-grid dt { margin-top: .4rem; }
+  }
+  @media (max-width: 520px) {
+    .appbar .btn-label { display: none; }
+    h1 { font-size: 1.7em; }
+  }
+</style>
+</head><body>
+<header class="appbar">
+  <button class="toc-toggle" onclick="toggleToc()" aria-label="Toggle contents">☰</button>
+  <span class="brand"><span class="swatch"></span> NiFi Flows <small>· Grocery scenarios</small></span>
+  <span class="spacer"></span>
+  <div class="fontctl" role="group" aria-label="Font size">
+    <button onclick="bumpFont(-2)" aria-label="Decrease font size">A−</button>
+    <span class="val" id="fontVal">12&nbsp;pt</span>
+    <button onclick="bumpFont(2)" aria-label="Increase font size">A+</button>
+  </div>
+  <button onclick="toggleTheme()" aria-label="Toggle light/dark"><span id="themeGlyph">◐</span> <span class="btn-label" id="themeLabel">Dark</span></button>
+</header>
+
+<div class="wrap">
+<nav class="toc" id="toc">
+  <a href="#access">Accessing NiFi</a>
+  <a href="#primer">NiFi primer</a>
+  <div class="group">Example flows</div>
+  <a href="#flow1">1 · Simulate sales → Kafka</a>
+  <a href="#flow2">2 · Tee feedback to a file</a>
+  <a href="#flow3">3 · Daily what-if report</a>
+  <div class="group">Reference</div>
+  <a href="#props">Connection settings</a>
+  <a href="#troubleshoot">Troubleshooting</a>
+</nav>
+
+<main id="content">
+
+<h1 id="access">Apache NiFi — example grocery flows</h1>
+<p class="lede">Three ready-to-build NiFi flows wired to this platform's grocery scenario: simulate live sales into Kafka, branch customer feedback to a file, and call the what-if assistant on a schedule. Each flow lists the exact processors, their property values, and how to connect them — recreate any of them on the canvas in a few minutes.</p>
+
+<div class="box">
+  <div class="box-title">Accessing the NiFi UI</div>
+  <p style="margin:0">NiFi is reachable two ways once the stack is up:</p>
+  <ul>
+    <li>Through the load balancer: <code class="inline">http://localhost:8080/nifi/</code> (note the trailing slash)</li>
+    <li>Directly on its own port (reliable fallback): <code class="inline">http://localhost:8443/nifi/</code></li>
+  </ul>
+  <p style="margin:.5em 0 0">It runs <b>unsecured over HTTP</b> for local use — no login. Give it a minute after <code class="inline">docker compose up</code>; NiFi is a JVM app and takes longer to start than the other services.</p>
+</div>
+
+<div class="box warn">
+  <div class="box-title">⚠ If you previously saw a blank page</div>
+  <p style="margin:0">That was a reverse-proxy path bug: NiFi 2.x builds its UI asset URLs from the <code class="inline">X-ProxyContextPath</code> header, which the proxy wasn't sending, so the page loaded but its CSS/JS 404'd. The <code class="inline">/nifi/</code> route now forwards the correct <code class="inline">X-Proxy*</code> headers and proxies to NiFi's native base path. If the LB route still misbehaves in your environment, use the direct <code class="inline">:8443</code> port — it bypasses the proxy entirely.</p>
+</div>
+
+<h2 id="primer">A 60-second NiFi primer</h2>
+<p>NiFi moves data as <b>FlowFiles</b> (a piece of content plus attributes) between <b>processors</b> (boxes that do one thing — generate, transform, route, publish). You wire processors together with <b>connections</b>, and each connection carries one or more <b>relationships</b> (<code class="inline">success</code>, <code class="inline">failure</code>, etc.). You build flows by dragging processors onto the canvas, configuring their properties, drawing connections, then starting them.</p>
+
+<div class="pill-row">
+  <span class="pill">Processor = a step</span>
+  <span class="pill">FlowFile = the data in motion</span>
+  <span class="pill">Connection = a queue between steps</span>
+  <span class="pill">Relationship = success / failure / …</span>
+</div>
+
+<button class="more-btn" onclick="openModal('how-to-add')">Show more: how to add &amp; configure a processor</button>
+<button class="more-btn" onclick="openModal('how-to-connect')">Show more: how to draw a connection</button>
+
+<!-- ===================== FLOW 1 ===================== -->
+<h2 id="flow1">Flow 1 · Simulate live sales into Kafka</h2>
+<p>This is the headline flow: NiFi generates a synthetic grocery <b>sale</b> every few seconds and publishes it to the <code class="inline">grocery.sales</code> Kafka topic — exactly what the <code class="inline">message-api</code> would produce. The <code class="inline">ingest-worker</code> then consumes it into Postgres, so you can watch a NiFi-driven event flow all the way to the dashboard.</p>
+
+<h4>The shape of the flow</h4>
+<div class="code">
+  <div class="filename"><span class="fdot"></span> flow 1 — three processors in a line</div>
+  <pre>
+<div class="ln"><span class="num">1</span><span class="src"><span class="tok-fn">GenerateFlowFile</span>  ──success──▶  <span class="tok-fn">ReplaceText</span>  ──success──▶  <span class="tok-fn">PublishKafka</span></span></div>
+<div class="ln"><span class="num"> </span><span class="src">  (timer: every 5s)        (writes a sale JSON)         (topic: grocery.sales)</span></div>
+  </pre>
+</div>
+
+<h4>Processor 1 — GenerateFlowFile</h4>
+<p>Creates an empty FlowFile on a timer, to drive the flow.</p>
+<table class="cfg">
+  <tr><th>Setting</th><th>Value</th></tr>
+  <tr><td>Run Schedule</td><td><code class="inline">5 sec</code> (Scheduling tab → Timer driven)</td></tr>
+  <tr><td>Custom Text</td><td>(leave empty — ReplaceText supplies the body)</td></tr>
+  <tr><td>Batch Size</td><td>1</td></tr>
+</table>
+
+<h4>Processor 2 — ReplaceText (build the sale JSON)</h4>
+<p>Replaces the (empty) content with a JSON sale, using NiFi <b>Expression Language</b> to randomize values each run.</p>
+<table class="cfg">
+  <tr><th>Setting</th><th>Value</th></tr>
+  <tr><td>Replacement Strategy</td><td><code class="inline">Always Replace</code></td></tr>
+  <tr><td>Evaluation Mode</td><td><code class="inline">Entire text</code></td></tr>
+  <tr><td>Replacement Value</td><td>the JSON below ▾</td></tr>
+</table>
+<div class="code">
+  <div class="filename"><span class="fdot"></span> ReplaceText → Replacement Value</div>
+  <pre>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">1</span><span class="src">{</span></div>
+<div class="ann">This is the message envelope the platform expects — the same <code class="inline">{dataset, type, data}</code> shape the message-api uses. NiFi's Expression Language (the <code class="inline">${...}</code> parts) fills in random but realistic values on every FlowFile.</div>
+<div class="ln"><span class="num">2</span><span class="src">  <span class="tok-str">"dataset"</span>: <span class="tok-str">"sales"</span>,</span></div>
+<div class="ln"><span class="num">3</span><span class="src">  <span class="tok-str">"type"</span>: <span class="tok-str">"json"</span>,</span></div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">4</span><span class="src">  <span class="tok-str">"data"</span>: {</span></div>
+<div class="ann">The <code class="inline">data</code> object is the actual sale. The ingest-worker reads these fields when it writes a typed row into the <code class="inline">sales</code> table.</div>
+<div class="ln"><span class="num">5</span><span class="src">    <span class="tok-str">"sku"</span>: <span class="tok-str">"PRO-${random():mod(6):plus(1)}"</span>,</span></div>
+<div class="ln note" onclick="toggleLine(this)"><span class="num">6</span><span class="src">    <span class="tok-str">"category"</span>: <span class="tok-str">"Produce"</span>,</span></div>
+<div class="ann">Hard-coded to <b>Produce</b> here so this simulated traffic feeds the "Produce" story in the seeded scenarios. Change it to Meat, Snacks, etc. to drive a different category.</div>
+<div class="ln"><span class="num">7</span><span class="src">    <span class="tok-str">"units"</span>: ${random():mod(8):plus(1)},</span></div>
+<div class="ln"><span class="num">8</span><span class="src">    <span class="tok-str">"unit_price"</span>: 2.49,</span></div>
+<div class="ln"><span class="num">9</span><span class="src">    <span class="tok-str">"revenue"</span>: ${random():mod(8):plus(1):multiply(2.49)},</span></div>
+<div class="ln"><span class="num">10</span><span class="src">    <span class="tok-str">"sale_date"</span>: <span class="tok-str">"${now():format('yyyy-MM-dd')}"</span></span></div>
+<div class="ann"><code class="inline">${now()}</code> stamps today's date so the sale lands in the current reporting window and shows up in "today vs plan" style views.</div>
+<div class="ln"><span class="num">11</span><span class="src">  }</span></div>
+<div class="ln"><span class="num">12</span><span class="src">}</span></div>
+  </pre>
+</div>
+
+<h4>Processor 3 — PublishKafka</h4>
+<p>Publishes the FlowFile content to Kafka. In NiFi 2.x search the Add-Processor dialog for <b>PublishKafka</b> (it targets the modern Kafka API).</p>
+<table class="cfg">
+  <tr><th>Property</th><th>Value</th><th>Why</th></tr>
+  <tr><td>Kafka Brokers</td><td><code class="inline">kafka1:29092,kafka2:29092,kafka3:29092</code></td><td>The INTERNAL listeners — NiFi is on the same Docker network, so it uses the container names.</td></tr>
+  <tr><td>Topic Name</td><td><code class="inline">grocery.sales</code></td><td>The same topic the ingest-worker consumes.</td></tr>
+  <tr><td>Delivery Guarantee</td><td><code class="inline">Guarantee Replicated Delivery (all)</code></td><td>Matches the platform's <code class="inline">acks=all</code> durability.</td></tr>
+  <tr><td>Use Transactions</td><td><code class="inline">false</code></td><td>Simpler; not needed for this demo.</td></tr>
+  <tr><td>(auto-terminate)</td><td>check <code class="inline">success</code> and <code class="inline">failure</code></td><td>This is the end of the flow, so terminate both relationships on the processor itself.</td></tr>
+</table>
+
+<div class="box ok">
+  <div class="box-title">✓ Verify it works</div>
+  <p style="margin:0">Start all three processors. Within seconds you should see FlowFiles passing through the connections. Then check Postgres: <code class="inline">docker compose exec postgres psql -U grocery -d grocery -c "SELECT category, count(*) FROM sales WHERE sale_date = CURRENT_DATE GROUP BY category;"</code> — the Produce count climbs as NiFi publishes. The dashboard's revenue chart picks it up on refresh.</p>
+</div>
+
+<div class="box">
+  <div class="box-title">References</div>
+  <p style="margin:0">GenerateFlowFile: <a class="ref" href="https://nifi.apache.org/docs/nifi-docs/components/org.apache.nifi/nifi-standard-nar/latest/org.apache.nifi.processors.standard.GenerateFlowFile/">docs</a> · ReplaceText: <a class="ref" href="https://nifi.apache.org/docs/nifi-docs/components/org.apache.nifi/nifi-standard-nar/latest/org.apache.nifi.processors.standard.ReplaceText/">docs</a> · Expression Language: <a class="ref" href="https://nifi.apache.org/docs/nifi-docs/html/expression-language-guide.html">guide</a> · PublishKafka: <a class="ref" href="https://nifi.apache.org/docs/nifi-docs/">component docs</a></p>
+</div>
+
+<!-- ===================== FLOW 2 ===================== -->
+<h2 id="flow2">Flow 2 · Consume feedback &amp; branch by sentiment</h2>
+<p>This flow reads customer-feedback events <i>out</i> of Kafka and routes them: negative feedback gets written to a "needs attention" file, everything else is logged. It shows NiFi <b>consuming</b> from the platform and making a content-based <b>routing</b> decision — the kind of branching that's NiFi's bread and butter.</p>
+
+<div class="code">
+  <div class="filename"><span class="fdot"></span> flow 2 — consume, route, write</div>
+  <pre>
+<div class="ln"><span class="num">1</span><span class="src"><span class="tok-fn">ConsumeKafka</span> ──success──▶ <span class="tok-fn">EvaluateJsonPath</span> ──matched──▶ <span class="tok-fn">RouteOnAttribute</span></span></div>
+<div class="ln"><span class="num"> </span><span class="src">  (grocery.customer_feedback)    (extract rating)        ├─negative─▶ <span class="tok-fn">PutFile</span></span></div>
+<div class="ln"><span class="num"> </span><span class="src">                                                          └─other────▶ <span class="tok-fn">LogAttribute</span></span></div>
+  </pre>
+</div>
+
+<h4>Processor 1 — ConsumeKafka</h4>
+<table class="cfg">
+  <tr><th>Property</th><th>Value</th></tr>
+  <tr><td>Kafka Brokers</td><td><code class="inline">kafka1:29092,kafka2:29092,kafka3:29092</code></td></tr>
+  <tr><td>Topic Name(s)</td><td><code class="inline">grocery.customer_feedback</code></td></tr>
+  <tr><td>Group ID</td><td><code class="inline">nifi-feedback</code> (its own consumer group, separate from the ingest-worker's)</td></tr>
+  <tr><td>Offset Reset</td><td><code class="inline">latest</code></td></tr>
+</table>
+<div class="box">
+  <div class="box-title">Why a separate Group ID?</div>
+  <p style="margin:0">Kafka delivers each message to <i>one</i> consumer per group. Using <code class="inline">nifi-feedback</code> (not the worker's <code class="inline">grocery-ingest</code>) means NiFi gets its own copy of every feedback event without stealing messages from the ingest pipeline — both consumers see everything.</p>
+</div>
+
+<h4>Processor 2 — EvaluateJsonPath (pull out the rating)</h4>
+<table class="cfg">
+  <tr><th>Setting</th><th>Value</th></tr>
+  <tr><td>Destination</td><td><code class="inline">flowfile-attribute</code></td></tr>
+  <tr><td>add property → <code class="inline">rating</code></td><td><code class="inline">$.data.rating</code></td></tr>
+  <tr><td>add property → <code class="inline">theme</code></td><td><code class="inline">$.data.theme</code></td></tr>
+</table>
+<p>This copies the JSON's rating and theme into FlowFile <i>attributes</i> so the next processor can route on them without re-parsing the body.</p>
+
+<h4>Processor 3 — RouteOnAttribute (the branch)</h4>
+<table class="cfg">
+  <tr><th>Setting</th><th>Value</th></tr>
+  <tr><td>Routing Strategy</td><td><code class="inline">Route to Property name</code></td></tr>
+  <tr><td>add property → <code class="inline">negative</code></td><td><code class="inline">${rating:le(2)}</code></td></tr>
+</table>
+<p>The expression <code class="inline">${rating:le(2)}</code> is true when the rating is 2 or below. Those FlowFiles leave via the <code class="inline">negative</code> relationship; everything else exits via <code class="inline">unmatched</code>.</p>
+
+<h4>Processors 4 &amp; 5 — PutFile and LogAttribute</h4>
+<table class="cfg">
+  <tr><th>Processor</th><th>Connect from</th><th>Key setting</th></tr>
+  <tr><td>PutFile</td><td>RouteOnAttribute <code class="inline">negative</code></td><td>Directory <code class="inline">/tmp/feedback-alerts</code> — writes each low-rated review to a file.</td></tr>
+  <tr><td>LogAttribute</td><td>RouteOnAttribute <code class="inline">unmatched</code></td><td>Just logs; auto-terminate its <code class="inline">success</code>.</td></tr>
+</table>
+
+<div class="box ok">
+  <div class="box-title">✓ Verify it works</div>
+  <p style="margin:0">Because the seed loads extra low-rated "freshness" complaints for Produce (the shrink scenario), starting this flow with offset <code class="inline">earliest</code> instead of latest will immediately route a batch of negative reviews into <code class="inline">/tmp/feedback-alerts</code> inside the NiFi container: <code class="inline">docker compose exec nifi ls /tmp/feedback-alerts</code>.</p>
+</div>
+
+<!-- ===================== FLOW 3 ===================== -->
+<h2 id="flow3">Flow 3 · Scheduled what-if report</h2>
+<p>This flow calls the platform's <b>analytics what-if API</b> on a timer and saves the answer — turning the interactive assistant into an automated daily briefing. It shows NiFi calling an internal HTTP service and persisting the result.</p>
+
+<div class="code">
+  <div class="filename"><span class="fdot"></span> flow 3 — scheduled HTTP call</div>
+  <pre>
+<div class="ln"><span class="num">1</span><span class="src"><span class="tok-fn">GenerateFlowFile</span> ──▶ <span class="tok-fn">ReplaceText</span> ──▶ <span class="tok-fn">InvokeHTTP</span> ──Response──▶ <span class="tok-fn">PutFile</span></span></div>
+<div class="ln"><span class="num"> </span><span class="src">  (daily / 24h)      (question JSON)   (POST analytics)        (save answer)</span></div>
+  </pre>
+</div>
+
+<table class="cfg">
+  <tr><th>Processor</th><th>Setting</th><th>Value</th></tr>
+  <tr><td>GenerateFlowFile</td><td>Run Schedule</td><td><code class="inline">24 hours</code> (or <code class="inline">60 sec</code> to test)</td></tr>
+  <tr><td>ReplaceText</td><td>Replacement Value</td><td><code class="inline">{"question":"What changed in Produce shrink and Meat margin this week, and what should we do?"}</code></td></tr>
+  <tr><td rowspan="4">InvokeHTTP</td><td>HTTP Method</td><td><code class="inline">POST</code></td></tr>
+  <tr><td>Remote URL</td><td><code class="inline">http://analytics:8002/whatif</code></td></tr>
+  <tr><td>Request Content-Type</td><td><code class="inline">application/json</code></td></tr>
+  <tr><td>(auto-terminate)</td><td>terminate <code class="inline">Original</code>, <code class="inline">Retry</code>, <code class="inline">No Retry</code>, <code class="inline">Failure</code></td></tr>
+  <tr><td>PutFile</td><td>Directory</td><td><code class="inline">/tmp/whatif-reports</code> (connect from InvokeHTTP's <code class="inline">Response</code>)</td></tr>
+</table>
+
+<div class="box">
+  <div class="box-title">Why <code class="inline">analytics:8002</code> and not the load balancer?</div>
+  <p style="margin:0">NiFi is inside the Docker network, so it can reach the analytics service directly by its service name and internal port — no need to go back out through NGINX. (Going through <code class="inline">http://lb/analytics/whatif</code> would also work but adds a hop.)</p>
+</div>
+
+<div class="box ok">
+  <div class="box-title">✓ Verify it works</div>
+  <p style="margin:0">Set the schedule to 60 sec to test, start the flow, then: <code class="inline">docker compose exec nifi cat /tmp/whatif-reports/*</code> — you'll see the LLM's grounded answer (or, if Ollama is still warming up, the fact-based fallback). This is the same response the dashboard's what-if box returns.</p>
+</div>
+
+<!-- ===================== PROPS ===================== -->
+<h2 id="props">Connection settings cheat-sheet</h2>
+<p>Every flow above connects to the platform with the same handful of addresses. Because NiFi runs inside the Docker network, it uses <b>service names</b>, not <code class="inline">localhost</code>:</p>
+<table class="cfg">
+  <tr><th>To reach…</th><th>Use</th></tr>
+  <tr><td>Kafka (produce/consume)</td><td><code class="inline">kafka1:29092,kafka2:29092,kafka3:29092</code></td></tr>
+  <tr><td>Analytics API</td><td><code class="inline">http://analytics:8002</code></td></tr>
+  <tr><td>Message API</td><td><code class="inline">http://message-api:8001</code></td></tr>
+  <tr><td>MinIO (S3)</td><td><code class="inline">http://minio:9000</code></td></tr>
+  <tr><td>PostgreSQL</td><td><code class="inline">postgres:5432</code> (db <code class="inline">grocery</code>, user <code class="inline">grocery</code>)</td></tr>
+</table>
+<p>The 12 topics you can publish to or consume from: <code class="inline">grocery.sales</code>, <code class="inline">grocery.inventory</code>, <code class="inline">grocery.vendor_delivery</code>, <code class="inline">grocery.customer_feedback</code>, <code class="inline">grocery.shelf_space</code>, <code class="inline">grocery.ad_program</code>, <code class="inline">grocery.marketing</code>, <code class="inline">grocery.discount_program</code>, <code class="inline">grocery.expiry</code>, <code class="inline">grocery.binary</code>, <code class="inline">grocery.text</code>, <code class="inline">grocery.json</code>.</p>
+
+<!-- ===================== TROUBLESHOOT ===================== -->
+<h2 id="troubleshoot">Troubleshooting</h2>
+<table class="cfg">
+  <tr><th>Symptom</th><th>Cause &amp; fix</th></tr>
+  <tr><td>Can't reach the UI / blank page</td><td>Use <code class="inline">http://localhost:8443/nifi/</code> (direct port, bypasses the proxy). Give NiFi 1–2 min to start. Check <code class="inline">docker compose logs nifi</code>.</td></tr>
+  <tr><td>PublishKafka routes to failure</td><td>Check the brokers value uses the <b>internal</b> ports (<code class="inline">:29092</code>), not <code class="inline">localhost:9092</code> — NiFi is on the Docker network.</td></tr>
+  <tr><td>ConsumeKafka gets nothing</td><td>Set Offset Reset to <code class="inline">earliest</code> to read existing messages; <code class="inline">latest</code> only sees new ones. Confirm the topic name is exact.</td></tr>
+  <tr><td>InvokeHTTP times out</td><td>If calling <code class="inline">/whatif</code>, the LLM may be loading — raise the processor's Read Timeout, or expect the fact-based fallback.</td></tr>
+  <tr><td>Processor won't start (yellow ⚠)</td><td>Hover the warning icon — it lists missing required properties or unconnected relationships to fix.</td></tr>
+</table>
+
+<div class="footer">
+  <p>Apache NiFi example flows for the Grocery Operations Intelligence Platform. NiFi 2.6 · unsecured HTTP for local use. These flows are described step-by-step rather than auto-imported so they're robust across NiFi versions — build them on the canvas by dragging the listed processors, setting the properties shown, and drawing the connections. Tap any underlined code line to expand; use A−/A+ to scale text; toggle light/dark in the top bar.</p>
+</div>
+
+</main>
+</div>
+
+<div class="modal-overlay" id="modal" onclick="if(event.target===this)closeModal()">
+  <div class="modal" role="dialog" aria-modal="true">
+    <div class="modal-head"><h3 id="modalTitle">Detail</h3><button class="x" onclick="closeModal()" aria-label="Close">×</button></div>
+    <div class="modal-body" id="modalBody"></div>
+  </div>
+</div>
+
+<script>
+function toggleTheme(){const h=document.documentElement;const dark=h.getAttribute('data-theme')==='dark';h.setAttribute('data-theme',dark?'light':'dark');document.getElementById('themeGlyph').textContent=dark?'◐':'◑';document.getElementById('themeLabel').textContent=dark?'Dark':'Light';}
+let fontPt=12;const FONT_MIN=14,FONT_MAX=36;
+function applyFont(){const px=(fontPt*4/3).toFixed(1);document.documentElement.style.setProperty('--base-font',px+'px');document.getElementById('fontVal').innerHTML=fontPt+'&nbsp;pt';}
+function bumpFont(d){fontPt=Math.max(FONT_MIN-2,Math.min(FONT_MAX,fontPt+d));applyFont();}
+function toggleToc(){document.getElementById('toc').classList.toggle('open');}
+function toggleLine(el){const a=el.nextElementSibling;if(a&&a.classList.contains('ann'))a.classList.toggle('open');}
+const MODALS={
+  'how-to-add':{title:'How to add & configure a processor',body:`<p>On the NiFi canvas, drag the <b>processor</b> icon (top-left toolbar) onto the canvas. A dialog opens — type the processor name (e.g. <code>GenerateFlowFile</code>) to filter, pick it, and click Add.</p><p>Double-click the processor to open its configuration. The <b>Properties</b> tab is where you set the values in the tables here; the <b>Scheduling</b> tab sets the run interval; the <b>Relationships</b> tab (or the Settings tab in 2.x) lets you auto-terminate relationships you don't connect anywhere.</p>`},
+  'how-to-connect':{title:'How to draw a connection',body:`<p>Hover over the source processor until a circle-arrow icon appears in its centre, then drag from that icon to the target processor and release. A dialog asks which <b>relationship(s)</b> the connection should carry (e.g. <code>success</code>).</p><p>A processor can't start until every relationship is either connected to something or auto-terminated. The yellow ⚠ badge tells you what's missing — hover it to read the exact reason.</p>`},
+};
+function openModal(id){const m=MODALS[id];if(!m)return;document.getElementById('modalTitle').textContent=m.title;document.getElementById('modalBody').innerHTML=m.body;document.getElementById('modal').classList.add('open');}
+function closeModal(){document.getElementById('modal').classList.remove('open');}
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();});
+window.addEventListener('DOMContentLoaded',()=>{applyFont();const links=[...document.querySelectorAll('nav.toc a')];const map={};links.forEach(a=>map[a.getAttribute('href').slice(1)]=a);const obs=new IntersectionObserver(es=>{es.forEach(en=>{if(en.isIntersecting){links.forEach(l=>l.classList.remove('active'));const a=map[en.target.id];if(a)a.classList.add('active');}})},{rootMargin:'-70px 0px -70% 0px'});document.querySelectorAll('main h2[id], main h1[id]').forEach(h=>obs.observe(h));links.forEach(a=>a.addEventListener('click',()=>{if(window.innerWidth<=860)document.getElementById('toc').classList.remove('open');}));});
+</script>
+</body>
+</html>

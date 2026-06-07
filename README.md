@@ -6,6 +6,10 @@ A dockerized, event-driven analytics platform for grocery-store operations. A Ka
 
 A standalone diagram is included at [`docs/architecture.svg`](docs/architecture.svg).
 
+An interactive, line-by-line tutorial covering every service, its configuration, and how they work together is in [`docs/tutorial.html`](docs/tutorial.html) — a single static HTML page (light/dark mode, font-size scaler, expandable code annotations and detail popups).
+
+Example Apache NiFi flows wired to the grocery scenarios (simulate sales into Kafka, branch feedback by sentiment, scheduled what-if report) are documented in [`docs/nifi-flows.html`](docs/nifi-flows.html).
+
 ```
                          ┌──────────────────────────────┐
   Browser ─► :8080 LB ─► │  /        → dashboard         │
@@ -28,6 +32,8 @@ A standalone diagram is included at [`docs/architecture.svg`](docs/architecture.
 | Service        | Tech                                   | Port (host) | Purpose                                  |
 |----------------|----------------------------------------|-------------|------------------------------------------|
 | lb             | nginx 1.27                             | 8080        | Single entry point / load balancer       |
+| prometheus     | prom/prometheus v2.54.1                | 9090        | Scrapes service metrics                  |
+| grafana        | grafana/grafana 11.2.0                 | 3000        | Monitoring dashboards                    |
 | dashboard      | FastAPI + static HTML/Tailwind         | (via LB)    | IBM-styled UI, light/dark, JSON/SVG export |
 | message-api    | FastAPI + kafka-python-ng (3 replicas) | (via LB)    | Accept text/json/binary messages         |
 | ingest-worker  | kafka-python-ng consumer + psycopg2    | —           | Persist Kafka events to Postgres         |
@@ -113,7 +119,9 @@ dashboard, API, and analytics services are on the internal Docker network only
 (no host ports of their own), so the browser always goes through the LB:
 
 - Dashboard: `http://localhost:8080/`
-- Apache NiFi UI: `http://localhost:8080/nifi/` (unsecured/HTTP for local use)
+- Grafana monitoring: `http://localhost:3000` (login `admin` / `grocery`) — the **Grocery Platform — Service Overview** dashboard is auto-provisioned.
+- Prometheus: `http://localhost:9090` (scrapes the services' `/metrics`).
+- Apache NiFi UI: `https://localhost:8443/nifi` — **HTTPS** with single-user login `admin` / `groceryAdmin2024`. NiFi auto-generates a self-signed certificate, so your browser will show a security warning on first visit — that's expected; proceed past it.
 - Message API: `http://localhost:8080/api/...`
 - Analytics API: `http://localhost:8080/analytics/...`
 
@@ -210,6 +218,19 @@ the load balancer round-robin across the three `message-api` instances.
 `/metrics/{kpi,profit/category,profit/shelf,loss,expiring,lowstock,vendors,promotions,ads,feedback,revenue/daily}` ·
 `/forecast/demand` · `/forecast/profit?revenue_multiplier=&cost_multiplier=` ·
 `/reports` and `/reports/{name}` · `/charts/{name}.svg` · `POST /whatif` · `POST /whatif/reindex`.
+
+## Monitoring
+
+The stack ships with Prometheus + Grafana. The three FastAPI services
+(`message-api`, `analytics`, `dashboard`) expose Prometheus metrics at
+`/metrics` via `prometheus-fastapi-instrumentator` — request counts, latency
+histograms, and status codes. Prometheus (`:9090`) scrapes them every 15s, and
+Grafana (`:3000`, `admin`/`grocery`) auto-loads a **Service Overview** dashboard
+with request rate, p95 latency, error rate, and per-endpoint breakdowns.
+
+Open Grafana from the dashboard's top bar (**Monitoring** button) or directly at
+`http://localhost:3000`. To add your own panels, drop a dashboard JSON into
+`monitoring/grafana/dashboards/` — it's picked up automatically.
 
 ## Notes
 

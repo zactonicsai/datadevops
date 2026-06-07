@@ -4,3 +4,4 @@ kafka-python-ng==2.2.3
 minio==7.2.7
 pydantic==2.7.1
 python-multipart==0.0.9
+prometheus-fastapi-instrumentator==7.0.0

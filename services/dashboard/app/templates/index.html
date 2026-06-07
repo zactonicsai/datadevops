@@ -23,6 +23,7 @@
               gray10: '#f4f4f4', gray20: '#e0e0e0',
               gray70: '#525252', gray90: '#262626',
               green: '#24a148', red: '#da1e28', amber: '#d2a106',
+              magenta: '#ee5396', orange: '#ff832b',
             }
           }
         }
@@ -53,6 +54,12 @@
         <span class="hidden sm:inline text-[11px] font-mono px-2 py-0.5 rounded bg-ibm-gray10 dark:bg-ibm-gray90 text-ibm-gray70 dark:text-ibm-gray20">live</span>
       </div>
       <div class="flex items-center gap-2">
+        <a href="https://localhost:8443/nifi" target="_blank" rel="noopener" class="text-[12px] font-medium px-3 py-1.5 border border-ibm-gray20 dark:border-ibm-gray70 hover:bg-ibm-gray10 dark:hover:bg-ibm-gray90 transition inline-flex items-center gap-1.5" title="Open Apache NiFi (HTTPS, opens in new tab)">
+          <span class="w-1.5 h-1.5 rounded-full bg-ibm-magenta"></span>NiFi
+        </a>
+        <a href="http://localhost:3000/d/grocery-overview" target="_blank" rel="noopener" class="text-[12px] font-medium px-3 py-1.5 border border-ibm-gray20 dark:border-ibm-gray70 hover:bg-ibm-gray10 dark:hover:bg-ibm-gray90 transition inline-flex items-center gap-1.5" title="Open Grafana monitoring (opens in new tab)">
+          <span class="w-1.5 h-1.5 rounded-full bg-ibm-orange"></span>Monitoring
+        </a>
         <button id="btnExportAll" class="text-[12px] font-medium px-3 py-1.5 border border-ibm-gray20 dark:border-ibm-gray70 hover:bg-ibm-gray10 dark:hover:bg-ibm-gray90 transition">Export dashboard JSON</button>
         <button id="btnTheme" class="w-9 h-9 grid place-items-center border border-ibm-gray20 dark:border-ibm-gray70 hover:bg-ibm-gray10 dark:hover:bg-ibm-gray90 transition" title="Toggle theme" aria-label="Toggle theme">
           <span id="themeIcon">🌙</span>

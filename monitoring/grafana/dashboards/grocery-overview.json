@@ -1,0 +1,130 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "schemaVersion": 39,
+  "tags": ["grocery", "platform"],
+  "templating": { "list": [] },
+  "time": { "from": "now-30m", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Grocery Platform — Service Overview",
+  "uid": "grocery-overview",
+  "version": 1,
+  "refresh": "10s",
+  "panels": [
+    {
+      "type": "row",
+      "title": "Traffic",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Request rate (req/s) by service",
+      "description": "Requests per second handled by each FastAPI service.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "id": 1,
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "reqps",
+          "custom": { "drawStyle": "line", "fillOpacity": 15, "lineWidth": 2, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "expr": "sum by (job) (rate(http_requests_total[1m]))", "legendFormat": "{{job}}", "refId": "A" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Request latency p95 (s) by service",
+      "description": "95th-percentile request duration per service.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "id": 2,
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum by (job, le) (rate(http_request_duration_seconds_bucket[5m])))", "legendFormat": "{{job}}", "refId": "A" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Health",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 },
+      "id": 101,
+      "collapsed": false
+    },
+    {
+      "type": "stat",
+      "title": "Total requests (5m)",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 10 },
+      "id": 3,
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "unit": "short",
+        "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "area", "textMode": "auto" },
+      "targets": [ { "expr": "sum(increase(http_requests_total[5m]))", "refId": "A" } ]
+    },
+    {
+      "type": "stat",
+      "title": "Error rate (5xx, 5m)",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 10 },
+      "id": 4,
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "unit": "reqps",
+        "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.1 } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "background", "graphMode": "area", "textMode": "auto" },
+      "targets": [ { "expr": "sum(rate(http_requests_total{status=~\"5..\"}[5m]))", "refId": "A" } ]
+    },
+    {
+      "type": "stat",
+      "title": "Services up",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 10 },
+      "id": 5,
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "unit": "short",
+        "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "none", "textMode": "auto" },
+      "targets": [ { "expr": "sum(up{job=~\"message-api|analytics|dashboard\"})", "refId": "A" } ]
+    },
+    {
+      "type": "stat",
+      "title": "Request rate (1m, all)",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 10 },
+      "id": 6,
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "unit": "reqps",
+        "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 50 } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "area", "textMode": "auto" },
+      "targets": [ { "expr": "sum(rate(http_requests_total[1m]))", "refId": "A" } ]
+    },
+    {
+      "type": "row",
+      "title": "Per-endpoint detail",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 },
+      "id": 102,
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Request rate by endpoint",
+      "description": "Top endpoints by request rate across all services.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 17 },
+      "id": 7,
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "reqps",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never", "stacking": { "mode": "normal" } } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "expr": "sum by (handler) (rate(http_requests_total[1m]))", "legendFormat": "{{handler}}", "refId": "A" }
+      ]
+    }
+  ]
+}
