@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en" class="">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Grocery Operations Intelligence</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['"IBM Plex Sans"', 'system-ui', 'sans-serif'],
+            mono: ['"IBM Plex Mono"', 'monospace'],
+          },
+          colors: {
+            ibm: {
+              blue: '#0f62fe', blue70: '#0043ce',
+              ink: '#161616', ink2: '#393939',
+              gray10: '#f4f4f4', gray20: '#e0e0e0',
+              gray70: '#525252', gray90: '#262626',
+              green: '#24a148', red: '#da1e28', amber: '#d2a106',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    :root { color-scheme: light; }
+    html.dark { color-scheme: dark; }
+    body { -webkit-font-smoothing: antialiased; }
+    .gsp-chart { width: 100%; height: auto; }
+    /* tile entrance */
+    .tile { opacity: 0; transform: translateY(8px); animation: rise .5s ease forwards; }
+    @keyframes rise { to { opacity: 1; transform: none; } }
+    .tab-active { border-bottom: 2px solid #0f62fe; color: #0f62fe; }
+    .skel { background: linear-gradient(90deg,rgba(127,127,127,.08),rgba(127,127,127,.18),rgba(127,127,127,.08)); background-size:200% 100%; animation: sh 1.2s infinite; }
+    @keyframes sh { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
+  </style>
+</head>
+<body class="bg-white text-ibm-ink dark:bg-ibm-ink dark:text-ibm-gray10 font-sans transition-colors">
+
+  <!-- Top bar -->
+  <header class="border-b border-ibm-gray20 dark:border-ibm-gray90 sticky top-0 z-30 bg-white/90 dark:bg-ibm-ink/90 backdrop-blur">
+    <div class="max-w-[1400px] mx-auto px-5 h-14 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <div class="w-2.5 h-6 bg-ibm-blue"></div>
+        <h1 class="text-[15px] font-semibold tracking-tight">Grocery Operations Intelligence</h1>
+        <span class="hidden sm:inline text-[11px] font-mono px-2 py-0.5 rounded bg-ibm-gray10 dark:bg-ibm-gray90 text-ibm-gray70 dark:text-ibm-gray20">live</span>
+      </div>
+      <div class="flex items-center gap-2">
+        <button id="btnExportAll" class="text-[12px] font-medium px-3 py-1.5 border border-ibm-gray20 dark:border-ibm-gray70 hover:bg-ibm-gray10 dark:hover:bg-ibm-gray90 transition">Export dashboard JSON</button>
+        <button id="btnTheme" class="w-9 h-9 grid place-items-center border border-ibm-gray20 dark:border-ibm-gray70 hover:bg-ibm-gray10 dark:hover:bg-ibm-gray90 transition" title="Toggle theme" aria-label="Toggle theme">
+          <span id="themeIcon">🌙</span>
+        </button>
+      </div>
+    </div>
+    <!-- Role tabs -->
+    <nav class="max-w-[1400px] mx-auto px-5 flex gap-6 text-[13px] font-medium overflow-x-auto">
+      <button data-view="overview"  class="view-tab py-2.5 tab-active whitespace-nowrap">Overview</button>
+      <button data-view="manager"   class="view-tab py-2.5 text-ibm-gray70 dark:text-ibm-gray20 whitespace-nowrap">Manager · Profit</button>
+      <button data-view="admin"     class="view-tab py-2.5 text-ibm-gray70 dark:text-ibm-gray20 whitespace-nowrap">Admin · Operations</button>
+      <button data-view="growth"    class="view-tab py-2.5 text-ibm-gray70 dark:text-ibm-gray20 whitespace-nowrap">Marketing &amp; Growth</button>
+      <button data-view="investor"  class="view-tab py-2.5 text-ibm-gray70 dark:text-ibm-gray20 whitespace-nowrap">Investor</button>
+      <button data-view="planning"  class="view-tab py-2.5 text-ibm-gray70 dark:text-ibm-gray20 whitespace-nowrap">Forecast &amp; What-if</button>
+    </nav>
+  </header>
+
+  <main class="max-w-[1400px] mx-auto px-5 py-6">
+
+    <!-- KPI strip (always visible) -->
+    <section id="kpiStrip" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-7"></section>
+
+    <!-- ===================== OVERVIEW ===================== -->
+    <div data-panel="overview" class="view-panel">
+      <div class="grid lg:grid-cols-3 gap-4">
+        <div class="lg:col-span-2 border border-ibm-gray20 dark:border-ibm-gray90 p-4 tile">
+          <div class="flex items-center justify-between mb-2">
+            <h2 class="text-sm font-semibold">Revenue &amp; Gross Profit Trend</h2>
+            <button class="svg-export text-[11px] text-ibm-blue hover:underline" data-chart="revenue_trend">Export SVG</button>
+          </div>
+          <div id="chart_revenue_trend" class="min-h-[300px]"></div>
+        </div>
+        <div class="border border-ibm-gray20 dark:border-ibm-gray90 p-4 tile">
+          <div class="flex items-center justify-between mb-2">
+            <h2 class="text-sm font-semibold">Loss by Cause</h2>
+            <button class="svg-export text-[11px] text-ibm-blue hover:underline" data-chart="loss_by_cause">Export SVG</button>
+          </div>
+          <div id="chart_loss_by_cause" class="min-h-[300px]"></div>
+        </div>
+      </div>
+      <div class="grid lg:grid-cols-2 gap-4 mt-4">
+        <div class="border border-ibm-gray20 dark:border-ibm-gray90 p-4 tile">
+          <div class="flex items-center justify-between mb-2">
+            <h2 class="text-sm font-semibold">Net Profit by Category</h2>
+            <button class="svg-export text-[11px] text-ibm-blue hover:underline" data-chart="profit_by_category">Export SVG</button>
+          </div>
+          <div id="chart_profit_by_category" class="min-h-[300px]"></div>
+        </div>
+        <div class="border border-ibm-gray20 dark:border-ibm-gray90 p-4 tile">
+          <div class="flex items-center justify-between mb-2">
+            <h2 class="text-sm font-semibold">Profit per Linear Foot</h2>
+            <button class="svg-export text-[11px] text-ibm-blue hover:underline" data-chart="profit_per_foot">Export SVG</button>
+          </div>
+          <div id="chart_profit_per_foot" class="min-h-[300px]"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== MANAGER ===================== -->
+    <div data-panel="manager" class="view-panel hidden">
+      <div class="grid lg:grid-cols-2 gap-4">
+        <div class="border border-ibm-gray20 dark:border-ibm-gray90 p-4">
+          <div class="flex items-center justify-between mb-2">
+            <h2 class="text-sm font-semibold">Profit &amp; Margin by Category</h2>
+            <button class="json-export text-[11px] text-ibm-blue hover:underline" data-endpoint="metrics/profit/category" data-name="profit_by_category">Export JSON</button>
+          </div>
+          <div id="tbl_cat"></div>
+        </div>
+        <div class="border border-ibm-gray20 dark:border-ibm-gray90 p-4">
+          <div class="flex items-center justify-between mb-2">
+            <h2 class="text-sm font-semibold">Shelf Performance (profit / foot)</h2>
+            <button class="json-export text-[11px] text-ibm-blue hover:underline" data-endpoint="metrics/profit/shelf" data-name="profit_by_shelf">Export JSON</button>
+          </div>
+          <div id="tbl_shelf"></div>
+        </div>
+      </div>
+      <div class="border border-ibm-gray20 dark:border-ibm-gray90 p-4 mt-4">
+        <h2 class="text-sm font-semibold mb-2">Loss Breakdown by Category</h2>
+        <div id="tbl_losscat"></div>
+      </div>
+    </div>
+
+    <!-- ===================== ADMIN ===================== -->
+    <div data-panel="admin" class="view-panel hidden">
+      <div class="grid lg:grid-cols-2 gap-4">
+        <div class="border border-ibm-gray20 dark:border-ibm-gray90 p-4">
+          <div class="flex items-center justify-between mb-2">
+            <h2 class="text-sm font-semibold">Expiring Soon (≤7 days) · retail at risk</h2>
+            <button class="json-export text-[11px] text-ibm-blue hover:underline" data-endpoint="metrics/expiring" data-name="expiring_soon">Export JSON</button>
+          </div>
+          <div id="tbl_expiring"></div>
+        </div>
+        <div class="border border-ibm-gray20 dark:border-ibm-gray90 p-4">
+          <div class="flex items-center justify-between mb-2">
+            <h2 class="text-sm font-semibold">Low Stock · reorder triggers</h2>
+            <button class="json-export text-[11px] text-ibm-blue hover:underline" data-endpoint="metrics/lowstock" data-name="low_stock">Export JSON</button>
+          </div>
+          <div id="tbl_lowstock"></div>
+        </div>
+      </div>
+      <div class="border border-ibm-gray20 dark:border-ibm-gray90 p-4 mt-4">
+        <div class="flex items-center justify-between mb-2">
+          <h2 class="text-sm font-semibold">Vendor Scorecard</h2>
+          <button class="json-export text-[11px] text-ibm-blue hover:underline" data-endpoint="metrics/vendors" data-name="vendor_scorecard">Export JSON</button>
+        </div>
+        <div id="tbl_vendors"></div>
+      </div>
+    </div>
+
+    <!-- ===================== GROWTH ===================== -->
+    <div data-panel="growth" class="view-panel hidden">
+      <div class="grid lg:grid-cols-2 gap-4">
+        <div class="border border-ibm-gray20 dark:border-ibm-gray90 p-4">
+          <div class="flex items-center justify-between mb-2">
+            <h2 class="text-sm font-semibold">Discount Program ROI (incremental margin)</h2>
+            <button class="json-export text-[11px] text-ibm-blue hover:underline" data-endpoint="metrics/promotions" data-name="promotions">Export JSON</button>
+          </div>
+          <div id="tbl_promo"></div>
+        </div>
+        <div class="border border-ibm-gray20 dark:border-ibm-gray90 p-4">
+          <div class="flex items-center justify-between mb-2">
+            <h2 class="text-sm font-semibold">Ad Program ROI</h2>
+            <button class="json-export text-[11px] text-ibm-blue hover:underline" data-endpoint="metrics/ads" data-name="ad_programs">Export JSON</button>
+          </div>
+          <div id="tbl_ads"></div>
+        </div>
+      </div>
+      <div class="border border-ibm-gray20 dark:border-ibm-gray90 p-4 mt-4">
+        <h2 class="text-sm font-semibold mb-2">Customer Feedback Themes</h2>
+        <div id="tbl_feedback"></div>
+      </div>
+    </div>
+
+    <!-- ===================== INVESTOR ===================== -->
+    <div data-panel="investor" class="view-panel hidden">
+      <div class="grid lg:grid-cols-3 gap-4">
+        <div class="lg:col-span-2 border border-ibm-gray20 dark:border-ibm-gray90 p-4">
+          <div class="flex items-center justify-between mb-2">
+            <h2 class="text-sm font-semibold">30-Day Profit Projection</h2>
+            <button class="svg-export text-[11px] text-ibm-blue hover:underline" data-chart="profit_projection">Export SVG</button>
+          </div>
+          <div id="chart_profit_projection" class="min-h-[300px]"></div>
+          <p id="projAssume" class="text-[11px] text-ibm-gray70 dark:text-ibm-gray20 mt-2 font-mono"></p>
+        </div>
+        <div class="border border-ibm-gray20 dark:border-ibm-gray90 p-4">
+          <h2 class="text-sm font-semibold mb-3">Investor Summary</h2>
+          <div id="investorKpi" class="space-y-2 text-[13px]"></div>
+          <button class="report-export mt-4 w-full text-[12px] font-medium px-3 py-2 bg-ibm-blue text-white hover:bg-ibm-blue70 transition" data-report="investor_summary">Download Investor Report (JSON)</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== PLANNING / WHAT-IF ===================== -->
+    <div data-panel="planning" class="view-panel hidden">
+      <div class="border border-ibm-gray20 dark:border-ibm-gray90 p-4 mb-4">
+        <div class="flex items-center justify-between mb-2">
+          <h2 class="text-sm font-semibold">14-Day Demand Forecast by Category</h2>
+          <button class="svg-export text-[11px] text-ibm-blue hover:underline" data-chart="demand_forecast">Export SVG</button>
+        </div>
+        <div id="chart_demand_forecast" class="min-h-[300px]"></div>
+      </div>
+
+      <!-- What-if assistant -->
+      <div class="border border-ibm-blue/40 dark:border-ibm-blue/40 p-4 bg-ibm-blue/[0.03] dark:bg-ibm-blue/[0.06]">
+        <div class="flex items-center gap-2 mb-1">
+          <div class="w-2 h-2 rounded-full bg-ibm-blue animate-pulse"></div>
+          <h2 class="text-sm font-semibold">What-if Scenario Assistant</h2>
+          <span class="text-[11px] font-mono text-ibm-gray70 dark:text-ibm-gray20">Ollama · ChromaDB context</span>
+        </div>
+        <p class="text-[12px] text-ibm-gray70 dark:text-ibm-gray20 mb-3">Ask about pricing, shelf space, promotions, or staffing. The model reasons over your store's own retrieved metrics.</p>
+        <textarea id="whatifInput" rows="3" placeholder="e.g. If I cut dairy prices 5% and double its endcap shelf space, what happens to margin over the next month?"
+          class="w-full p-3 text-[13px] bg-white dark:bg-ibm-gray90 border border-ibm-gray20 dark:border-ibm-gray70 focus:outline-none focus:ring-2 focus:ring-ibm-blue font-mono resize-y"></textarea>
+        <div class="flex flex-wrap gap-2 mt-2">
+          <button id="whatifAsk" class="text-[12px] font-medium px-4 py-2 bg-ibm-blue text-white hover:bg-ibm-blue70 transition">Run scenario</button>
+          <button class="whatif-chip text-[11px] px-2.5 py-1 border border-ibm-gray20 dark:border-ibm-gray70 hover:bg-ibm-gray10 dark:hover:bg-ibm-gray90">Which category should I expand?</button>
+          <button class="whatif-chip text-[11px] px-2.5 py-1 border border-ibm-gray20 dark:border-ibm-gray70 hover:bg-ibm-gray10 dark:hover:bg-ibm-gray90">How do I cut shrink 20%?</button>
+          <button class="whatif-chip text-[11px] px-2.5 py-1 border border-ibm-gray20 dark:border-ibm-gray70 hover:bg-ibm-gray10 dark:hover:bg-ibm-gray90">Which promotion to repeat?</button>
+        </div>
+        <div id="whatifOut" class="mt-4 hidden">
+          <div class="text-[13px] leading-relaxed whitespace-pre-wrap bg-white dark:bg-ibm-gray90 border border-ibm-gray20 dark:border-ibm-gray70 p-3" id="whatifAnswer"></div>
+          <details class="mt-2 text-[11px] text-ibm-gray70 dark:text-ibm-gray20">
+            <summary class="cursor-pointer">Facts the model used</summary>
+            <ul id="whatifFacts" class="mt-1 list-disc pl-5 space-y-0.5"></ul>
+          </details>
+          <button id="whatifExport" class="mt-2 text-[11px] text-ibm-blue hover:underline">Export answer JSON</button>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <footer class="max-w-[1400px] mx-auto px-5 py-6 text-[11px] text-ibm-gray70 dark:text-ibm-gray20 border-t border-ibm-gray20 dark:border-ibm-gray90 mt-8">
+    Grocery Operations Intelligence Platform · Kafka · Postgres · pandas / scikit-learn · Ollama · ChromaDB ·
+    <span id="updated"></span>
+  </footer>
+
+  <div id="toast" class="fixed bottom-4 right-4 px-4 py-2 bg-ibm-ink text-white text-[12px] opacity-0 pointer-events-none transition translate-y-2 z-50"></div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

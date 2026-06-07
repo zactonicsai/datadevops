@@ -1,0 +1,358 @@
+version: "3.8"
+
+# =============================================================================
+# Grocery Operations Intelligence Platform
+# Single-file orchestration: 2x Zookeeper, 3x Kafka, NGINX load balancer,
+# message-api (scaled x3), ingest worker, analytics, dashboard, Postgres,
+# MinIO (binary store), ChromaDB (vectors) and Ollama (local LLM).
+# =============================================================================
+
+x-kafka-common: &kafka-common
+  image: confluentinc/cp-kafka:7.6.1
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "bash", "-c", "echo"]
+    interval: 15s
+    timeout: 10s
+    retries: 10
+    start_period: 40s
+
+services:
+  # ---------------------------------------------------------------------------
+  # Zookeeper ensemble (2 nodes)
+  # ---------------------------------------------------------------------------
+  zookeeper1:
+    image: confluentinc/cp-zookeeper:7.6.1
+    container_name: gsp-zookeeper1
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_SERVER_ID: 1
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_INIT_LIMIT: 5
+      ZOOKEEPER_SYNC_LIMIT: 2
+      ZOOKEEPER_SERVERS: zookeeper1:2888:3888;zookeeper2:2888:3888
+    volumes:
+      - zk1-data:/var/lib/zookeeper/data
+      - zk1-log:/var/lib/zookeeper/log
+    networks: [grocery-net]
+
+  zookeeper2:
+    image: confluentinc/cp-zookeeper:7.6.1
+    container_name: gsp-zookeeper2
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_SERVER_ID: 2
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_INIT_LIMIT: 5
+      ZOOKEEPER_SYNC_LIMIT: 2
+      ZOOKEEPER_SERVERS: zookeeper1:2888:3888;zookeeper2:2888:3888
+    volumes:
+      - zk2-data:/var/lib/zookeeper/data
+      - zk2-log:/var/lib/zookeeper/log
+    networks: [grocery-net]
+
+  # ---------------------------------------------------------------------------
+  # Kafka cluster (3 brokers, replication factor 3)
+  # ---------------------------------------------------------------------------
+  kafka1:
+    <<: *kafka-common
+    container_name: gsp-kafka1
+    depends_on: [zookeeper1, zookeeper2]
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper1:2181,zookeeper2:2181"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka1:29092,EXTERNAL://localhost:9092"
+      KAFKA_LISTENERS: "INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "INTERNAL"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 3
+    ports: ["9092:9092"]
+    volumes: [kafka1-data:/var/lib/kafka/data]
+    networks: [grocery-net]
+
+  kafka2:
+    <<: *kafka-common
+    container_name: gsp-kafka2
+    depends_on: [zookeeper1, zookeeper2]
+    environment:
+      KAFKA_BROKER_ID: 2
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper1:2181,zookeeper2:2181"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka2:29092,EXTERNAL://localhost:9093"
+      KAFKA_LISTENERS: "INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9093"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "INTERNAL"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 3
+    ports: ["9093:9093"]
+    volumes: [kafka2-data:/var/lib/kafka/data]
+    networks: [grocery-net]
+
+  kafka3:
+    <<: *kafka-common
+    container_name: gsp-kafka3
+    depends_on: [zookeeper1, zookeeper2]
+    environment:
+      KAFKA_BROKER_ID: 3
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper1:2181,zookeeper2:2181"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka3:29092,EXTERNAL://localhost:9094"
+      KAFKA_LISTENERS: "INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9094"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "INTERNAL"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 3
+    ports: ["9094:9094"]
+    volumes: [kafka3-data:/var/lib/kafka/data]
+    networks: [grocery-net]
+
+  # One-shot: create all grocery topics once the cluster is healthy
+  kafka-setup:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: gsp-kafka-setup
+    depends_on:
+      kafka1: {condition: service_healthy}
+      kafka2: {condition: service_healthy}
+      kafka3: {condition: service_healthy}
+    entrypoint: ["/bin/bash", "/setup/create-topics.sh"]
+    volumes:
+      - ./kafka-config:/setup:ro
+    networks: [grocery-net]
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — system of record
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: gsp-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: grocery
+      POSTGRES_PASSWORD: grocery_pw
+      POSTGRES_DB: grocery
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./init/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U grocery"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    ports: ["5432:5432"]
+    networks: [grocery-net]
+
+  # ---------------------------------------------------------------------------
+  # MinIO — S3-compatible object store for uploaded binary files
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:RELEASE.2024-06-13T22-53-53Z
+    container_name: gsp-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes: [minio-data:/data]
+    ports: ["9000:9000", "9001:9001"]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    networks: [grocery-net]
+
+  # ---------------------------------------------------------------------------
+  # ChromaDB — vector store for what-if retrieval context
+  # ---------------------------------------------------------------------------
+  chromadb:
+    image: chromadb/chroma:0.5.5
+    container_name: gsp-chromadb
+    restart: unless-stopped
+    environment:
+      IS_PERSISTENT: "TRUE"
+      ANONYMIZED_TELEMETRY: "FALSE"
+    volumes: [chroma-data:/chroma/chroma]
+    ports: ["8000:8000"]
+    networks: [grocery-net]
+
+  # ---------------------------------------------------------------------------
+  # Ollama — local LLM for scenario reasoning
+  # ---------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: gsp-ollama
+    restart: unless-stopped
+    volumes: [ollama-data:/root/.ollama]
+    ports: ["11434:11434"]
+    networks: [grocery-net]
+
+  # Pulls the model once on startup (llama3.2 — small, runs on CPU)
+  ollama-pull:
+    image: ollama/ollama:latest
+    container_name: gsp-ollama-pull
+    depends_on: [ollama]
+    entrypoint: ["/bin/sh", "-c", "sleep 8 && OLLAMA_HOST=http://ollama:11434 ollama pull llama3.2 && echo done"]
+    networks: [grocery-net]
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # Apache NiFi — visual dataflow, using the SAME Zookeeper ensemble for state
+  # management (nifi.state.management.embedded.zookeeper.start=false). Runs
+  # unsecured over HTTP for local use: the HTTPS_* vars and keystore must be
+  # blanked or the image defaults back to HTTPS and demands a keystore.
+  # UI reachable via the load balancer at http://localhost:8080/nifi/
+  # ---------------------------------------------------------------------------
+  nifi:
+    image: apache/nifi:2.6.0
+    container_name: gsp-nifi
+    restart: unless-stopped
+    depends_on: [zookeeper1, zookeeper2]
+    environment:
+      # --- run unsecured on HTTP (no TLS/keystore) ---
+      NIFI_WEB_HTTP_HOST: "0.0.0.0"
+      NIFI_WEB_HTTP_PORT: "8080"
+      NIFI_WEB_HTTPS_HOST: ""
+      NIFI_WEB_HTTPS_PORT: ""
+      NIFI_SECURITY_KEYSTORE: ""
+      NIFI_SECURITY_KEYSTOREPASSWD: ""
+      NIFI_SECURITY_KEYPASSWD: ""
+      NIFI_SECURITY_TRUSTSTORE: ""
+      NIFI_SECURITY_TRUSTSTOREPASSWD: ""
+      NIFI_REMOTE_INPUT_SECURE: "false"
+      # served behind the LB under the /nifi/ path
+      NIFI_WEB_PROXY_CONTEXT_PATH: "/nifi"
+      NIFI_WEB_PROXY_HOST: "localhost:8080,localhost"
+      # --- use OUR Zookeeper ensemble for cluster state (not embedded) ---
+      NIFI_ZK_CONNECT_STRING: "zookeeper1:2181,zookeeper2:2181"
+      NIFI_ZK_ROOT_NODE: "/nifi"
+      NIFI_ELECTION_MAX_WAIT: "30 sec"
+      NIFI_ELECTION_MAX_CANDIDATES: "1"
+      NIFI_JVM_HEAP_INIT: "1g"
+      NIFI_JVM_HEAP_MAX: "2g"
+    volumes:
+      - nifi-conf:/opt/nifi/nifi-current/conf
+      - nifi-state:/opt/nifi/nifi-current/state
+      - nifi-content:/opt/nifi/nifi-current/content_repository
+      - nifi-flowfile:/opt/nifi/nifi-current/flowfile_repository
+      - nifi-provenance:/opt/nifi/nifi-current/provenance_repository
+      - nifi-database:/opt/nifi/nifi-current/database_repository
+    expose: ["8080"]
+    networks: [grocery-net]
+
+  # ---------------------------------------------------------------------------
+  # Message API — text / json / binary -> Kafka  (scaled to 3 replicas)
+  # ---------------------------------------------------------------------------
+  message-api:
+    build: ./services/message-api
+    restart: unless-stopped
+    depends_on:
+      kafka1: {condition: service_healthy}
+      minio: {condition: service_started}
+    environment:
+      KAFKA_BOOTSTRAP: "kafka1:29092,kafka2:29092,kafka3:29092"
+      MINIO_ENDPOINT: "minio:9000"
+      MINIO_ACCESS_KEY: "minioadmin"
+      MINIO_SECRET_KEY: "minioadmin"
+      MINIO_BUCKET: "grocery-uploads"
+    expose: ["8001"]
+    deploy:
+      replicas: 3
+    networks: [grocery-net]
+
+  # ---------------------------------------------------------------------------
+  # Ingest worker — Kafka -> Postgres
+  # ---------------------------------------------------------------------------
+  ingest-worker:
+    build: ./services/ingest-worker
+    restart: unless-stopped
+    depends_on:
+      kafka1: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+    environment:
+      KAFKA_BOOTSTRAP: "kafka1:29092,kafka2:29092,kafka3:29092"
+      DATABASE_URL: "postgresql://grocery:grocery_pw@postgres:5432/grocery"
+    networks: [grocery-net]
+
+  # ---------------------------------------------------------------------------
+  # Analytics — pandas / scikit-learn metrics, forecasts, projections, what-if
+  # ---------------------------------------------------------------------------
+  analytics:
+    build: ./services/analytics
+    restart: unless-stopped
+    depends_on:
+      postgres: {condition: service_healthy}
+      chromadb: {condition: service_started}
+      ollama: {condition: service_started}
+    environment:
+      DATABASE_URL: "postgresql://grocery:grocery_pw@postgres:5432/grocery"
+      CHROMA_HOST: "chromadb"
+      CHROMA_PORT: "8000"
+      OLLAMA_URL: "http://ollama:11434"
+      OLLAMA_MODEL: "llama3.2"
+    expose: ["8002"]
+    networks: [grocery-net]
+
+  # ---------------------------------------------------------------------------
+  # Dashboard — static HTML + Tailwind + SVG charts
+  # ---------------------------------------------------------------------------
+  dashboard:
+    build: ./services/dashboard
+    restart: unless-stopped
+    depends_on: [analytics]
+    environment:
+      ANALYTICS_URL: "http://analytics:8002"
+    expose: ["8003"]
+    networks: [grocery-net]
+
+  # ---------------------------------------------------------------------------
+  # NGINX — load balancer / single entry point
+  # ---------------------------------------------------------------------------
+  lb:
+    image: nginx:1.27-alpine
+    container_name: gsp-lb
+    restart: unless-stopped
+    depends_on: [message-api, dashboard, analytics, nifi]
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports: ["8080:80"]
+    networks: [grocery-net]
+
+networks:
+  grocery-net:
+    driver: bridge
+
+volumes:
+  zk1-data: {}
+  zk1-log: {}
+  zk2-data: {}
+  zk2-log: {}
+  kafka1-data: {}
+  kafka2-data: {}
+  kafka3-data: {}
+  pg-data: {}
+  minio-data: {}
+  chroma-data: {}
+  ollama-data: {}
+  nifi-conf: {}
+  nifi-state: {}
+  nifi-content: {}
+  nifi-flowfile: {}
+  nifi-provenance: {}
+  nifi-database: {}
