@@ -1,0 +1,18 @@
+# Change these to fixed versions for production, for example:
+# kafka_image: apache/kafka:4.1.2
+# nifi_image: apache/nifi:2.6.0
+kafka_image: "{{ lookup('env', 'KAFKA_IMAGE') | default('apache/kafka:latest', true) }}"
+nifi_image: "{{ lookup('env', 'NIFI_IMAGE') | default('apache/nifi:latest', true) }}"
+
+platform_network: data-platform-net
+platform_root: /opt/data-platform
+
+# Shared KRaft cluster id for this lab. Keep stable unless you wipe Kafka data.
+kafka_cluster_id: "MkU3OEVBNTcwNTJENDM2Qk"
+kafka_internal_port: 9092
+kafka_controller_port: 9093
+
+# NiFi single-user setup for a lab. Change before sharing.
+nifi_username: admin
+nifi_password: ChangeMeChangeMe123!
+nifi_https_port: 8443

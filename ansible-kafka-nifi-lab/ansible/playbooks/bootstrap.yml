@@ -1,0 +1,47 @@
+---
+- name: Prepare all server nodes
+  hosts: app_servers
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Install base packages needed by Ansible Docker modules
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - docker.io
+          - docker-compose-plugin
+          - python3-docker
+          - python3-packaging
+          - netcat-openbsd
+        state: present
+        update_cache: true
+
+    - name: Create platform directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - "{{ platform_root }}"
+        - "{{ platform_root }}/kafka"
+        - "{{ platform_root }}/nifi"
+        - "{{ platform_root }}/logs"
+
+    - name: Confirm Docker socket is available
+      ansible.builtin.stat:
+        path: /var/run/docker.sock
+      register: docker_socket
+
+    - name: Fail if Docker socket is missing
+      ansible.builtin.fail:
+        msg: "Docker socket not found. In this lab, /var/run/docker.sock must be mounted into each server container."
+      when: not docker_socket.stat.exists
+
+    - name: Create shared Docker network for Kafka and NiFi containers
+      community.docker.docker_network:
+        name: "{{ platform_network }}"
+        state: present

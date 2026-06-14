@@ -1,0 +1,16 @@
+---
+- name: Stop Kafka and NiFi containers
+  hosts: app_servers
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Stop Kafka
+      community.docker.docker_container:
+        name: "kafka-{{ inventory_hostname }}"
+        state: absent
+
+    - name: Stop NiFi
+      community.docker.docker_container:
+        name: "nifi-{{ inventory_hostname }}"
+        state: absent

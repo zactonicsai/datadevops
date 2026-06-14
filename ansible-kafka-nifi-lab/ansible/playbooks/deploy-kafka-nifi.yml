@@ -1,0 +1,95 @@
+---
+- name: Deploy Kafka KRaft cluster and NiFi standalone nodes
+  hosts: app_servers
+  become: true
+  gather_facts: true
+  serial: 1
+
+  vars:
+    kafka_controller_quorum_voters: >-
+      {%- for host in groups['kafka'] -%}
+      {{ hostvars[host].kafka_node_id }}@kafka-{{ host }}:{{ kafka_controller_port }}{{ ',' if not loop.last else '' }}
+      {%- endfor -%}
+
+  tasks:
+    - name: Pull Kafka image
+      community.docker.docker_image:
+        name: "{{ kafka_image }}"
+        source: pull
+        force_source: false
+
+    - name: Pull NiFi image
+      community.docker.docker_image:
+        name: "{{ nifi_image }}"
+        source: pull
+        force_source: false
+
+    - name: Create Kafka data volume
+      community.docker.docker_volume:
+        name: "kafka-data-{{ inventory_hostname }}"
+        state: present
+
+    - name: Create NiFi data volume
+      community.docker.docker_volume:
+        name: "nifi-data-{{ inventory_hostname }}"
+        state: present
+
+    - name: Start Kafka broker/controller in KRaft mode
+      community.docker.docker_container:
+        name: "kafka-{{ inventory_hostname }}"
+        image: "{{ kafka_image }}"
+        state: started
+        restart_policy: unless-stopped
+        networks:
+          - name: "{{ platform_network }}"
+            aliases:
+              - "kafka-{{ inventory_hostname }}"
+        published_ports:
+          - "{{ kafka_external_port }}:{{ kafka_external_port }}"
+        volumes:
+          - "kafka-data-{{ inventory_hostname }}:/var/lib/kafka/data"
+        env:
+          CLUSTER_ID: "{{ kafka_cluster_id }}"
+          KAFKA_NODE_ID: "{{ kafka_node_id | string }}"
+          KAFKA_PROCESS_ROLES: "broker,controller"
+          KAFKA_CONTROLLER_QUORUM_VOTERS: "{{ kafka_controller_quorum_voters }}"
+          KAFKA_LISTENERS: "PLAINTEXT://:{{ kafka_internal_port }},CONTROLLER://:{{ kafka_controller_port }},EXTERNAL://:{{ kafka_external_port }}"
+          KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-{{ inventory_hostname }}:{{ kafka_internal_port }},EXTERNAL://localhost:{{ kafka_external_port }}"
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT"
+          KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+          KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "3"
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "3"
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "2"
+          KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+          KAFKA_NUM_PARTITIONS: "3"
+        labels:
+          app: kafka
+          managed_by: ansible
+          lab_host: "{{ inventory_hostname }}"
+
+    - name: Start NiFi standalone node
+      community.docker.docker_container:
+        name: "nifi-{{ inventory_hostname }}"
+        image: "{{ nifi_image }}"
+        state: started
+        restart_policy: unless-stopped
+        networks:
+          - name: "{{ platform_network }}"
+            aliases:
+              - "nifi-{{ inventory_hostname }}"
+        published_ports:
+          - "{{ nifi_host_port }}:{{ nifi_https_port }}"
+        volumes:
+          - "nifi-data-{{ inventory_hostname }}:/opt/nifi/nifi-current/state"
+        env:
+          SINGLE_USER_CREDENTIALS_USERNAME: "{{ nifi_username }}"
+          SINGLE_USER_CREDENTIALS_PASSWORD: "{{ nifi_password }}"
+          NIFI_WEB_HTTPS_PORT: "{{ nifi_https_port | string }}"
+          NIFI_WEB_HTTPS_HOST: "0.0.0.0"
+          NIFI_WEB_PROXY_HOST: "localhost:{{ nifi_host_port }},nifi-{{ inventory_hostname }}:{{ nifi_https_port }}"
+          NIFI_SENSITIVE_PROPS_KEY: "ChangeThisSensitivePropsKey123456789"
+        labels:
+          app: nifi
+          managed_by: ansible
+          lab_host: "{{ inventory_hostname }}"

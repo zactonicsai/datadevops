@@ -1,0 +1,9 @@
+---
+- name: Bootstrap Linux targets
+  import_playbook: bootstrap.yml
+
+- name: Deploy Kafka and NiFi
+  import_playbook: deploy-kafka-nifi.yml
+
+- name: Verify platform
+  import_playbook: verify.yml

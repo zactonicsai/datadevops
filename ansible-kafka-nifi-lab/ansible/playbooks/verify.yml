@@ -1,0 +1,55 @@
+---
+- name: Verify Kafka and NiFi containers
+  hosts: app_servers
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Check Kafka container info
+      community.docker.docker_container_info:
+        name: "kafka-{{ inventory_hostname }}"
+      register: kafka_info
+
+    - name: Check NiFi container info
+      community.docker.docker_container_info:
+        name: "nifi-{{ inventory_hostname }}"
+      register: nifi_info
+
+    - name: Show running container status
+      ansible.builtin.debug:
+        msg:
+          - "{{ inventory_hostname }} Kafka running: {{ kafka_info.container.State.Running | default(false) }}"
+          - "{{ inventory_hostname }} NiFi running: {{ nifi_info.container.State.Running | default(false) }}"
+          - "Kafka external bootstrap: localhost:{{ kafka_external_port }}"
+          - "NiFi UI: https://localhost:{{ nifi_host_port }}/nifi"
+
+- name: Create a Kafka test topic from server1
+  hosts: server1
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Wait for Kafka to accept connections
+      ansible.builtin.command: docker exec kafka-server1 bash -lc "timeout 60 bash -c 'until /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka-server1:9092 >/dev/null 2>&1; do sleep 3; done'"
+      changed_when: false
+
+    - name: Create or verify demo topic
+      ansible.builtin.command: >-
+        docker exec kafka-server1 /opt/kafka/bin/kafka-topics.sh
+        --bootstrap-server kafka-server1:9092
+        --create
+        --if-not-exists
+        --topic demo-events
+        --partitions 3
+        --replication-factor 3
+      changed_when: "'Created topic' in topic_create.stdout"
+      register: topic_create
+
+    - name: List Kafka topics
+      ansible.builtin.command: docker exec kafka-server1 /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-server1:9092 --list
+      changed_when: false
+      register: topic_list
+
+    - name: Show Kafka topics
+      ansible.builtin.debug:
+        var: topic_list.stdout_lines

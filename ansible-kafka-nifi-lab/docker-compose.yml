@@ -1,0 +1,76 @@
+# Docker Compose lab: Ansible controller + three SSH-managed Linux servers.
+# The servers mount the host Docker socket so Ansible can start Kafka/NiFi containers.
+# This is excellent for a local lab. For production, use real VMs/EC2s with Docker installed on each host.
+
+services:
+  ansible-controller:
+    build:
+      context: ./controller
+    container_name: ansible-controller
+    hostname: ansible-controller
+    working_dir: /work
+    volumes:
+      - ./ansible:/work/ansible
+      - ./scripts:/work/scripts
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - ansible-lab-net
+    depends_on:
+      - server1
+      - server2
+      - server3
+    command: ["sh", "-c", "sleep infinity"]
+
+  server1:
+    build:
+      context: ./servers
+    container_name: ansible-server1
+    hostname: server1
+    privileged: true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - server1-data:/opt/data-platform
+    networks:
+      - ansible-lab-net
+    ports:
+      - "19092:19092"   # Kafka external listener for server1
+      - "18443:8443"    # NiFi HTTPS UI for server1
+
+  server2:
+    build:
+      context: ./servers
+    container_name: ansible-server2
+    hostname: server2
+    privileged: true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - server2-data:/opt/data-platform
+    networks:
+      - ansible-lab-net
+    ports:
+      - "29092:29092"   # Kafka external listener for server2
+      - "28443:8443"    # NiFi HTTPS UI for server2
+
+  server3:
+    build:
+      context: ./servers
+    container_name: ansible-server3
+    hostname: server3
+    privileged: true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - server3-data:/opt/data-platform
+    networks:
+      - ansible-lab-net
+    ports:
+      - "39092:39092"   # Kafka external listener for server3
+      - "38443:8443"    # NiFi HTTPS UI for server3
+
+networks:
+  ansible-lab-net:
+    name: ansible-lab-net
+
+volumes:
+  server1-data:
+  server2-data:
+  server3-data:
