@@ -14,6 +14,7 @@ This is long on purpose. You can read it top to bottom, or jump around using thi
 4. **ECS option (alternative)** — Terraform line by line, plus the honest gotchas.
 5. **Connecting, testing, securing, and extending.**
 6. **Cheat sheets** — CLI commands and a glossary.
+7. **Troubleshooting & observability** — a layered debugging method, every inspect command, CloudWatch + Container Insights + Prometheus/Grafana setup, and a symptom→fix table.
 
 A quick promise about versions: software changes fast. As of June 2026 the current pieces are **Amazon EKS Kubernetes 1.34**, **Strimzi 1.0.0** (released April 28, 2026), and the **Terraform AWS provider 6.x** (6.50 at time of writing). Where a version matters, I call it out so you can bump it later.
 
@@ -1358,3 +1359,365 @@ terraform destroy   # Tear everything down (asks for "yes").
 ### Final word
 
 If you remember nothing else: **use 3 AZs**, **keep Kafka in private subnets**, **encrypt with KMS**, **give every role only what it needs**, **pin your versions**, and **delete the Kafka YAML before `terraform destroy`** so no load balancers or disks are left billing you. On EKS, Strimzi does the hard Kafka work for you; on ECS, that work becomes yours. Choose accordingly — and have fun. 🚀
+---
+
+## 9. Troubleshooting and observability — how to see what's happening and fix it
+
+A Kafka setup has a lot of moving parts, so things *will* go sideways the first few times. This section gives you (a) a debugging mindset, (b) the exact commands to inspect every layer, (c) **CloudWatch** and metrics setup so you can watch and alert, and (d) a fix‑it table for the specific errors people hit most.
+
+The golden rule of debugging this stack: **work from the outside in, one layer at a time.** Is AWS healthy? → Is the cluster healthy? → Are the nodes healthy? → Is Strimzi healthy? → Are the Kafka pods healthy? → Is networking/storage healthy? → Is the *client* configured right? Jumping straight to "Kafka is broken" wastes hours; usually it's a layer underneath.
+
+### 9.1 The layered mental model (where problems live)
+
+| Layer | "Is it healthy?" check | Typical symptom when broken |
+|---|---|---|
+| AWS account/quotas | `aws service-quotas` / Console | "Can't create more EIPs/NLBs/VPCs." |
+| Terraform state | `terraform plan` | Drift, "resource already exists," apply errors. |
+| EKS control plane | `aws eks describe-cluster` | kubectl can't connect; API timeouts. |
+| Auth (access entries) | `aws eks list-access-entries` | "You must be logged in to the server (Unauthorized)." |
+| Worker nodes | `kubectl get nodes` | Nodes `NotReady` or missing; pods `Pending`. |
+| Add‑ons (CNI/EBS/DNS) | `kubectl get pods -n kube-system` | No pod IPs; volumes won't attach; DNS fails. |
+| Strimzi operator | `kubectl logs -n kafka deploy/strimzi-cluster-operator` | Kafka object stuck `NotReady`; nothing happens. |
+| Kafka pods | `kubectl get pods -n kafka` | `CrashLoopBackOff`, `Pending`, `0/1 Ready`. |
+| Storage (PVC/EBS) | `kubectl get pvc -n kafka` | PVC `Pending`; pod stuck waiting for volume. |
+| Networking/LB | `kubectl get svc -n kafka` | External `<pending>`; clients can't connect. |
+| Client config | client logs | Auth failures; "broker not available." |
+
+Keep this table next to you. Each row below has its commands.
+
+### 9.2 First‑response commands (run these before anything else)
+
+```bash
+# 1) Can I even reach the cluster?
+kubectl cluster-info
+# Prints the API server URL if your kubeconfig + auth are working. If this hangs or errors,
+# your problem is auth or the endpoint — not Kafka. Re-run update-kubeconfig and check access entries.
+
+# 2) Are the nodes alive?
+kubectl get nodes -o wide
+# Expect 3 Ready nodes across 3 AZs. NotReady/missing = a node/auth/CNI problem (see 9.6).
+
+# 3) What's unhealthy ANYWHERE in the kafka namespace?
+kubectl get pods -n kafka -o wide
+# Look at STATUS and READY columns. Note which pods are not Running / not fully Ready.
+
+# 4) What has the system been complaining about recently? (events are gold)
+kubectl get events -n kafka --sort-by=.lastTimestamp | tail -30
+# Events explain WHY a pod is Pending/crashing in plain language (no image, no node, no volume, etc.).
+
+# 5) What does Strimzi itself think the Kafka cluster's status is?
+kubectl get kafka my-kafka -n kafka -o yaml | sed -n '/status:/,$p'
+# The status.conditions section says Ready true/false and usually includes a human-readable message.
+```
+
+Those five commands resolve or localize the large majority of issues. The `kubectl get events` and the Kafka `status.conditions` are the two most underused — read them first.
+
+### 9.3 Describing and reading logs (the next layer of detail)
+
+```bash
+# "describe" shows a pod's full story: its events, why it can't schedule, probe failures, image pulls.
+kubectl describe pod <pod-name> -n kafka
+# Scroll to the "Events:" section at the bottom — that's where the reason almost always is.
+
+# Logs from a specific pod. Kafka broker pods run MULTIPLE containers, so name the container.
+kubectl logs my-kafka-broker-0 -n kafka -c kafka
+# -c kafka picks the Kafka container. Add --previous to see logs from a crashed-and-restarted container:
+kubectl logs my-kafka-broker-0 -n kafka -c kafka --previous
+
+# The Strimzi operator's own log — essential when the Kafka object is stuck and pods never appear.
+kubectl logs -n kafka deploy/strimzi-cluster-operator --tail=200
+# The operator logs say exactly what it's trying to do and what's blocking reconciliation.
+
+# Follow logs live while you reproduce a problem:
+kubectl logs -f my-kafka-broker-0 -n kafka -c kafka
+```
+
+> **Tip:** Strimzi broker pods are named `<cluster>-<pool>-<id>`, e.g. `my-kafka-broker-0`, `my-kafka-controller-1`. List exact names with `kubectl get pods -n kafka`.
+
+### 9.4 Inspecting storage (PVCs and EBS)
+
+Storage is the #1 reason Kafka pods get stuck `Pending`.
+
+```bash
+# Are the persistent volume CLAIMS bound to actual disks?
+kubectl get pvc -n kafka
+# STATUS should be "Bound". "Pending" means no disk was created/attached yet — read its events:
+kubectl describe pvc <pvc-name> -n kafka
+
+# Is the EBS CSI driver (which makes the disks) actually running?
+kubectl get pods -n kube-system | grep ebs-csi
+# You want ebs-csi-controller (a few) and ebs-csi-node (one per node) all Running.
+
+# CSI driver logs if volumes won't create (often an IAM permissions problem):
+kubectl logs -n kube-system deploy/ebs-csi-controller -c csi-provisioner --tail=100
+```
+
+**The classic storage gotchas** (also in §3.8): the StorageClass must use `volumeBindingMode: WaitForFirstConsumer` (EBS is AZ‑locked), and the EBS CSI driver's role needs EBS permissions (the IRSA/Pod Identity role from §3.7). If PVCs are `Pending` with an events message about access denied, it's that IAM role.
+
+### 9.5 Inspecting networking and load balancers
+
+```bash
+# What Services exist, and did the external LoadBalancer get an address?
+kubectl get svc -n kafka
+# The "<cluster>-kafka-external-bootstrap" service should show an EXTERNAL-IP (a hostname).
+# If it's stuck "<pending>" for minutes, the load balancer can't be created — usual causes below.
+
+# Detailed why-is-my-LB-pending:
+kubectl describe svc my-kafka-kafka-external-bootstrap -n kafka
+# Events here reveal: missing subnet tags, no public subnets, SG limits, or quota issues.
+
+# Test in-cluster DNS + connectivity from a throwaway pod (rules out client/network issues):
+kubectl run netcheck --rm -it --image=busybox --restart=Never -- \
+  sh -c "nslookup my-kafka-kafka-bootstrap.kafka.svc.cluster.local"
+# If DNS fails here, the problem is CoreDNS/CNI, not Kafka.
+```
+
+**Load‑balancer gotchas:** the subnet tags from §3.4 (`kubernetes.io/role/elb` and `internal-elb`) must be present or no LB is placed. Also check your **NLB quota** in the Region — remember Strimzi makes one LB per broker plus bootstrap (4 with 3 brokers), and accounts have limits.
+
+### 9.6 Inspecting nodes, auth, and the control plane
+
+```bash
+# A NotReady node — find out why:
+kubectl describe node <node-name>
+# Look at Conditions (MemoryPressure/DiskPressure) and the Events at the bottom.
+
+# Are the core networking pods healthy? No CNI = pods get no IP = nothing works.
+kubectl get pods -n kube-system
+# Want aws-node (VPC CNI, one per node), coredns (2), kube-proxy (one per node) all Running.
+
+# If kubectl says "Unauthorized" / "must be logged in":
+aws eks list-access-entries --cluster-name kafka --region us-east-1
+# Confirms which IAM principals are mapped. If yours isn't here, that's your lockout cause.
+aws sts get-caller-identity
+# Shows WHICH IAM identity your CLI is actually using — often you're using a different role than you think.
+
+# Control-plane health and version from the AWS side:
+aws eks describe-cluster --name kafka --region us-east-1 \
+  --query "cluster.{status:status,version:version,health:health}"
+```
+
+### 9.7 Set up CloudWatch (the main "track the setup" tool on AWS)
+
+CloudWatch is AWS's built‑in place for **logs, metrics, dashboards, and alarms**. For EKS you turn it on at two levels: the **control plane** (already enabled in our Terraform) and the **cluster workloads** (via the CloudWatch Observability add‑on).
+
+#### 9.7.1 Control‑plane logs (we already enabled these)
+
+In §3.6 we set `cluster_enabled_log_types = ["api","audit","authenticator","controllerManager","scheduler"]`. Those stream to CloudWatch Logs automatically. Read them:
+
+```bash
+# Tail the cluster's control-plane logs live. The log GROUP is /aws/eks/<cluster>/cluster.
+aws logs tail /aws/eks/kafka/cluster --follow --region us-east-1
+# --follow streams new lines as they arrive. Great for catching auth denials and API errors in real time.
+
+# The "authenticator" stream explains "Unauthorized" problems; "audit" records who did what.
+```
+
+#### 9.7.2 Container Insights via the CloudWatch Observability add‑on (recommended)
+
+This is the modern, one‑step way (as of 2026) to get **pod/node/container metrics + container logs** into CloudWatch. The add‑on installs the CloudWatch agent (metrics) and Fluent Bit (logs), and gives you the "enhanced observability" dashboards. Install it with **Pod Identity** so it gets AWS permissions cleanly.
+
+**Terraform** (add to `eks.tf`'s `cluster_addons`, plus a small Pod Identity association):
+
+```hcl
+# Add this entry inside the existing "cluster_addons = { ... }" map in eks.tf:
+#   amazon-cloudwatch-observability = {}
+#
+# Then grant it permissions via EKS Pod Identity (the 2026-recommended pattern):
+
+# 1) An IAM role the CloudWatch agent will assume.
+data "aws_iam_policy_document" "cw_assume" {
+  statement {
+    actions = ["sts:AssumeRole", "sts:TagSession"]
+    principals {
+      type        = "Service"
+      identifiers = ["pods.eks.amazonaws.com"]   # EKS Pod Identity service principal.
+    }
+  }
+}
+
+resource "aws_iam_role" "cloudwatch_agent" {
+  name               = "${var.cluster_name}-cw-agent"
+  assume_role_policy = data.aws_iam_policy_document.cw_assume.json
+}
+
+# 2) Attach the AWS-managed policy that lets the agent write metrics & logs (least privilege for this job).
+resource "aws_iam_role_policy_attachment" "cloudwatch_agent" {
+  role       = aws_iam_role.cloudwatch_agent.name
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+}
+
+# 3) Bind that role to the agent's ServiceAccount via Pod Identity.
+resource "aws_eks_pod_identity_association" "cloudwatch_agent" {
+  cluster_name    = module.eks.cluster_name
+  namespace       = "amazon-cloudwatch"          # Namespace the add-on uses.
+  service_account = "cloudwatch-agent"           # The agent's ServiceAccount name.
+  role_arn        = aws_iam_role.cloudwatch_agent.arn
+}
+```
+
+**Or with the AWS CLI** (if you prefer to bolt it on without editing Terraform):
+
+```bash
+# Install the add-on and wire Pod Identity in one shot.
+aws eks create-addon \
+  --cluster-name kafka \
+  --addon-name amazon-cloudwatch-observability \
+  --pod-identity-associations \
+      serviceAccount=cloudwatch-agent,roleArn=arn:aws:iam::123456789012:role/kafka-cw-agent \
+  --region us-east-1
+# --addon-name names the managed add-on; --pod-identity-associations gives it AWS permissions.
+
+# Confirm it went ACTIVE:
+aws eks describe-addon --cluster-name kafka \
+  --addon-name amazon-cloudwatch-observability \
+  --query "addon.status" --region us-east-1
+```
+
+**Where to look afterward (Console):** **CloudWatch → Insights → Container Insights**. You'll get curated dashboards for cluster/node/pod health, sortable by AZ, node group, or instance type — perfect for spotting a hot broker or a memory‑leaking pod. Container logs land in **CloudWatch → Log groups** under `/aws/containerinsights/kafka/...`.
+
+> **2026 note:** there's also a newer **Container Insights with OpenTelemetry metrics** (public preview, announced April 2026) that enriches metrics with up to ~150 labels and lets you query with **PromQL** in CloudWatch. The same Observability add‑on enables it (it can publish both OTel and classic metrics at once). Use the classic path for stability today; try the OTel path if you want richer querying and are okay with preview status.
+
+#### 9.7.3 Querying logs with CloudWatch Logs Insights
+
+Once logs are flowing, you can query them like a database:
+
+```text
+# In Console: CloudWatch → Logs → Logs Insights → pick the log group → run a query like:
+fields @timestamp, @message
+| filter @message like /ERROR/
+| sort @timestamp desc
+| limit 50
+```
+
+That surfaces recent errors across all broker logs at once — far faster than `kubectl logs` per pod when you have several brokers.
+
+#### 9.7.4 A starter CloudWatch alarm (get told before users notice)
+
+```bash
+# Alarm if any node's CPU is pegged high for 15 minutes (a sign Kafka needs more nodes).
+aws cloudwatch put-metric-alarm \
+  --alarm-name kafka-node-cpu-high \
+  --namespace ContainerInsights \
+  --metric-name node_cpu_utilization \
+  --dimensions Name=ClusterName,Value=kafka \
+  --statistic Average --period 300 --evaluation-periods 3 \
+  --threshold 80 --comparison-operator GreaterThanThreshold \
+  --alarm-actions arn:aws:sns:us-east-1:123456789012:my-alerts \
+  --region us-east-1
+# --period 300 = 5-min buckets; --evaluation-periods 3 = three in a row (15 min) before firing.
+# --alarm-actions points to an SNS topic that emails/pages you. (Create one with: aws sns create-topic.)
+```
+
+Good alarms to add over time: node CPU/memory/disk pressure, pod restart counts, and (from Kafka metrics below) **under‑replicated partitions** and **offline partitions** — the two numbers that say "Kafka is in trouble."
+
+### 9.8 Kafka‑level metrics with Prometheus & Grafana (deep Kafka visibility)
+
+CloudWatch shows infra health; for *Kafka‑specific* health (consumer lag, under‑replicated partitions, request rates) you want Kafka's own metrics. Strimzi exposes them in **Prometheus** format.
+
+How it actually works (clears up a common confusion): the **Prometheus JMX Exporter runs as an agent *inside* each Kafka pod** and serves metrics on a `/metrics` endpoint — **there is no separate exporter pod**. You point Prometheus at those endpoints.
+
+**Enable metrics on the Kafka resource** by adding a `metricsConfig` block (Strimzi ships ready‑made config in its `examples/metrics` folder):
+
+```yaml
+# Add under spec.kafka in kafka.yaml:
+    metricsConfig:
+      type: jmxPrometheusExporter           # Use the JMX→Prometheus exporter agent.
+      valueFrom:
+        configMapKeyRef:
+          name: kafka-metrics                # A ConfigMap holding the exporter rules...
+          key: kafka-metrics-config.yml      # ...this key inside it (from Strimzi's examples).
+```
+
+> **Newer option:** since Strimzi 0.47 there's the **Strimzi Metrics Reporter** (early access), which exposes Prometheus metrics *natively* without the JMX agent. It's promising but still early; the JMX Exporter remains the solid, fully supported default in 2026.
+
+**Then deploy monitoring.** The easiest route is the **kube‑prometheus‑stack** Helm chart (bundles Prometheus + Grafana + Alertmanager), and Strimzi provides `PodMonitor` resources (in `examples/metrics`) that tell Prometheus to scrape the Kafka pods, plus **prebuilt Grafana dashboards** (JSON files you import) and **sample alerting rules**.
+
+```bash
+# Install Prometheus + Grafana (one-time):
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+helm install monitoring prometheus-community/kube-prometheus-stack -n monitoring --create-namespace
+
+# Apply Strimzi's PodMonitors so Prometheus scrapes the Kafka pods (path is from the Strimzi examples):
+kubectl apply -f https://raw.githubusercontent.com/strimzi/strimzi-kafka-operator/main/examples/metrics/strimzi-pod-monitor.yaml -n monitoring
+
+# Open Grafana locally and import Strimzi's Kafka dashboards (Kafka, Kafka Exporter, Operators):
+kubectl port-forward -n monitoring svc/monitoring-grafana 3000:80
+# Then browse http://localhost:3000 and import the dashboard JSON files from examples/metrics/grafana-dashboards.
+```
+
+**The Kafka metrics that matter most** (watch these in Grafana and alarm on them):
+- **UnderReplicatedPartitions** — should be **0**. Above 0 means a broker is behind or down; data redundancy is at risk.
+- **OfflinePartitionsCount** — should be **0**. Above 0 means some partitions have *no* leader; those reads/writes are failing right now.
+- **ActiveControllerCount** — should be exactly **1** across the cluster. Not 1 = a controller/quorum problem.
+- **Consumer group lag** — how far behind consumers are; rising lag means consumers can't keep up.
+- **Request latency / produce‑consume rates** — for capacity planning and spotting slowdowns.
+
+### 9.9 Debugging the ECS path
+
+On ECS you lose `kubectl`, so debugging shifts to ECS + CloudWatch (which is actually simpler to *turn on* — Container Insights for ECS is a single setting):
+
+```bash
+# Why won't my task stay running? List tasks (including stopped) and read the stop reason.
+aws ecs list-tasks --cluster kafka-ecs --desired-status STOPPED --region us-east-1
+aws ecs describe-tasks --cluster kafka-ecs --tasks <task-arn> --region us-east-1 \
+  --query "tasks[0].{lastStatus:lastStatus,stopped:stoppedReason,containers:containers[].reason}"
+# stoppedReason / container reason explains crashes: image pull failure, OOM, exit code, etc.
+
+# Service-level events (deployments, placement failures, "unable to place task"):
+aws ecs describe-services --cluster kafka-ecs --services kafka-kafka --region us-east-1 \
+  --query "services[0].events[0:10]"
+
+# Container logs (we configured the awslogs driver in §5.4):
+aws logs tail /ecs/kafka-kafka --follow --region us-east-1
+
+# Turn on Container Insights for the ECS cluster (one switch, unlike EKS):
+aws ecs update-cluster-settings --cluster kafka-ecs \
+  --settings name=containerInsights,value=enabled --region us-east-1
+```
+
+**Common ECS‑specific failures:** "unable to place task" = not enough CPU/memory on your EC2 instances (scale them out); task killed with OOM = raise the task `memory`; broker starts then clients can't connect = **advertised listeners** are wrong for the load‑balanced address (the §5.5 gotcha); data lost on restart = storage isn't truly durable/stable per broker (the core ECS‑Kafka problem).
+
+### 9.10 The fix‑it table — symptom → likely cause → action
+
+| Symptom | Most likely cause | What to do |
+|---|---|---|
+| `kubectl` hangs / "Unauthorized" | Wrong IAM identity or no access entry | `aws sts get-caller-identity`; `aws eks list-access-entries`; re‑run `update-kubeconfig`. Ensure `enable_cluster_creator_admin_permissions` (§3.6). |
+| Node `NotReady` or missing | CNI not running, or node IAM/role issue | `kubectl get pods -n kube-system` (check `aws-node`); `kubectl describe node`; verify node group role. |
+| Broker/controller pod `Pending` | No matching node OR PVC not bound | `kubectl describe pod` events; check `kubectl get pvc`; confirm 3 nodes across 3 AZs; check resource requests vs node size. |
+| PVC stuck `Pending` | EBS driver missing perms, or wrong binding mode | Confirm `aws-ebs-csi-driver` add‑on + its IAM role (§3.7); StorageClass must be `WaitForFirstConsumer` (§3.8). |
+| Pod `CrashLoopBackOff` | Bad config, OOM, or failing probe | `kubectl logs ... --previous`; check memory limits (raise if OOMKilled); read `describe pod` for probe errors. |
+| Kafka object stays `NotReady` | Operator can't reconcile | `kubectl logs -n kafka deploy/strimzi-cluster-operator`; read `kafka/my-kafka` `status.conditions` message. |
+| External listener `<pending>` | Missing subnet tags / no public subnets / NLB quota | `kubectl describe svc ...-external-bootstrap`; verify §3.4 subnet tags; check NLB quota (4 LBs for 3 brokers!). |
+| Clients can't connect externally | Wrong advertised address, SG, or auth | Verify bootstrap host/port 9094, TLS on, SCRAM creds from the `app-user` Secret; check security group allows the client. |
+| `UnderReplicatedPartitions > 0` | A broker is down or lagging | `kubectl get pods -n kafka`; check the broker's logs/disk; ensure all 3 brokers are Running. |
+| `OfflinePartitionsCount > 0` | Partitions have no leader (multiple brokers down) | Urgent: restore brokers; check quorum/controllers; you may be below `min.insync.replicas`. |
+| Wrong Strimzi API version error | Using old `v1beta2` YAML on Strimzi 1.0.0 | Change `apiVersion` to `kafka.strimzi.io/v1` (§4.1). |
+| `terraform apply` "already exists" | State drift / partial prior run | `terraform plan` to see drift; `terraform import` the existing resource, or remove it and re‑apply. |
+| Surprise AWS bill | NAT + 4 NLBs + EBS left running | Delete Kafka YAML before `terraform destroy` (§6.5); reduce `single_nat_gateway`/listeners for labs. |
+
+### 9.11 A debugging script you can keep
+
+Drop this in `debug-kafka.sh` to grab a full snapshot when something's wrong:
+
+```bash
+#!/usr/bin/env bash
+# Collects a one-shot health snapshot of the Kafka-on-EKS setup. Run: bash debug-kafka.sh
+set -euo pipefail
+NS=kafka
+
+echo "== Nodes =="            ; kubectl get nodes -o wide
+echo "== kube-system pods ==" ; kubectl get pods -n kube-system | grep -E "aws-node|coredns|ebs-csi|kube-proxy"
+echo "== Kafka pods =="       ; kubectl get pods -n "$NS" -o wide
+echo "== PVCs =="             ; kubectl get pvc -n "$NS"
+echo "== Services =="         ; kubectl get svc -n "$NS"
+echo "== Recent events =="    ; kubectl get events -n "$NS" --sort-by=.lastTimestamp | tail -25
+echo "== Kafka status =="     ; kubectl get kafka my-kafka -n "$NS" -o jsonpath='{.status.conditions}' | tr ',' '\n'
+echo "== Operator log tail ==" ; kubectl logs -n "$NS" deploy/strimzi-cluster-operator --tail=40 || true
+# set -euo pipefail makes the script stop on errors/undefined vars so failures are obvious.
+# Each section maps to a layer in §9.1, so the output reads top-to-bottom like the mental model.
+```
+
+### 9.12 The debugging summary
+
+When in doubt: **read `kubectl get events -n kafka` and the Kafka object's `status.conditions` first** — they usually name the problem. Use **CloudWatch control‑plane logs** for auth/API issues, the **CloudWatch Observability add‑on + Container Insights** for node/pod/container health and alarms, and **Prometheus/Grafana** for Kafka‑specific signals (watch `UnderReplicatedPartitions`, `OfflinePartitionsCount`, `ActiveControllerCount=1`, and consumer lag). Work outside‑in through the layers, change one thing at a time, and re‑check. Most "Kafka is broken" turns out to be a node, a volume, a subnet tag, a missing IAM permission, or a misconfigured client — not Kafka itself.
