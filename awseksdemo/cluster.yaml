@@ -1,0 +1,31 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: hello-world-cluster
+  region: us-east-1
+  version: "1.33"
+
+managedNodeGroups:
+  - name: standard-workers
+    instanceType: t3.medium
+    desiredCapacity: 2
+    minSize: 2
+    maxSize: 3
+    volumeSize: 20
+    # Uncomment to allow SSH into nodes:
+    # ssh:
+    #   allow: true
+    #   publicKeyName: your-ec2-keypair
+
+# Default managed addons installed by eksctl
+addons:
+  - name: vpc-cni
+  - name: coredns
+  - name: kube-proxy
+  - name: metrics-server
+
+# Send control-plane logs to CloudWatch (optional)
+cloudWatch:
+  clusterLogging:
+    enableTypes: ["api", "audit", "authenticator"]
