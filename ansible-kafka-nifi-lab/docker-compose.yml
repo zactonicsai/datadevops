@@ -1,41 +1,74 @@
-# Docker Compose lab: Ansible controller + three SSH-managed Linux servers.
-# The servers mount the host Docker socket so Ansible can start Kafka/NiFi containers.
-# This is excellent for a local lab. For production, use real VMs/EC2s with Docker installed on each host.
+# =============================================================================
+# DOCKER COMPOSE: lab harness (Ansible controller + 3 SSH-managed servers)
+# -----------------------------------------------------------------------------
+# WHAT:  Brings up the LAB ENVIRONMENT itself - one Ansible "controller" plus
+#        three fake "server" hosts (server1/2/3) reachable over SSH.
+# WHY:   It mirrors a real fleet (a control node managing several Linux hosts)
+#        on a single machine so you can practice the Ansible workflow locally.
+# GOAL:  After "docker compose up -d" you have a controller that can SSH into
+#        three Ubuntu nodes and drive them with the playbooks under ./ansible.
+#
+# IMPORTANT NETWORKING MODEL (this is what the port fix below is about):
+#   Each server container mounts the host's Docker socket
+#   (/var/run/docker.sock). When Ansible later runs community.docker tasks, the
+#   kafka-* and nifi-* containers it creates are therefore started on the HOST
+#   daemon as SIBLINGS of these server containers - NOT nested inside them.
+#   Because everything lives on one host daemon, the HOST PORTS for Kafka/NiFi
+#   must be published by exactly ONE layer. The deploy playbook
+#   (deploy-kafka-nifi.yml) publishes 19092/29092/39092 and 18443/28443/38443
+#   on the kafka-*/nifi-* containers. So these server services must NOT also
+#   publish those same ports, or Docker fails with:
+#       "Bind for 0.0.0.0:19092 failed: port is already allocated"
+#   That is why the "ports:" blocks were REMOVED from server1/2/3 below.
+# =============================================================================
 
 services:
+  # ---------------------------------------------------------------------------
+  # The Ansible control node. You exec into this to run the playbooks.
+  # WHY: separates "where Ansible runs" from "what Ansible manages", like real life.
+  # ---------------------------------------------------------------------------
   ansible-controller:
     build:
-      context: ./controller
+      context: ./controller        # build from controller/Dockerfile (Alpine + ansible + collections)
     container_name: ansible-controller
     hostname: ansible-controller
-    working_dir: /work
+    working_dir: /work             # land in /work, where ansible/ and scripts/ are mounted
     volumes:
-      - ./ansible:/work/ansible
-      - ./scripts:/work/scripts
-      - /var/run/docker.sock:/var/run/docker.sock
+      - ./ansible:/work/ansible    # mount the playbooks/inventory so edits on the host take effect live
+      - ./scripts:/work/scripts    # mount helper scripts (run-playbook.sh, etc.)
+      - /var/run/docker.sock:/var/run/docker.sock  # share host Docker so Ansible can start sibling containers
     networks:
-      - ansible-lab-net
+      - ansible-lab-net            # same private network as the servers so SSH-by-name works
     depends_on:
-      - server1
+      - server1                    # start the targets first so they're reachable when the controller comes up
       - server2
       - server3
-    command: ["sh", "-c", "sleep infinity"]
+    command: ["sh", "-c", "sleep infinity"]  # keep the controller alive; you drive it via docker exec
 
+  # ---------------------------------------------------------------------------
+  # Fake server #1 - an Ubuntu host Ansible manages over SSH.
+  # NOTE: NO "ports:" block. The host ports 19092 (Kafka) and 18443 (NiFi) are
+  #       published by the kafka-server1 / nifi-server1 containers that Ansible
+  #       creates on the host daemon. Publishing them here too would collide.
+  # ---------------------------------------------------------------------------
   server1:
     build:
-      context: ./servers
+      context: ./servers           # build from servers/Dockerfile (Ubuntu + sshd + ansible user)
     container_name: ansible-server1
-    hostname: server1
-    privileged: true
+    hostname: server1              # hostname must match inventory/hosts.ini (ansible_host=server1)
+    privileged: true               # lab convenience: lets this node fully use the mounted Docker socket
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - server1-data:/opt/data-platform
+      - /var/run/docker.sock:/var/run/docker.sock  # so Ansible-on-controller can manage host containers
+      - server1-data:/opt/data-platform            # persist this node's platform dir across restarts
     networks:
-      - ansible-lab-net
-    ports:
-      - "19092:19092"   # Kafka external listener for server1
-      - "18443:8443"    # NiFi HTTPS UI for server1
+      - ansible-lab-net            # private lab network (name resolution between containers)
+    # ports: intentionally omitted - see the NETWORKING MODEL note in the header.
+    # Kafka external 19092 and NiFi 18443 are exposed by the sibling kafka-server1
+    # and nifi-server1 containers that deploy-kafka-nifi.yml creates.
 
+  # ---------------------------------------------------------------------------
+  # Fake server #2 (same pattern; its sibling containers expose 29092 / 28443).
+  # ---------------------------------------------------------------------------
   server2:
     build:
       context: ./servers
@@ -47,10 +80,11 @@ services:
       - server2-data:/opt/data-platform
     networks:
       - ansible-lab-net
-    ports:
-      - "29092:29092"   # Kafka external listener for server2
-      - "28443:8443"    # NiFi HTTPS UI for server2
+    # ports: intentionally omitted - Ansible's kafka-server2/nifi-server2 publish 29092/28443.
 
+  # ---------------------------------------------------------------------------
+  # Fake server #3 (same pattern; its sibling containers expose 39092 / 38443).
+  # ---------------------------------------------------------------------------
   server3:
     build:
       context: ./servers
@@ -62,14 +96,15 @@ services:
       - server3-data:/opt/data-platform
     networks:
       - ansible-lab-net
-    ports:
-      - "39092:39092"   # Kafka external listener for server3
-      - "38443:8443"    # NiFi HTTPS UI for server3
+    # ports: intentionally omitted - Ansible's kafka-server3/nifi-server3 publish 39092/38443.
 
+# The private bridge network all lab containers share, so they can reach each
+# other by name (server1, ansible-controller, kafka-server1, ...).
 networks:
   ansible-lab-net:
     name: ansible-lab-net
 
+# Named volumes that persist each fake server's /opt/data-platform between runs.
 volumes:
   server1-data:
   server2-data:

@@ -212,6 +212,43 @@ docker compose down -v
 
 
 
+## Fix for `port is already allocated` when starting Kafka or NiFi
+
+If a deploy fails with something like:
+
+```text
+Bind for 0.0.0.0:19092 failed: port is already allocated
+```
+
+it means the host port (19092/29092/39092 for Kafka, 18443/28443/38443 for
+NiFi) is already taken. There are two causes, both fixed:
+
+1. **Stale containers from a previous run.** Because Ansible starts the
+   `kafka-*` / `nifi-*` containers on the host Docker daemon (via the mounted
+   socket), they keep running even after `docker compose down`. Remove them and
+   re-deploy:
+
+   ```bash
+   # remove just this lab's Kafka/NiFi containers (idempotent)
+   docker exec -it ansible-controller /work/scripts/stop-platform.sh
+   # or directly on the host:
+   docker rm -f $(docker ps -aq --filter label=managed_by=ansible) 2>/dev/null || true
+   ```
+
+2. **Double-publishing in `docker-compose.yml` (now fixed).** Earlier versions
+   published the Kafka/NiFi host ports on BOTH the `server*` services AND the
+   Ansible-created `kafka-*` / `nifi-*` sibling containers, so they fought over
+   the same port. The `ports:` blocks have been removed from the `server*`
+   services; the sibling containers are now the sole owners of those host ports.
+   If you edited compose yourself, make sure `server1/2/3` have no `ports:`.
+
+After clearing stale containers, re-run the deploy:
+
+```bash
+docker exec -it ansible-controller /work/scripts/run-playbook.sh
+```
+
+
 ## Fix for missing `docker-compose-plugin` package
 
 If you see this error:

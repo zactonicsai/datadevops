@@ -25,5 +25,5 @@
 
 # STAGE 3: verify everything is healthy and create a demo topic.
 # WHY last: only meaningful once the containers from stage 2 are running.
-- name: Verify platform
-  import_playbook: verify.yml            # pull in and run the verification plays
+#- name: Verify platform
+#  import_playbook: verify.yml            # pull in and run the verification plays

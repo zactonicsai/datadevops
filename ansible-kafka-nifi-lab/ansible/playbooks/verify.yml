@@ -84,9 +84,7 @@
     # -------------------------------------------------------------------------
     - name: Wait for Kafka to accept connections
       ansible.builtin.command: >-         # run a shell command; ">-" folds the long line cleanly
-        docker exec kafka-server1 bash -lc
-        "timeout 60 bash -c 'until /opt/kafka/bin/kafka-broker-api-versions.sh
-        --bootstrap-server kafka-server1:9092 >/dev/null 2>&1; do sleep 3; done'"
+        docker exec timeout 60 bash -c 'until /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka-server1:9092 >/dev/null 2>&1; do sleep 3; done'
       changed_when: false                 # a readiness check changes nothing on the system
 
     # -------------------------------------------------------------------------

@@ -53,6 +53,20 @@
           - netcat-openbsd               # "nc" used in connectivity / readiness checks
         state: present                   # "present" = install if missing, otherwise no-op (idempotent)
         update_cache: true               # refresh the apt index first so installs aren't stale
+        cache_valid_time: 3600           # skip the refresh if the cache is < 1h old (fewer mirror hits, faster re-runs)
+        update_cache_retries: 8          # if the index download fails (e.g. ports.ubuntu.com mid-sync), retry up to 8x
+        update_cache_retry_max_delay: 30 # cap the backoff between those retries at 30s so the play doesn't stall
+      # WHY this whole block: on Apple Silicon (arm64) apt pulls from the single
+      # ports.ubuntu.com endpoint, which during a sync can return an index whose
+      # size doesn't match the manifest ("File has unexpected size ... Mirror
+      # sync in progress?"). The retries ride out that transient window; the
+      # server Dockerfile adds Acquire::By-Hash to fix the same race at its root.
+      # The register/until below is a belt-and-suspenders wrapper so even an
+      # outright failure is retried at the task level before the play aborts.
+      register: apt_install                # capture the result so "until" can test it
+      until: apt_install is succeeded      # consider the task done only once it actually succeeds
+      retries: 5                           # otherwise re-run the whole task up to 5 times
+      delay: 15                            # waiting 15s between attempts (lets a sync finish)
 
     # -------------------------------------------------------------------------
     # TASK 2 - Create the on-disk directory layout for the platform.
