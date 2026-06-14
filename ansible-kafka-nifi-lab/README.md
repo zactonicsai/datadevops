@@ -133,6 +133,44 @@ docker exec -it kafka-server1 /opt/kafka/bin/kafka-console-consumer.sh \
   --from-beginning
 ```
 
+
+
+## Kafka CLI send and receive helpers
+
+A separate beginner CLI guide is included here:
+
+```text
+docs/kafka-cli-send-receive.md
+```
+
+Fast test from Linux/macOS:
+
+```bash
+./scripts/kafka-create-topic.sh demo-events
+./scripts/kafka-send-message.sh demo-events "Hello Kafka"
+./scripts/kafka-receive-messages.sh demo-events
+```
+
+Fast test from Windows Command Prompt:
+
+```bat
+scripts\kafka-create-topic.bat demo-events
+scripts\kafka-send-message.bat demo-events "Hello Kafka"
+scripts\kafka-receive-messages.bat demo-events
+```
+
+One-command demo:
+
+```bash
+./scripts/kafka-cli-demo.sh
+```
+
+Windows:
+
+```bat
+scripts\kafka-cli-demo.bat
+```
+
 ## NiFi access
 
 Open these URLs:
@@ -172,6 +210,31 @@ Remove volumes too:
 docker compose down -v
 ```
 
+
+## Fix for removed `community.general.yaml` callback
+
+If you see this error:
+
+```text
+[ERROR]: The 'community.general.yaml' callback plugin has been removed.
+```
+
+Use this newer Ansible config in `ansible/ansible.cfg`:
+
+```ini
+[defaults]
+stdout_callback = ansible.builtin.default
+callback_result_format = yaml
+```
+
+Do not use the older setting below with recent Ansible/community.general versions:
+
+```ini
+stdout_callback = yaml
+```
+
+This project ZIP has already been updated with the newer setting.
+
 ## Best practices included
 
 - Separate controller from managed servers
@@ -199,3 +262,15 @@ Before using this pattern outside a lab:
 - Add monitoring with Prometheus, Grafana, OpenTelemetry, and log shipping
 - Add resource limits to containers
 - Add CI checks with `ansible-lint` and `yamllint`
+
+
+## Beginner Ansible Tutorial Added
+
+This ZIP now includes a beginner tutorial written in simple language:
+
+- `docs/ansible-beginner-tutorial.md`
+- `docs/ansible-best-practices-cheatsheet.md`
+- `scripts/create_ansible_lab_template.sh`
+- `scripts/create_ansible_lab_template.bat`
+
+The two template scripts create a small practice Ansible lab folder with a controller, three servers, inventory, group variables, and beginner playbooks.
