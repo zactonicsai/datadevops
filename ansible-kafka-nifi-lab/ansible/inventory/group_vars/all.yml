@@ -1,0 +1,43 @@
+---
+# =============================================================================
+# GROUP_VARS: all.yml  (variables applied to EVERY host in the inventory)
+# -----------------------------------------------------------------------------
+# WHAT:  Central place for variables shared by all playbooks and hosts.
+# WHY:   Keeping image names, ports, paths, and credentials here (not hard-coded
+#        in playbooks) means you change a value once and every play picks it up.
+# GOAL:  One source of truth for platform-wide settings.
+#
+# IMPORTANT LOCATION RULE (this is what fixed the "'platform_root' is undefined"
+# error): Ansible only AUTO-LOADS group_vars/ when that folder sits next to the
+# inventory file OR next to the playbook being run. This file therefore lives at
+# ansible/inventory/group_vars/all.yml - directly beside inventory/hosts.ini.
+# If you move it back up to ansible/group_vars/ (next to neither), Ansible will
+# silently NOT load it and every variable below becomes "undefined".
+# =============================================================================
+
+# --- Container images -------------------------------------------------------
+# Change these to fixed versions for production, for example:
+# kafka_image: apache/kafka:4.1.2
+# nifi_image: apache/nifi:2.6.0
+# WHY env lookup: lets you override the image via the KAFKA_IMAGE / NIFI_IMAGE
+# environment variables without editing this file; the "| default(..., true)"
+# supplies a fallback when the env var is unset or empty.
+kafka_image: "{{ lookup('env', 'KAFKA_IMAGE') | default('apache/kafka:latest', true) }}"
+nifi_image: "{{ lookup('env', 'NIFI_IMAGE') | default('apache/nifi:latest', true) }}"
+
+# --- Platform topology ------------------------------------------------------
+platform_network: data-platform-net      # name of the shared Docker network all containers join
+platform_root: /opt/data-platform        # base directory on each host for platform files/logs
+
+# --- Kafka (KRaft) settings -------------------------------------------------
+# Shared KRaft cluster id for this lab. Keep stable unless you wipe Kafka data.
+# WHY: every broker must present the SAME cluster id to form one cluster.
+kafka_cluster_id: "MkU3OEVBNTcwNTJENDM2Qk"
+kafka_internal_port: 9092                 # port brokers use to talk to each other / internal clients
+kafka_controller_port: 9093               # port used by the KRaft controller quorum
+
+# --- NiFi single-user setup for a lab. Change before sharing. ---------------
+# WHY: NiFi requires credentials; these are deliberately simple for a lab only.
+nifi_username: admin                      # NiFi web UI username
+nifi_password: ChangeMeChangeMe123!       # NiFi web UI password (CHANGE for any shared/real use)
+nifi_https_port: 8443                     # HTTPS port NiFi listens on inside the container

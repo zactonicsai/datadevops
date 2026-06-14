@@ -1,40 +1,105 @@
 ---
+# =============================================================================
+# PLAYBOOK: verify.yml
+# -----------------------------------------------------------------------------
+# WHAT:  Confirms the platform actually works: checks that Kafka and NiFi
+#        containers are running on every node, then (from server1) waits for
+#        Kafka to accept connections and creates/lists a demo topic.
+# WHY:   "Started a container" is not the same as "the service is healthy and
+#        usable". This playbook proves end-to-end that Kafka is reachable and
+#        can serve topic operations, and surfaces the URLs you need.
+# GOAL:  A clear, human-readable confirmation that the deployment succeeded and
+#        a "demo-events" topic exists for experimentation.
+# RUN AFTER: deploy-kafka-nifi.yml.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# PLAY 1 - Confirm both containers are up on every node and print access info.
+# -----------------------------------------------------------------------------
 - name: Verify Kafka and NiFi containers
-  hosts: app_servers
-  become: true
+  hosts: app_servers                     # run across all three server nodes
+
+  become: true                           # querying Docker uses the root-owned socket here
+
+  # gather_facts: false -> skip fact collection; we only call Docker, no facts
+  # needed. WHY: faster, and avoids unnecessary work. GOAL: lean verify pass.
   gather_facts: false
 
   tasks:
+    # -------------------------------------------------------------------------
+    # TASK 1 - Read the current state of this node's Kafka container.
+    # WHY: we need its running status to report success/failure.
+    # GOAL: capture container info for the debug output below.
+    # -------------------------------------------------------------------------
     - name: Check Kafka container info
-      community.docker.docker_container_info:
-        name: "kafka-{{ inventory_hostname }}"
-      register: kafka_info
+      community.docker.docker_container_info:  # fetch details about a container
+        name: "kafka-{{ inventory_hostname }}" # the per-host Kafka container
+      register: kafka_info                      # store the result for later use
 
+    # -------------------------------------------------------------------------
+    # TASK 2 - Read the current state of this node's NiFi container (same idea).
+    # -------------------------------------------------------------------------
     - name: Check NiFi container info
       community.docker.docker_container_info:
-        name: "nifi-{{ inventory_hostname }}"
-      register: nifi_info
+        name: "nifi-{{ inventory_hostname }}"  # the per-host NiFi container
+      register: nifi_info                       # store the result
 
+    # -------------------------------------------------------------------------
+    # TASK 3 - Print a concise per-node status + the endpoints to use.
+    # WHY: gives the operator an at-a-glance health summary and the exact URLs
+    #      without digging through Docker output.
+    # GOAL: actionable, readable confirmation.
+    # NOTE: "| default(false)" guards against the container being absent so the
+    #       message still renders instead of erroring on a missing attribute.
+    # -------------------------------------------------------------------------
     - name: Show running container status
-      ansible.builtin.debug:
+      ansible.builtin.debug:               # print a message to the play output
         msg:
-          - "{{ inventory_hostname }} Kafka running: {{ kafka_info.container.State.Running | default(false) }}"
-          - "{{ inventory_hostname }} NiFi running: {{ nifi_info.container.State.Running | default(false) }}"
-          - "Kafka external bootstrap: localhost:{{ kafka_external_port }}"
-          - "NiFi UI: https://localhost:{{ nifi_host_port }}/nifi"
+          - "{{ inventory_hostname }} Kafka running: {{ kafka_info.container.State.Running | default(false) }}"  # true/false Kafka up
+          - "{{ inventory_hostname }} NiFi running: {{ nifi_info.container.State.Running | default(false) }}"    # true/false NiFi up
+          - "Kafka external bootstrap: localhost:{{ kafka_external_port }}"  # address external Kafka clients connect to
+          - "NiFi UI: https://localhost:{{ nifi_host_port }}/nifi"           # browser URL for this node's NiFi
 
+# -----------------------------------------------------------------------------
+# PLAY 2 - From a single node (server1), prove Kafka is usable by creating and
+#          listing a demo topic. Doing this once (not per host) avoids races.
+# -----------------------------------------------------------------------------
 - name: Create a Kafka test topic from server1
-  hosts: server1
-  become: true
-  gather_facts: false
+  hosts: server1                          # only the first broker drives topic creation
+
+  become: true                            # docker exec via the root-owned socket
+
+  gather_facts: false                     # no facts required for these commands
 
   tasks:
+    # -------------------------------------------------------------------------
+    # TASK 1 - Block until Kafka is actually answering API requests.
+    # WHAT: loops calling kafka-broker-api-versions.sh until it succeeds, up to
+    #       a 60-second timeout.
+    # WHY:  the broker process can be "up" before it's ready to serve clients;
+    #       creating a topic too early would fail intermittently.
+    # GOAL: make the next step reliable by waiting for genuine readiness.
+    # NOTE: changed_when:false -> this is a read-only probe, never report
+    #       "changed". The command is wrapped across lines for readability.
+    # -------------------------------------------------------------------------
     - name: Wait for Kafka to accept connections
-      ansible.builtin.command: docker exec kafka-server1 bash -lc "timeout 60 bash -c 'until /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka-server1:9092 >/dev/null 2>&1; do sleep 3; done'"
-      changed_when: false
+      ansible.builtin.command: >-         # run a shell command; ">-" folds the long line cleanly
+        docker exec kafka-server1 bash -lc
+        "timeout 60 bash -c 'until /opt/kafka/bin/kafka-broker-api-versions.sh
+        --bootstrap-server kafka-server1:9092 >/dev/null 2>&1; do sleep 3; done'"
+      changed_when: false                 # a readiness check changes nothing on the system
 
+    # -------------------------------------------------------------------------
+    # TASK 2 - Create the demo topic (idempotently) for experimentation.
+    # WHAT: creates "demo-events" with 3 partitions, replicated across 3 nodes.
+    # WHY:  gives users a ready-made topic and proves write-path metadata ops
+    #       work across the cluster.
+    # GOAL: a known topic exists; re-runs don't fail thanks to --if-not-exists.
+    # NOTE: changed_when keys off the CLI's "Created topic" output so Ansible
+    #       reports "changed" only when a topic was truly created.
+    # -------------------------------------------------------------------------
     - name: Create or verify demo topic
-      ansible.builtin.command: >-
+      ansible.builtin.command: >-         # folded long command for readability
         docker exec kafka-server1 /opt/kafka/bin/kafka-topics.sh
         --bootstrap-server kafka-server1:9092
         --create
@@ -42,14 +107,23 @@
         --topic demo-events
         --partitions 3
         --replication-factor 3
-      changed_when: "'Created topic' in topic_create.stdout"
-      register: topic_create
+      changed_when: "'Created topic' in topic_create.stdout"  # only "changed" when newly created
+      register: topic_create              # capture output to evaluate changed_when
 
+    # -------------------------------------------------------------------------
+    # TASK 3 - List all topics so we can display them as proof.
+    # WHY/GOAL: confirms the cluster returns metadata and that demo-events is
+    #           present. Read-only, so changed_when:false.
+    # -------------------------------------------------------------------------
     - name: List Kafka topics
       ansible.builtin.command: docker exec kafka-server1 /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-server1:9092 --list
-      changed_when: false
-      register: topic_list
+      changed_when: false                 # listing changes nothing
+      register: topic_list                # capture the list for the debug below
 
+    # -------------------------------------------------------------------------
+    # TASK 4 - Print the topic list to the operator.
+    # GOAL: final, visible confirmation of a working Kafka cluster.
+    # -------------------------------------------------------------------------
     - name: Show Kafka topics
       ansible.builtin.debug:
-        var: topic_list.stdout_lines
+        var: topic_list.stdout_lines      # render each topic name on its own line

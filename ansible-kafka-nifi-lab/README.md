@@ -211,6 +211,34 @@ docker compose down -v
 ```
 
 
+
+## Fix for missing `docker-compose-plugin` package
+
+If you see this error:
+
+```text
+[ERROR]: Task failed: Module failed: No package matching 'docker-compose-plugin' is available
+```
+
+This happens because this lab does not need the Docker Compose plugin inside the three fake server containers. Docker Compose runs only on your host computer to start the lab. Ansible uses the Docker Python SDK and the mounted Docker socket to start Kafka and NiFi.
+
+The fixed `ansible/playbooks/bootstrap.yml` installs only these target-side packages:
+
+```yaml
+- ca-certificates
+- curl
+- python3-docker
+- python3-packaging
+- netcat-openbsd
+```
+
+The playbook no longer installs these packages on the fake servers:
+
+```yaml
+- docker.io
+- docker-compose-plugin
+```
+
 ## Fix for removed `community.general.yaml` callback
 
 If you see this error:

@@ -1,47 +1,117 @@
 ---
+# =============================================================================
+# PLAYBOOK: bootstrap.yml
+# -----------------------------------------------------------------------------
+# WHAT:  Prepares every "server" container so it is ready to run Docker-based
+#        workloads (Kafka + NiFi). It installs OS packages, creates the
+#        directory tree the platform will use, confirms the Docker socket is
+#        reachable, and creates the shared Docker network.
+# WHY:   Kafka and NiFi are deployed as Docker containers in later playbooks.
+#        Those later steps assume packages, folders, a live Docker daemon, and
+#        a network already exist. This playbook guarantees all of that first,
+#        so the deploy step can stay focused purely on running containers.
+# GOAL:  After this runs, each node is a clean, predictable host on which the
+#        deploy-kafka-nifi.yml playbook can succeed without surprises.
+# NOTE:  The variables used here (platform_root, platform_network) come from
+#        ansible/inventory/group_vars/all.yml. That file MUST live next to the
+#        inventory (or next to the playbooks) or Ansible will not auto-load it,
+#        which is what previously caused: "'platform_root' is undefined".
+# =============================================================================
+
 - name: Prepare all server nodes
+  # hosts: which machines this play targets. "app_servers" is the inventory
+  # group (server1/server2/server3) defined in inventory/hosts.ini.
+  # WHY: bootstrapping must happen on every node that will run containers.
   hosts: app_servers
+
+  # become: run tasks with privilege escalation (sudo).
+  # WHY: installing apt packages and creating /opt directories both require
+  # root. GOAL: tasks below don't each need their own "become".
   become: true
+
+  # gather_facts: collect system facts (OS family, network, etc.) before tasks.
+  # WHY: the apt module and good conditionals rely on facts; keep it on here
+  # because this is the first contact with the host.
   gather_facts: true
 
   tasks:
+    # -------------------------------------------------------------------------
+    # TASK 1 - Install the OS packages the Docker Ansible modules depend on.
+    # WHY: community.docker.* modules talk to Docker through the Python "docker"
+    #      SDK (python3-docker). "python3-packaging" is needed for version
+    #      comparisons, curl/ca-certificates for HTTPS pulls, and
+    #      netcat-openbsd is used by the readiness checks later.
+    # GOAL: every later Docker task has the libraries it needs to run.
+    # -------------------------------------------------------------------------
     - name: Install base packages needed by Ansible Docker modules
-      ansible.builtin.apt:
-        name:
-          - ca-certificates
-          - curl
-          - docker.io
-          - docker-compose-plugin
-          - python3-docker
-          - python3-packaging
-          - netcat-openbsd
-        state: present
-        update_cache: true
+      ansible.builtin.apt:               # use the Debian/Ubuntu package manager
+        name:                            # the explicit list of packages to ensure present
+          - ca-certificates              # trusted CA bundle so HTTPS image pulls validate
+          - curl                         # fetch files/health endpoints from inside the host
+          - python3-docker               # Python SDK the community.docker modules call
+          - python3-packaging            # version parsing used by the Docker modules
+          - netcat-openbsd               # "nc" used in connectivity / readiness checks
+        state: present                   # "present" = install if missing, otherwise no-op (idempotent)
+        update_cache: true               # refresh the apt index first so installs aren't stale
 
+    # -------------------------------------------------------------------------
+    # TASK 2 - Create the on-disk directory layout for the platform.
+    # WHAT: makes /opt/data-platform plus kafka/, nifi/, and logs/ subfolders.
+    # WHY:  a single, predictable root keeps bind-mounts, logs, and data in one
+    #       place that is easy to find, back up, and clean up.
+    # GOAL: later container mounts and any host-side files have a home that is
+    #       guaranteed to exist with correct ownership/permissions.
+    # NOTE: platform_root resolves to /opt/data-platform from group_vars/all.yml.
+    #       If that variable is undefined, this is the exact task that fails -
+    #       the original "'platform_root' is undefined" error pointed here.
+    # -------------------------------------------------------------------------
     - name: Create platform directories
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
-      loop:
-        - "{{ platform_root }}"
-        - "{{ platform_root }}/kafka"
-        - "{{ platform_root }}/nifi"
-        - "{{ platform_root }}/logs"
+      ansible.builtin.file:              # manage filesystem objects (dirs/files/links)
+        path: "{{ item }}"               # the path to create; "item" is supplied by the loop below
+        state: directory                 # ensure it exists AS a directory (create if missing)
+        owner: root                      # set directory owner to root
+        group: root                      # set directory group to root
+        mode: "0755"                     # rwxr-xr-x: owner full, others read/traverse
+      loop:                              # run this task once per entry, substituting "item"
+        - "{{ platform_root }}"          # the top-level platform directory (/opt/data-platform)
+        - "{{ platform_root }}/kafka"    # holds Kafka-related host files/state
+        - "{{ platform_root }}/nifi"     # holds NiFi-related host files/state
+        - "{{ platform_root }}/logs"     # central location for platform logs
 
+    # -------------------------------------------------------------------------
+    # TASK 3 - Look up whether the Docker daemon socket exists on the host.
+    # WHAT: checks for /var/run/docker.sock and records the result.
+    # WHY:  in this lab the host's Docker socket is mounted into each server
+    #       container so Ansible can manage "sibling" containers. If it's not
+    #       mounted, every later Docker task would fail with a confusing error.
+    # GOAL: capture a clear yes/no signal we can act on in the next task.
+    # -------------------------------------------------------------------------
     - name: Confirm Docker socket is available
-      ansible.builtin.stat:
-        path: /var/run/docker.sock
-      register: docker_socket
+      ansible.builtin.stat:              # inspect a path and return metadata (existence, type...)
+        path: /var/run/docker.sock       # the Unix socket the Docker client/daemon use
+      register: docker_socket            # save the stat result into the variable "docker_socket"
 
+    # -------------------------------------------------------------------------
+    # TASK 4 - Stop early with a helpful message if Docker isn't reachable.
+    # WHY:  failing fast with a human-readable reason is far better than letting
+    #       a later container task explode with a low-level socket error.
+    # GOAL: turn a likely setup mistake into an actionable instruction.
+    # -------------------------------------------------------------------------
     - name: Fail if Docker socket is missing
-      ansible.builtin.fail:
+      ansible.builtin.fail:              # deliberately abort the play with a custom message
         msg: "Docker socket not found. In this lab, /var/run/docker.sock must be mounted into each server container."
-      when: not docker_socket.stat.exists
+      when: not docker_socket.stat.exists  # only fail when the previous stat found nothing
 
+    # -------------------------------------------------------------------------
+    # TASK 5 - Create the shared Docker network for all platform containers.
+    # WHAT: ensures a user-defined bridge network named by platform_network.
+    # WHY:  containers on the same user-defined network can reach each other by
+    #       name (e.g. kafka-server1, nifi-server2). This is how Kafka brokers
+    #       form a quorum and how NiFi can later reach Kafka.
+    # GOAL: a stable, name-resolving network exists before any container starts.
+    # NOTE: platform_network resolves to "data-platform-net" from group_vars.
+    # -------------------------------------------------------------------------
     - name: Create shared Docker network for Kafka and NiFi containers
-      community.docker.docker_network:
-        name: "{{ platform_network }}"
-        state: present
+      community.docker.docker_network:   # manage a Docker network via the community.docker collection
+        name: "{{ platform_network }}"   # the network's name (data-platform-net)
+        state: present                   # ensure it exists; create only if absent (idempotent)

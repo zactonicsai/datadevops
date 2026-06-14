@@ -1,95 +1,167 @@
 ---
+# =============================================================================
+# PLAYBOOK: deploy-kafka-nifi.yml
+# -----------------------------------------------------------------------------
+# WHAT:  Deploys a 3-node Apache Kafka cluster (running in KRaft mode, i.e. no
+#        ZooKeeper) and one Apache NiFi node per host, all as Docker containers.
+# WHY:   This is the core of the lab - it turns the prepared hosts from
+#        bootstrap.yml into a working streaming platform: Kafka for messaging
+#        and NiFi for data flow/orchestration.
+# GOAL:  After this runs, each node hosts a Kafka broker+controller and a NiFi
+#        instance, all joined on the shared network and reachable from the host.
+# DEPENDS ON: bootstrap.yml (packages, directories, docker network) and the
+#        variables in inventory/group_vars/all.yml + per-host vars in hosts.ini.
+# =============================================================================
+
 - name: Deploy Kafka KRaft cluster and NiFi standalone nodes
+  # Target the same three server nodes prepared during bootstrap.
   hosts: app_servers
+
+  # Privilege escalation: the Docker socket and volumes need root in this lab.
   become: true
+
+  # Gather facts so any fact-based templating/conditionals behave correctly.
   gather_facts: true
+
+  # serial: 1 -> roll out to ONE host at a time instead of all at once.
+  # WHY: starting Kafka brokers one-by-one makes quorum formation and any
+  #      troubleshooting far easier to reason about, and avoids a thundering
+  #      herd of image pulls. GOAL: a calm, observable, ordered rollout.
   serial: 1
 
   vars:
+    # kafka_controller_quorum_voters: the KRaft controller quorum string.
+    # WHAT: builds a comma-separated list like "1@kafka-server1:9093,2@kafka-..."
+    # WHY:  in KRaft mode every controller must know the full set of voters by
+    #       "<node_id>@<host>:<controller_port>" so they can elect a leader.
+    # HOW:  the Jinja loop walks the "kafka" inventory group, reads each host's
+    #       kafka_node_id (from hosts.ini) and joins them with commas; the
+    #       "{{ ',' if not loop.last else '' }}" avoids a trailing comma.
+    # GOAL: one correct, identical voter string shared by every broker.
     kafka_controller_quorum_voters: >-
       {%- for host in groups['kafka'] -%}
       {{ hostvars[host].kafka_node_id }}@kafka-{{ host }}:{{ kafka_controller_port }}{{ ',' if not loop.last else '' }}
       {%- endfor -%}
 
   tasks:
+    # -------------------------------------------------------------------------
+    # TASK 1 - Make sure the Kafka image is present locally.
+    # WHY: pulling up front means container start is fast and won't fail
+    #      mid-rollout on a missing image. GOAL: image cached before "started".
+    # -------------------------------------------------------------------------
     - name: Pull Kafka image
-      community.docker.docker_image:
-        name: "{{ kafka_image }}"
-        source: pull
-        force_source: false
+      community.docker.docker_image:     # manage a Docker image (pull/build/remove)
+        name: "{{ kafka_image }}"        # which image+tag to ensure locally (from group_vars)
+        source: pull                     # obtain it by pulling from a registry
+        force_source: false              # don't re-pull if it's already present (idempotent/fast)
 
+    # -------------------------------------------------------------------------
+    # TASK 2 - Make sure the NiFi image is present locally (same rationale).
+    # -------------------------------------------------------------------------
     - name: Pull NiFi image
       community.docker.docker_image:
-        name: "{{ nifi_image }}"
-        source: pull
-        force_source: false
+        name: "{{ nifi_image }}"         # NiFi image+tag from group_vars/all.yml
+        source: pull                     # pull from registry
+        force_source: false              # skip re-pull when already cached
 
+    # -------------------------------------------------------------------------
+    # TASK 3 - Create a named Docker volume for THIS host's Kafka data.
+    # WHAT: a volume like "kafka-data-server1".
+    # WHY:  Kafka's log/segment data must survive container restarts/recreates;
+    #       a named volume decouples data lifecycle from the container.
+    # GOAL: durable, per-node Kafka storage.
+    # -------------------------------------------------------------------------
     - name: Create Kafka data volume
-      community.docker.docker_volume:
-        name: "kafka-data-{{ inventory_hostname }}"
-        state: present
+      community.docker.docker_volume:    # manage a Docker named volume
+        name: "kafka-data-{{ inventory_hostname }}"  # unique per host (e.g. kafka-data-server1)
+        state: present                   # ensure the volume exists (idempotent)
 
+    # -------------------------------------------------------------------------
+    # TASK 4 - Create a named Docker volume for THIS host's NiFi state.
+    # WHY/GOAL: same durability reasoning as Kafka, for NiFi's state dir.
+    # -------------------------------------------------------------------------
     - name: Create NiFi data volume
       community.docker.docker_volume:
-        name: "nifi-data-{{ inventory_hostname }}"
-        state: present
+        name: "nifi-data-{{ inventory_hostname }}"   # unique per host (e.g. nifi-data-server1)
+        state: present                   # ensure it exists
 
+    # -------------------------------------------------------------------------
+    # TASK 5 - Start the Kafka broker+controller container in KRaft mode.
+    # WHAT: launches one Kafka node that is BOTH a broker and a controller.
+    # WHY:  KRaft removes ZooKeeper; each node participates in the metadata
+    #       quorum and also serves client traffic. The big env block configures
+    #       listeners, ports, the cluster id, and replication factors.
+    # GOAL: a running, networked, externally-reachable Kafka node that joins the
+    #       3-node quorum.
+    # -------------------------------------------------------------------------
     - name: Start Kafka broker/controller in KRaft mode
-      community.docker.docker_container:
-        name: "kafka-{{ inventory_hostname }}"
-        image: "{{ kafka_image }}"
-        state: started
-        restart_policy: unless-stopped
-        networks:
-          - name: "{{ platform_network }}"
-            aliases:
-              - "kafka-{{ inventory_hostname }}"
-        published_ports:
-          - "{{ kafka_external_port }}:{{ kafka_external_port }}"
-        volumes:
-          - "kafka-data-{{ inventory_hostname }}:/var/lib/kafka/data"
-        env:
-          CLUSTER_ID: "{{ kafka_cluster_id }}"
-          KAFKA_NODE_ID: "{{ kafka_node_id | string }}"
-          KAFKA_PROCESS_ROLES: "broker,controller"
-          KAFKA_CONTROLLER_QUORUM_VOTERS: "{{ kafka_controller_quorum_voters }}"
+      community.docker.docker_container:                 # create/run a Docker container
+        name: "kafka-{{ inventory_hostname }}"           # stable per-host container name (kafka-server1)
+        image: "{{ kafka_image }}"                       # image to run (pulled in Task 1)
+        state: started                                   # ensure it is created AND running
+        restart_policy: unless-stopped                   # auto-restart on crash/reboot unless we stop it
+        networks:                                        # attach to the shared platform network
+          - name: "{{ platform_network }}"               # the data-platform-net created in bootstrap
+            aliases:                                      # extra DNS name other containers can use
+              - "kafka-{{ inventory_hostname }}"          # so peers resolve "kafka-server1" etc.
+        published_ports:                                 # expose a port from container to host
+          - "{{ kafka_external_port }}:{{ kafka_external_port }}"  # host:container for external clients
+        volumes:                                         # mount durable storage into the container
+          - "kafka-data-{{ inventory_hostname }}:/var/lib/kafka/data"  # named volume -> Kafka data dir
+        env:                                             # environment variables that configure Kafka
+          CLUSTER_ID: "{{ kafka_cluster_id }}"           # shared KRaft cluster identifier (must match across nodes)
+          KAFKA_NODE_ID: "{{ kafka_node_id | string }}"  # this node's unique id (from hosts.ini); cast to string
+          KAFKA_PROCESS_ROLES: "broker,controller"       # this node acts as both broker and controller (KRaft)
+          KAFKA_CONTROLLER_QUORUM_VOTERS: "{{ kafka_controller_quorum_voters }}"  # full voter list (built above)
+          # sockets Kafka binds: internal (broker-to-broker), controller (quorum), external (host clients)
           KAFKA_LISTENERS: "PLAINTEXT://:{{ kafka_internal_port }},CONTROLLER://:{{ kafka_controller_port }},EXTERNAL://:{{ kafka_external_port }}"
+          # addresses Kafka advertises to clients: internal name for peers, localhost:<port> for external access
           KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-{{ inventory_hostname }}:{{ kafka_internal_port }},EXTERNAL://localhost:{{ kafka_external_port }}"
+          # security protocol per listener name (all plaintext in this lab; use SSL/SASL in production)
           KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT"
-          KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
-          KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
-          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "3"
-          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "3"
-          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "2"
-          KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
-          KAFKA_NUM_PARTITIONS: "3"
-        labels:
-          app: kafka
-          managed_by: ansible
-          lab_host: "{{ inventory_hostname }}"
+          KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"  # which listener name carries controller traffic
+          KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"  # which listener brokers use to talk to each other
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "3"    # replicate the internal offsets topic across all 3 nodes
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "3"  # same durability for the transaction state log
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "2"       # require >=2 in-sync replicas for transactional writes
+          KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"    # no artificial delay before first consumer-group rebalance
+          KAFKA_NUM_PARTITIONS: "3"                      # default partition count for auto-created topics
+        labels:                                          # metadata labels for discovery/management
+          app: kafka                                     # tag identifying the workload
+          managed_by: ansible                            # marks the container as created by this lab
+          lab_host: "{{ inventory_hostname }}"           # records which node it belongs to
 
+    # -------------------------------------------------------------------------
+    # TASK 6 - Start the NiFi standalone container on this host.
+    # WHAT: launches a single-user NiFi instance exposed over HTTPS.
+    # WHY:  NiFi provides the visual data-flow layer of the platform; one node
+    #       per host keeps the lab simple while still being reachable.
+    # GOAL: a running NiFi UI per node, on its own host port, with credentials
+    #       and proxy host configured so the web UI loads correctly.
+    # -------------------------------------------------------------------------
     - name: Start NiFi standalone node
       community.docker.docker_container:
-        name: "nifi-{{ inventory_hostname }}"
-        image: "{{ nifi_image }}"
-        state: started
-        restart_policy: unless-stopped
-        networks:
-          - name: "{{ platform_network }}"
+        name: "nifi-{{ inventory_hostname }}"            # per-host NiFi container name (nifi-server1)
+        image: "{{ nifi_image }}"                        # NiFi image (pulled in Task 2)
+        state: started                                   # ensure created and running
+        restart_policy: unless-stopped                   # survive crashes/reboots unless explicitly stopped
+        networks:                                        # join the shared platform network
+          - name: "{{ platform_network }}"               # data-platform-net
             aliases:
-              - "nifi-{{ inventory_hostname }}"
-        published_ports:
-          - "{{ nifi_host_port }}:{{ nifi_https_port }}"
-        volumes:
-          - "nifi-data-{{ inventory_hostname }}:/opt/nifi/nifi-current/state"
-        env:
-          SINGLE_USER_CREDENTIALS_USERNAME: "{{ nifi_username }}"
-          SINGLE_USER_CREDENTIALS_PASSWORD: "{{ nifi_password }}"
-          NIFI_WEB_HTTPS_PORT: "{{ nifi_https_port | string }}"
-          NIFI_WEB_HTTPS_HOST: "0.0.0.0"
+              - "nifi-{{ inventory_hostname }}"           # resolvable name for peers (nifi-server1)
+        published_ports:                                 # expose NiFi's HTTPS port to the host
+          - "{{ nifi_host_port }}:{{ nifi_https_port }}" # host port -> container HTTPS port
+        volumes:                                         # persist NiFi state across restarts
+          - "nifi-data-{{ inventory_hostname }}:/opt/nifi/nifi-current/state"  # named volume -> NiFi state dir
+        env:                                             # environment that configures NiFi
+          SINGLE_USER_CREDENTIALS_USERNAME: "{{ nifi_username }}"  # login username (lab single-user mode)
+          SINGLE_USER_CREDENTIALS_PASSWORD: "{{ nifi_password }}"  # login password (change before sharing!)
+          NIFI_WEB_HTTPS_PORT: "{{ nifi_https_port | string }}"    # internal HTTPS port NiFi listens on
+          NIFI_WEB_HTTPS_HOST: "0.0.0.0"                 # bind on all interfaces inside the container
+          # allowed Host header values so NiFi's UI isn't rejected when reached via the mapped host port
           NIFI_WEB_PROXY_HOST: "localhost:{{ nifi_host_port }},nifi-{{ inventory_hostname }}:{{ nifi_https_port }}"
-          NIFI_SENSITIVE_PROPS_KEY: "ChangeThisSensitivePropsKey123456789"
+          NIFI_SENSITIVE_PROPS_KEY: "ChangeThisSensitivePropsKey123456789"  # key used to encrypt sensitive flow properties
         labels:
-          app: nifi
-          managed_by: ansible
-          lab_host: "{{ inventory_hostname }}"
+          app: nifi                                      # workload tag
+          managed_by: ansible                            # created by this lab
+          lab_host: "{{ inventory_hostname }}"           # owning node

@@ -1,9 +1,29 @@
 ---
+# =============================================================================
+# PLAYBOOK: site.yml  (the master / entry-point playbook)
+# -----------------------------------------------------------------------------
+# WHAT:  Orchestrates the full lifecycle by importing the three stage playbooks
+#        in the correct order: bootstrap -> deploy -> verify.
+# WHY:   A single entry point means an operator runs ONE command
+#        (ansible-playbook playbooks/site.yml) and gets a fully provisioned,
+#        deployed, and verified platform - no need to remember the sequence.
+# GOAL:  One reproducible command that takes bare hosts all the way to a
+#        validated, running Kafka + NiFi platform.
+# NOTE:  import_playbook includes each file at parse time and runs its plays
+#        top-to-bottom, so ordering here defines the deployment order.
+# =============================================================================
+
+# STAGE 1: prepare the hosts (packages, directories, docker network).
+# WHY first: nothing can be deployed until the hosts are ready.
 - name: Bootstrap Linux targets
-  import_playbook: bootstrap.yml
+  import_playbook: bootstrap.yml         # pull in and run all plays from bootstrap.yml
 
+# STAGE 2: deploy the workloads (Kafka KRaft cluster + NiFi nodes).
+# WHY second: depends on the network/dirs/packages created in stage 1.
 - name: Deploy Kafka and NiFi
-  import_playbook: deploy-kafka-nifi.yml
+  import_playbook: deploy-kafka-nifi.yml # pull in and run the deployment plays
 
+# STAGE 3: verify everything is healthy and create a demo topic.
+# WHY last: only meaningful once the containers from stage 2 are running.
 - name: Verify platform
-  import_playbook: verify.yml
+  import_playbook: verify.yml            # pull in and run the verification plays

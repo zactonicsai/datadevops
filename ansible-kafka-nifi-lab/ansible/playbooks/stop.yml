@@ -1,16 +1,41 @@
 ---
+# =============================================================================
+# PLAYBOOK: stop.yml
+# -----------------------------------------------------------------------------
+# WHAT:  Tears down the running platform by removing the Kafka and NiFi
+#        containers on every node.
+# WHY:   Provides a clean, repeatable way to shut the lab down between sessions
+#        or before redeploying, without hunting for container names by hand.
+# GOAL:  No Kafka/NiFi containers left running. NOTE: the named data VOLUMES are
+#        intentionally NOT deleted here, so your Kafka data and NiFi state
+#        survive a stop/start cycle. (Remove volumes manually for a full wipe.)
+# =============================================================================
+
 - name: Stop Kafka and NiFi containers
-  hosts: app_servers
-  become: true
-  gather_facts: false
+  hosts: app_servers                     # act on all three server nodes
+
+  become: true                           # removing containers uses the root Docker socket
+
+  gather_facts: false                    # teardown needs no system facts
 
   tasks:
+    # -------------------------------------------------------------------------
+    # TASK 1 - Remove this node's Kafka container.
+    # WHAT: ensures the kafka-<host> container is absent (stopped + deleted).
+    # WHY:  "state: absent" is idempotent - it's a no-op if already gone, so
+    #       this playbook is safe to run repeatedly.
+    # GOAL: free the broker's resources and ports on this node.
+    # -------------------------------------------------------------------------
     - name: Stop Kafka
-      community.docker.docker_container:
-        name: "kafka-{{ inventory_hostname }}"
-        state: absent
+      community.docker.docker_container:  # manage the container's lifecycle
+        name: "kafka-{{ inventory_hostname }}"  # the per-host Kafka container to remove
+        state: absent                     # stop and remove it (no error if missing)
 
+    # -------------------------------------------------------------------------
+    # TASK 2 - Remove this node's NiFi container (same rationale).
+    # GOAL: free NiFi's resources and host port on this node.
+    # -------------------------------------------------------------------------
     - name: Stop NiFi
       community.docker.docker_container:
-        name: "nifi-{{ inventory_hostname }}"
-        state: absent
+        name: "nifi-{{ inventory_hostname }}"   # the per-host NiFi container to remove
+        state: absent                     # stop and remove it idempotently
