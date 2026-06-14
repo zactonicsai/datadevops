@@ -1,0 +1,128 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  EKS control plane plus a managed node group. Creates the cluster IAM role,
+  the node instance role, the cluster itself, and a 2-node managed node group
+  (sized to comfortably run three hello-world pods). Imports subnet IDs from
+  the VPC stack.
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: hello-world-cluster
+    Description: Name for the EKS cluster. Must match the VPC stack's ClusterName.
+  KubernetesVersion:
+    Type: String
+    Default: '1.33'
+    Description: EKS Kubernetes minor version.
+    AllowedValues: ['1.31', '1.32', '1.33', '1.34', '1.35', '1.36']
+  NodeInstanceType:
+    Type: String
+    Default: t3.medium
+    Description: EC2 instance type for the worker nodes.
+  NodeGroupDesiredSize:
+    Type: Number
+    Default: 2
+  NodeGroupMinSize:
+    Type: Number
+    Default: 2
+  NodeGroupMaxSize:
+    Type: Number
+    Default: 3
+  NodeVolumeSize:
+    Type: Number
+    Default: 20
+    Description: EBS volume size (GiB) per worker node.
+
+Resources:
+  # ---------- IAM: control plane role ----------
+  ClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ClusterName}-cluster-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+
+  # ---------- IAM: worker node role ----------
+  NodeInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ClusterName}-node-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  # ---------- Control plane ----------
+  EKSCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Ref ClusterName
+      Version: !Ref KubernetesVersion
+      RoleArn: !GetAtt ClusterRole.Arn
+      # Bootstrap the creating principal as a cluster admin via the modern Access Entry API.
+      AccessConfig:
+        AuthenticationMode: API_AND_CONFIG_MAP
+        BootstrapClusterCreatorAdminPermissions: true
+      ResourcesVpcConfig:
+        EndpointPublicAccess: true
+        EndpointPrivateAccess: true
+        SubnetIds: !Split
+          - ','
+          - Fn::ImportValue: !Sub '${ClusterName}-AllSubnets'
+
+  # ---------- Managed node group ----------
+  NodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      ClusterName: !Ref EKSCluster
+      NodegroupName: standard-workers
+      NodeRole: !GetAtt NodeInstanceRole.Arn
+      # Worker nodes live in the private subnets; egress via the NAT gateway.
+      Subnets: !Split
+        - ','
+        - Fn::ImportValue: !Sub '${ClusterName}-PrivateSubnets'
+      AmiType: AL2023_x86_64_STANDARD
+      CapacityType: ON_DEMAND
+      InstanceTypes:
+        - !Ref NodeInstanceType
+      DiskSize: !Ref NodeVolumeSize
+      ScalingConfig:
+        DesiredSize: !Ref NodeGroupDesiredSize
+        MinSize: !Ref NodeGroupMinSize
+        MaxSize: !Ref NodeGroupMaxSize
+      UpdateConfig:
+        MaxUnavailable: 1
+      Labels:
+        role: standard-workers
+
+Outputs:
+  ClusterName:
+    Description: EKS cluster name
+    Value: !Ref EKSCluster
+  ClusterEndpoint:
+    Description: EKS API server endpoint
+    Value: !GetAtt EKSCluster.Endpoint
+  ClusterArn:
+    Description: EKS cluster ARN
+    Value: !GetAtt EKSCluster.Arn
+  NodeInstanceRoleArn:
+    Description: Worker node IAM role ARN
+    Value: !GetAtt NodeInstanceRole.Arn
+  UpdateKubeconfigCommand:
+    Description: Run this to point kubectl at the new cluster
+    Value: !Sub 'aws eks update-kubeconfig --name ${ClusterName} --region ${AWS::Region}'
