@@ -1,16 +1,24 @@
-# Kubernetes Explained — And When Other Options Beat It
+# Kubernetes on AWS — For a Private, Internal-Only Business Network
 
-**Application profile:** ~100,000 total registered users, **not** concurrent. Realistic peak is a few hundred to low thousands of requests per second.
+**Application profile:** ~100,000 total registered users (employees / internal users), **not** concurrent. Realistic peak is a few hundred to low thousands of requests per second. **The app is internal-only — it lives entirely inside the company’s AWS private network boundary and is never exposed to the public internet.**
+
+**Why “internal-only” changes everything below:** When an app is private, the whole question shifts from public-facing concerns (CDNs, edge, public load balancers, DDoS, marketing front ends) to **network isolation, controlled access, and east-west traffic inside a VPC**. So this version:
+
+- Maps every option to its **specific AWS service**.
+- Adds an AWS **private-network architecture** section (VPC, subnets, endpoints, access paths).
+- Drops approaches that only make sense for public/global apps (public edge, Jamstack/CDN front ends).
+- Reframes **security** around the network boundary, not the public internet.
 
 **How this document is organized:**
 
-1. The nine goals (the yardstick we measure everything against)
-1. **Kubernetes in depth** — what it actually is, its parts, and how it scores
-1. Why each alternative may be **better or worse** than Kubernetes
-1. **Broader architecture approaches** — the wider landscape of alternatives and their benefits
-1. Feature-by-feature difference tables
+1. The nine goals (the yardstick)
+1. The AWS private-network boundary (the foundation everything sits inside)
+1. **Kubernetes on AWS (EKS) in depth** — what it is, its parts, private-cluster specifics, and how it scores
+1. Why each **AWS alternative** may be better or worse than EKS
+1. AWS-specific architecture approaches and their benefits
+1. Feature-by-feature difference tables (AWS services)
 1. The full scorecard and a decision guide
-1. Cross-cutting best practices and a leadership summary
+1. Cross-cutting AWS best practices and a leadership summary
 
 -----
 
@@ -18,380 +26,393 @@
 
 Before judging Kubernetes or anything else, the team should agree on what “good” means. Think of these like qualities you’d want in a car before comparing engines.
 
-|Goal                 |Middle-school explanation                                               |What “done well” looks like                                       |
-|---------------------|------------------------------------------------------------------------|------------------------------------------------------------------|
-|**Simplicity**       |How easy to set up and understand? Can one person hold it in their head?|A new teammate deploys on day one without a 3-week course.        |
-|**Extensibility**    |How easily can you add features, services, or scale later?              |A new microservice or region doesn’t force a rebuild.             |
-|**Maintainability**  |How easy to keep running, patch, and fix over years?                    |Routine updates are boring and safe, not scary.                   |
-|**Reliability**      |Does it keep working day to day without surprises?                      |Few incidents; predictable behavior.                              |
-|**Security**         |How well does it keep attackers and mistakes out?                       |Secrets protected, fast patching, small blast radius.             |
-|**Repeatability**    |Can you rebuild the exact same setup automatically?                     |“Infrastructure as code” — destroy it and recreate it identically.|
-|**Fault tolerance**  |If one piece breaks, does the whole thing stay up?                      |One server dies, users never notice.                              |
-|**Five 9s (99.999%)**|Under ~5 minutes of downtime **per year**.                              |Near-zero outages, even during deploys and failures.              |
-|**Performance**      |How fast and responsive under load?                                     |Pages load quickly even at peak traffic.                          |
+|Goal                 |Middle-school explanation                                               |What “done well” looks like (internal AWS context)                                               |
+|---------------------|------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------|
+|**Simplicity**       |How easy to set up and understand? Can one person hold it in their head?|A new teammate deploys on day one without a 3-week course.                                       |
+|**Extensibility**    |How easily can you add features, services, or scale later?              |A new internal service doesn’t force a rebuild.                                                  |
+|**Maintainability**  |How easy to keep running, patch, and fix over years?                    |Routine updates are boring and safe, not scary.                                                  |
+|**Reliability**      |Does it keep working day to day without surprises?                      |Few incidents; predictable behavior for internal users.                                          |
+|**Security**         |How well does it keep attackers and mistakes out?                       |App is unreachable from the internet; least-privilege IAM; secrets protected; small blast radius.|
+|**Repeatability**    |Can you rebuild the exact same setup automatically?                     |“Infrastructure as code” — destroy the VPC stack and recreate it identically.                    |
+|**Fault tolerance**  |If one piece breaks, does the whole thing stay up?                      |One Availability Zone fails, internal users never notice.                                        |
+|**Five 9s (99.999%)**|Under ~5 minutes of downtime **per year**.                              |Near-zero outages, even during deploys and AZ failures.                                          |
+|**Performance**      |How fast and responsive under load?                                     |Internal pages load quickly even at peak.                                                        |
 
 
-> **Reality check on “Five 9s”:** 99.999% uptime is genuinely hard and expensive. It usually requires multi-zone or multi-region redundancy, automated failover, zero-downtime deploys, and mature on-call. Most apps actually need **three 9s (99.9%, ~8.8 hrs/yr)** or **four 9s (99.99%, ~53 min/yr)**. Be honest about whether five 9s is a real business requirement — it changes the cost by an order of magnitude, and it’s the single goal that most justifies Kubernetes.
+> **Reality check on “Five 9s”:** 99.999% uptime is genuinely hard and expensive. On AWS it usually requires multi-AZ (and sometimes multi-region) redundancy, automated failover, zero-downtime deploys, and mature on-call. Most internal business apps actually need **three 9s (99.9%, ~8.8 hrs/yr)** or **four 9s (99.99%, ~53 min/yr)**. Be honest about whether five 9s is a real requirement — it changes cost by an order of magnitude, and it’s the single goal that most justifies Kubernetes. For an internal tool, planned maintenance windows are often acceptable, which relaxes this further.
 
 -----
 
-## 2. Kubernetes in Depth
+## 2. The AWS Private-Network Boundary (The Foundation)
 
-### 2.1 What Kubernetes actually is (plain language)
+Everything in this document runs **inside** this boundary. Understanding it first makes the rest obvious. Plain-language analogy: think of a **secure office building**. The VPC is the building, subnets are floors, security groups are door badges for each room, and there is **no public entrance** — staff get in only through the company’s own private corridors (VPN/Direct Connect).
+
+### 2.1 Core building blocks
+
+|AWS piece                       |Office analogy                        |What it does in a private setup                                                             |
+|--------------------------------|--------------------------------------|--------------------------------------------------------------------------------------------|
+|**VPC** (Virtual Private Cloud) |The whole building                    |Your isolated private network in AWS. Nothing enters unless you allow it.                   |
+|**Private subnets**             |Floors with no street exit            |Where the app and database live. **No route to an internet gateway.**                       |
+|**Security groups**             |Per-room badge readers                |Stateful firewalls on each resource — allow only the exact ports/sources needed.            |
+|**Network ACLs**                |Floor-level guards                    |Optional subnet-wide allow/deny rules for defense in depth.                                 |
+|**Internal ALB/NLB**            |The building’s internal reception desk|A load balancer marked **internal** (private IP only) — never public.                       |
+|**VPC endpoints (PrivateLink)** |Private internal mail chutes          |Let the app reach AWS services (S3, ECR, Secrets Manager) **without** touching the internet.|
+|**VPN / Direct Connect**        |The staff-only corridor from HQ       |How employees and on-prem systems reach the private app securely.                           |
+|**Route 53 Private Hosted Zone**|The internal phone directory          |Internal-only DNS names that resolve just inside the VPC.                                   |
+
+### 2.2 The golden rule for internal apps
+
+**No public IPs, no public load balancers, no internet gateway on the app/data subnets.** Outbound access (for patches or AWS APIs) goes through **VPC endpoints** or a tightly controlled **NAT gateway**, and inbound access comes **only** from the corporate network via VPN/Direct Connect. This single discipline delivers most of the *security* goal before you write a line of app code.
+
+### 2.3 Why this matters for the platform choice
+
+Every option below — EKS, ECS/Fargate, Lambda, EC2 — can be deployed **fully privately** on AWS. The differences are in *how much networking you must wire yourself* and *how cleanly each integrates with private endpoints and IAM*. That becomes a major scoring factor that wouldn’t exist for a public app.
+
+-----
+
+## 3. Kubernetes on AWS (Amazon EKS) in Depth
+
+### 3.1 What Kubernetes is (plain language)
 
 Imagine a busy airport. Planes (your app’s containers) are constantly landing, taking off, and being refueled. Something has to direct all that traffic, replace a plane that breaks down, and add more flights when demand spikes. **Kubernetes is that control tower.** It runs many containers across many machines and constantly keeps them healthy: if a container dies, it restarts it; if a whole machine dies, it moves the work elsewhere; if traffic rises, it launches more copies.
 
-It is extraordinarily powerful. But a control tower is overkill for a single small runway — and that’s the core tension for your use case.
+On AWS, the managed version is **Amazon EKS** (Elastic Kubernetes Service): AWS runs the control plane (the “control tower” brain), and you run the worker nodes (or let Fargate run them serverlessly). It is extraordinarily powerful — but a control tower is overkill for a single small internal runway, which is the core tension for your use case.
 
-### 2.2 A container, first
+### 3.2 A container, first
 
-A **container** is a sealed box holding your code plus everything it needs to run (libraries, settings), so it behaves identically on any machine. Kubernetes doesn’t replace containers — it **orchestrates** them: it decides where they run, how many there are, and how they find each other.
+A **container** is a sealed box holding your code plus everything it needs to run (libraries, settings), so it behaves identically anywhere. On AWS you store container images privately in **Amazon ECR** (Elastic Container Registry) and pull them through a **VPC endpoint** so the image never travels over the public internet. Kubernetes doesn’t replace containers — it **orchestrates** them.
 
-### 2.3 The main parts of Kubernetes (so the team isn’t lost)
+### 3.3 The main parts of Kubernetes (so the team isn’t lost)
 
-|Part                  |Airport analogy          |What it does                                                                    |
-|----------------------|-------------------------|--------------------------------------------------------------------------------|
-|**Cluster**           |The whole airport        |All the machines Kubernetes manages, working as one system.                     |
-|**Node**              |A runway/gate            |A single machine (VM or physical) that runs your containers.                    |
-|**Pod**               |A single parked plane    |The smallest unit Kubernetes runs — one or a few tightly-coupled containers.    |
-|**Deployment**        |The flight schedule      |Declares “I want N copies of this app running” and keeps it true.               |
-|**Service**           |The airport signage      |A stable address so other parts can find your pods even as they come and go.    |
-|**Ingress**           |The arrivals gate        |Routes outside web traffic to the right Service inside the cluster.             |
-|**ConfigMap / Secret**|The ops manual / the safe|Stores configuration and sensitive credentials separately from code.            |
-|**Control plane**     |The control tower itself |The brain that schedules pods, watches health, and enforces your declared state.|
-|**kubectl**           |The radio you talk on    |The command-line tool you use to inspect and change the cluster.                |
+|Part                  |Airport analogy          |What it does                                                                                  |
+|----------------------|-------------------------|----------------------------------------------------------------------------------------------|
+|**Cluster**           |The whole airport        |All the machines Kubernetes manages, working as one system.                                   |
+|**Node**              |A runway/gate            |A single machine (an EC2 instance, or Fargate) that runs your containers.                     |
+|**Pod**               |A single parked plane    |The smallest unit Kubernetes runs — one or a few tightly-coupled containers.                  |
+|**Deployment**        |The flight schedule      |Declares “I want N copies of this app running” and keeps it true.                             |
+|**Service**           |The airport signage      |A stable address so other parts can find your pods even as they come and go.                  |
+|**Ingress**           |The arrivals gate        |Routes traffic to the right Service — on EKS, backed by an **internal** ALB for a private app.|
+|**ConfigMap / Secret**|The ops manual / the safe|Stores configuration and credentials separately from code.                                    |
+|**Control plane**     |The control tower itself |The brain that schedules pods and enforces your declared state — **managed by AWS in EKS**.   |
+|**kubectl**           |The radio you talk on    |The command-line tool you use to inspect and change the cluster.                              |
 
-The key idea is **declarative state**: you write down what you want (in YAML manifests), and Kubernetes continuously works to make reality match. That’s why it self-heals — it’s always comparing “what is” to “what should be.”
+The key idea is **declarative state**: you write what you want (YAML manifests), and Kubernetes continuously makes reality match. That’s why it self-heals.
 
-### 2.4 Where you can run it
+### 3.4 What “private EKS” specifically means
 
-|Flavor          |Examples                      |Trade-off                                                                                               |
-|----------------|------------------------------|--------------------------------------------------------------------------------------------------------|
-|**Managed**     |AWS EKS, Google GKE, Azure AKS|Cloud runs the control plane for you. **Strongly recommended** — removes the hardest operational burden.|
-|**Self-managed**|kubeadm, kOps, bare metal     |You run everything, including the control plane. Maximum control, maximum pain. Only for special needs. |
+For an internal-only app, you configure EKS as a **private cluster**:
 
-### 2.5 How Kubernetes scores against the nine goals
+- **Private API endpoint:** the cluster’s control API is reachable only from inside the VPC (not the public internet).
+- **Worker nodes in private subnets:** no public IPs.
+- **Internal ALB/NLB via the AWS Load Balancer Controller:** traffic enters only from the corporate network.
+- **VPC endpoints for ECR, S3, STS, CloudWatch, Secrets Manager:** image pulls, logging, and secrets all stay on the private network.
+- **IAM Roles for Service Accounts (IRSA):** each pod gets least-privilege AWS permissions without shared keys.
 
-|Goal           |Score|Why                                                                                                       |
-|---------------|-----|----------------------------------------------------------------------------------------------------------|
-|Simplicity     |●○○  |Many moving parts (ingress, services, secrets, networking, autoscaling, monitoring). Steep learning curve.|
-|Extensibility  |●●●  |Best in class. Run hundreds of services, custom operators, any deployment pattern you want.               |
-|Maintainability|●●○  |Powerful but heavy; needs ongoing upgrades and expertise. Managed control planes ease this.               |
-|Reliability    |●●●  |Self-healing and battle-tested at the world’s largest scales.                                             |
-|Security       |●●○  |Very capable (RBAC, network policies, secrets) but **easy to misconfigure** without expertise.            |
-|Repeatability  |●●●  |Declarative manifests + GitOps = exact, version-controlled rebuilds.                                      |
-|Fault tolerance|●●●  |Reschedules across nodes and availability zones automatically; designed around failure.                   |
-|Five 9s        |●●●  |The standard choice when five 9s is a *genuine* requirement — *with* the team to run it.                  |
-|Performance    |●●●  |Scales horizontally extremely well, with fine-grained CPU/memory control.                                 |
+This is fully supported — but notice it’s **several extra moving parts** you must wire and maintain. That effort is the heart of the “is EKS worth it?” question.
+
+### 3.5 How EKS scores against the nine goals (internal context)
+
+|Goal           |Score|Why (private AWS context)                                                                                    |
+|---------------|-----|-------------------------------------------------------------------------------------------------------------|
+|Simplicity     |●○○  |Many moving parts (cluster, nodes, ingress, IRSA, VPC endpoints, add-ons). Steepest learning curve.          |
+|Extensibility  |●●●  |Best in class. Run many internal services, operators, any pattern.                                           |
+|Maintainability|●●○  |AWS manages the control plane, but you patch nodes/add-ons and own Kubernetes upgrades.                      |
+|Reliability    |●●●  |Control plane spans multiple AZs by default; self-healing workloads.                                         |
+|Security       |●●○  |Extremely capable (IRSA, network policies, private endpoints) but **easy to misconfigure** without expertise.|
+|Repeatability  |●●●  |Manifests + GitOps + Terraform = exact, version-controlled private rebuilds.                                 |
+|Fault tolerance|●●●  |Reschedules pods across AZs automatically; designed around failure.                                          |
+|Five 9s        |●●●  |The standard choice when five 9s is a *genuine* requirement — *with* the team to run it.                     |
+|Performance    |●●●  |Scales horizontally extremely well, with fine-grained CPU/memory control.                                    |
 
 Scoring key: ●●● strong, ●●○ moderate, ●○○ weak.
 
-### 2.6 Kubernetes — pros and cons
+### 3.6 EKS — pros and cons
 
 **Pros**
 
-- Unmatched scalability and flexibility for complex systems.
+- Unmatched scalability and flexibility for complex internal systems.
 - Self-healing, automated rollouts/rollbacks, horizontal autoscaling.
-- Cloud-portable — reduces lock-in across AWS/GCP/Azure/on-prem.
-- Enormous ecosystem (Helm, operators, service mesh, observability tooling).
+- Portable — the same manifests run on other clouds or on-prem (useful if the company is hybrid).
+- Enormous ecosystem (Helm, operators, service mesh, observability).
 - The right tool when you genuinely need five 9s *and* many services.
 
 **Cons**
 
-- Steep learning curve and high operational complexity.
+- Steepest learning curve and highest operational complexity of any AWS option.
 - Needs dedicated DevOps/SRE expertise to run safely.
-- Higher baseline cost: control plane + nodes + tooling + **people**.
-- Security and networking are easy to misconfigure.
-- Slows early shipping — overkill for a single small app.
+- Higher baseline cost: control plane hourly fee + nodes + tooling + **people**.
+- Private networking, IRSA, and add-ons are all extra surfaces to misconfigure.
+- Overkill for a single small internal app.
 
-### 2.7 Kubernetes — troubleshooting
+### 3.7 EKS — troubleshooting
 
 Work top-down: `kubectl get pods` → `kubectl describe pod <name>` → `kubectl logs <name>`.
 
-|Symptom            |Likely cause                                                       |Fix                                                                                |
-|-------------------|-------------------------------------------------------------------|-----------------------------------------------------------------------------------|
-|Pod stuck `Pending`|Not enough CPU/memory on nodes, or an unschedulable constraint     |Scale the node group or relax the constraint.                                      |
-|`CrashLoopBackOff` |App keeps crashing on start                                        |Check `kubectl logs`; usually bad config, missing env var, or a failing dependency.|
-|`ImagePullBackOff` |Wrong image name/tag or missing registry credentials               |Fix the image reference or add a pull secret.                                      |
-|Service unreachable|Service selectors don’t match pod labels; Ingress/DNS misconfigured|Align labels; verify Ingress + DNS wiring.                                         |
-|`OOMKilled`        |Container exceeded its memory limit                                |Raise limits or fix a memory leak.                                                 |
+|Symptom                         |Likely cause (private AWS)                                    |Fix                                                                                   |
+|--------------------------------|--------------------------------------------------------------|--------------------------------------------------------------------------------------|
+|Pod stuck `Pending`             |Not enough node capacity, or no free IPs in the private subnet|Scale the node group; size subnets with enough IP space (a common private-VPC gotcha).|
+|`CrashLoopBackOff`              |App keeps crashing on start                                   |Check `kubectl logs`; usually bad config, missing env var, or a failing dependency.   |
+|`ImagePullBackOff`              |Missing **ECR VPC endpoint** or wrong IAM permissions         |Add the ECR + S3 endpoints; confirm the node/pod role can pull.                       |
+|Service unreachable             |Internal ALB misconfigured, or security group blocks the port |Check the Load Balancer Controller, target group health, and SG rules.                |
+|Can’t reach Secrets Manager / S3|No VPC endpoint for that service                              |Create the PrivateLink endpoint; verify the route and SG.                             |
+|`OOMKilled`                     |Container exceeded its memory limit                           |Raise limits or fix a memory leak.                                                    |
 
-### 2.8 Kubernetes — best practices
+### 3.8 EKS — best practices (private)
 
-- Prefer a **managed** control plane (EKS/GKE/AKS); don’t self-run the control plane unless truly required.
-- Use **GitOps** (Argo CD / Flux) so cluster state is fully version-controlled and repeatable.
-- Set resource **requests and limits** on every workload.
-- Enforce **RBAC**, **network policies**, and a real secrets manager from day one.
-- Spread across **multiple availability zones**; use Pod Disruption Budgets for safe maintenance.
-- Invest in observability (metrics, logs, traces) and alerting early.
-- Adopt Kubernetes only when complexity (many services, large team, portability/compliance, true five-9s) genuinely justifies it.
+- Use **private API endpoint** and put all nodes in **private subnets**.
+- Use **IRSA** for least-privilege pod permissions — never bake AWS keys into images.
+- Create **VPC endpoints** for ECR, S3, STS, CloudWatch Logs, and Secrets Manager so nothing leaves the private network.
+- Use **GitOps** (Argo CD / Flux) so cluster state is version-controlled and repeatable.
+- Set resource **requests and limits** on every workload; enforce **network policies**.
+- Spread across **multiple AZs**; use Pod Disruption Budgets for safe maintenance.
+- Right-size subnet CIDRs generously — IP exhaustion is a classic private-EKS failure.
+- Adopt EKS only when complexity (many internal services, large team, true five-9s) genuinely justifies it.
 
 -----
 
-## 3. Why the Alternatives May Be Better or Worse Than Kubernetes
+## 4. Why Each AWS Alternative May Be Better or Worse Than EKS
 
-Each alternative is framed directly against Kubernetes: where it wins, where it loses, and the bottom line.
+Each alternative is framed directly against EKS, all assumed deployed **privately** inside the VPC.
 
-### 3.1 Single VM / VPS
+### 4.1 Amazon EC2 (single or few instances)
 
-**What it is:** One rented Linux server (EC2 instance, DigitalOcean Droplet, Linode). You SSH in, install your app, and run it. You are the admin, deployer, and firefighter.
+**What it is:** One or a few virtual servers in a private subnet. You SSH in (via a bastion or **SSM Session Manager**, no public IP), install the app, and run it. You are the admin, deployer, and firefighter.
 
-**Better than Kubernetes when:**
+**Better than EKS when:**
 
-- You need something live *today* for a prototype.
-- Budget is tiny and the team is one person.
-- The mental model must be dead simple (one box, logs right there).
+- You need something running fast for an internal pilot.
+- The team is tiny and wants a dead-simple mental model.
+- Budget is minimal.
 
-**Worse than Kubernetes when:**
+**Worse than EKS when:**
 
-- You need fault tolerance — a single VM is a single point of failure with no auto-recovery.
-- You need to scale smoothly — growth means manual server-adding and load-balancer wiring.
-- You need repeatability — without scripting, rebuilds are manual and drift-prone.
+- You need fault tolerance — a single instance is a single point of failure with no auto-recovery.
+- You need smooth scaling — growth means manually adding instances behind an internal load balancer.
+- You need repeatability — without scripting (or an Auto Scaling Group + launch template), rebuilds drift.
 - Five 9s is required — effectively impossible on one box.
 
-**Bottom line vs K8s:** Far simpler and cheaper to start, but loses badly on fault tolerance, repeatability, and five 9s. A stepping stone, not a destination for a serious app.
+**Bottom line vs EKS:** Simpler and cheaper to start; loses badly on fault tolerance, repeatability, and five 9s. A stepping stone. (Use **SSM Session Manager** instead of a public bastion to keep it truly private.)
 
-### 3.2 Platform-as-a-Service (PaaS)
+### 4.2 AWS App Runner (with VPC connector) — the AWS “PaaS”
 
-**Examples:** Render, Railway, Fly.io, Heroku, AWS App Runner.
+**What it is:** AWS’s platform-as-a-service. You hand it a container image (from private ECR) or source, and it builds, runs, load-balances, and auto-scales it. With a **VPC connector**, it reaches private resources (databases, internal services) inside your network.
 
-**What it is:** You hand the platform your code (or a container). It builds, runs, gives it a URL, handles HTTPS, restarts on crash, and adds copies under load. You focus on the app; the platform handles the plumbing — essentially “Kubernetes-like benefits without touching Kubernetes.”
-
-**Better than Kubernetes when:**
+**Better than EKS when:**
 
 - You want production quality with almost no operational overhead.
-- The team is small and has no dedicated DevOps/SRE.
-- You value fast shipping and a gentle learning curve over fine-grained control.
-- **This is the strongest fit for your scale.**
+- The team is small with no dedicated DevOps/SRE.
+- You value fast shipping and a gentle learning curve.
 
-**Worse than Kubernetes when:**
+**Worse than EKS when:**
 
 - You need deep low-level control or unusual deployment patterns.
-- You need true multi-region active-active for strict five 9s (often limited or pricey).
-- Cost-per-unit at very large scale matters (PaaS is pricier per unit than raw infra).
-- You want to avoid vendor lock-in.
+- You require strictly *no* AWS-managed ingress in front (App Runner’s own endpoint can be made private but is less flexible than a hand-built internal ALB).
+- You’ll run many tightly-coupled internal services needing orchestration.
 
-**Bottom line vs K8s:** Wins decisively on simplicity, maintainability, and reliability for a single app; loses on extensibility ceiling, ultimate five-9s capability, and lock-in.
+**Bottom line vs EKS:** Wins decisively on simplicity and maintainability for a single internal app; loses on fine-grained control and extensibility ceiling. **A strong fit for your scale**, provided its private-networking model meets your boundary rules.
 
-### 3.3 Managed Container Services
+### 4.3 Amazon ECS on AWS Fargate — managed containers, no cluster
 
-**Examples:** AWS ECS on Fargate, Google Cloud Run, Azure Container Apps.
+**What it is:** You package the app as a container and run it on **ECS with Fargate**, which runs and scales containers in your **private subnets** with **no servers or cluster to manage**. Containers and elasticity without Kubernetes’ orchestration burden — and it’s all native AWS.
 
-**What it is:** You package your app as a container and hand it to the cloud, which runs and scales it — but **without you managing any servers or a cluster**. It’s the middle ground: containers and elasticity without Kubernetes’ orchestration burden.
+**Better than EKS when:**
 
-**Better than Kubernetes when:**
-
-- You want container benefits (portability, consistency, strong isolation) without cluster ops.
-- You want excellent repeatability and fault tolerance defined as code, but with less surface area.
-- Scale-to-zero economics (Cloud Run) are attractive.
+- You want container benefits (portability, consistency, isolation) without cluster ops.
+- You want excellent repeatability and fault tolerance defined as code, with far less surface area.
+- You want native, simple integration with internal ALBs, IAM task roles, and VPC endpoints.
 - **This is the strongest fit if you want containers and room to grow.**
 
-**Worse than Kubernetes when:**
+**Worse than EKS when:**
 
 - You’ll genuinely run *many* interconnected services needing advanced orchestration (service mesh, custom operators).
-- You need maximum portability across clouds/on-prem.
-- You need the very richest ecosystem of orchestration tooling.
+- You need maximum portability across clouds/on-prem (ECS is AWS-only).
+- You want the richest open-source orchestration ecosystem.
 
-**Bottom line vs K8s:** Matches Kubernetes on reliability, fault tolerance, and repeatability for a single app, while beating it on simplicity. Kubernetes only pulls ahead at high service count and complexity.
+**Bottom line vs EKS:** Matches EKS on reliability, fault tolerance, and repeatability for a single internal app, while beating it on simplicity — and it lives privately in your VPC just as cleanly. EKS only pulls ahead at high service count and complexity. **Top recommendation alongside App Runner.**
 
-### 3.4 Serverless Functions
+### 4.4 AWS Lambda (private, in-VPC) — serverless functions
 
-**Examples:** AWS Lambda, Cloudflare Workers, Vercel/Netlify Functions, Google Cloud Functions.
+**What it is:** Your code runs **only when called** (an internal API call via private API Gateway, an S3 event, an EventBridge schedule). VPC-attached Lambdas run inside your private subnets and reach internal resources directly. No servers to manage.
 
-**What it is:** Your code sits idle and runs **only when called** (a request, an upload, a timer). 10,000 requests → 10,000 copies; nobody using it → you pay nothing. No servers to manage at all.
+**Better than EKS when:**
 
-**Better than Kubernetes when:**
+- Internal workloads are spiky, event-driven, or scheduled (report generation, data jobs, internal webhooks).
+- You want to pay nothing when idle.
+- Tasks are short and stateless.
 
-- Traffic is spiky, unpredictable, or event-driven.
-- You want to pay nothing when idle and burst infinitely on demand.
-- Workloads are short, stateless tasks.
+**Worse than EKS when:**
 
-**Worse than Kubernetes when:**
+- Latency must be consistent — **cold starts** add delay (in-VPC Lambdas have improved here but it’s still a factor).
+- Work is long-running or stateful — execution-time, memory, and payload **limits** get in the way.
+- Traffic is sustained and heavy — cost can become unpredictable.
+- You’re stitching many functions together — distributed debugging is hard.
 
-- Latency must be consistent — **cold starts** add delay when functions haven’t run recently.
-- Work is long-running or stateful — execution time, memory, and payload **limits** get in the way.
-- Traffic is sustained and heavy — cost can become **unpredictable and high**.
-- You’re stitching many functions together — debugging the distributed sprawl is hard.
-
-**Bottom line vs K8s:** Wins on idle cost and burst for spiky workloads; loses on consistent latency, long/stateful jobs, and predictable cost under steady heavy load.
+**Bottom line vs EKS:** Wins on idle cost and burst for internal event-driven work; loses on consistent latency, long/stateful jobs, and predictable cost under steady load. Often used *alongside* a container backend for glue logic.
 
 -----
 
-## 4. Broader Architecture Approaches and Their Benefits
+## 5. AWS-Specific Architecture Approaches and Their Benefits
 
-The five options above (VM, PaaS, managed containers, serverless, Kubernetes) are *where* you run software. This section zooms out to the architectural **approaches** that cut across them — the patterns that shape how the app itself is built and deployed. Each is explained in plain language, with its core benefits and how it relates to Kubernetes.
+The options above are *where* you run software. These are the architectural **approaches** that shape *how* the internal app is built — each mapped to AWS and to the private boundary. (Public-only patterns like global edge and CDN-fronted Jamstack are intentionally omitted, since the app is internal.)
 
-### 4.1 Monolith vs. Microservices
+### 5.1 Monolith vs. Microservices
 
-This is the single biggest architectural fork, and it largely determines whether Kubernetes is worth it.
+This is the single biggest architectural fork, and it largely determines whether EKS is worth it.
 
-**Monolith (plain language):** The whole app is one program. All the features live together and deploy as a single unit. Think of one big house where every room is under one roof.
+**Monolith (plain language):** The whole app is one program; all features deploy as one unit. One big house, every room under one roof.
 
-**Microservices (plain language):** The app is split into many small, independent programs that each do one job and talk to each other over the network. Think of a neighborhood of small houses, each with its own front door.
+**Microservices (plain language):** Many small, independent programs that each do one job and talk over the private network. A neighborhood of small houses, each with its own door.
 
-|                          |Monolith                                                                                                                               |Microservices                                                                                                                                        |
-|--------------------------|---------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------|
-|**Benefits**              |Simple to build, test, deploy, and reason about; one codebase; fast for small teams; cheap to run.                                     |Independent scaling and deployment per service; teams work in parallel; a fault in one service needn’t sink the rest; technology freedom per service.|
-|**Costs**                 |Scales as one block (you scale everything even if one part is hot); a big change is riskier; harder for many teams to work in parallel.|Network complexity, distributed debugging, more infrastructure, operational overhead.                                                                |
-|**Relation to Kubernetes**|A monolith rarely needs Kubernetes — a PaaS or managed container service runs it beautifully.                                          |Microservices are the classic *reason* to adopt Kubernetes: it orchestrates many services elegantly.                                                 |
-
-
-> **For your use case:** A single app for 100k non-concurrent users is almost certainly best as a **monolith** (or a “modular monolith” — one deployable unit with clean internal boundaries). That alone removes most of the case for Kubernetes. Split into microservices later only when team size or clear scaling pressure demands it.
-
-### 4.2 Serverless / Functions-as-a-Service (FaaS)
-
-**Plain language:** Already covered as an option in Section 3.4 — code that runs only when called and scales to zero. As an *approach*, the benefit is **event-driven design**: you wire small functions to events (a file upload, a queue message, a scheduled timer) instead of keeping servers running.
-
-**Benefits:** No idle cost, infinite burst, no servers to patch, naturally fault-tolerant, very fast to ship small pieces.
-
-**Relation to Kubernetes:** The philosophical opposite. Kubernetes keeps containers running and you manage capacity; serverless hides all of that. For spiky or glue-logic workloads, serverless beats Kubernetes on simplicity and cost. For sustained heavy traffic or long jobs, Kubernetes (or containers) wins.
-
-### 4.3 Serverless Containers
-
-**Plain language:** A blend of two worlds — you give the cloud a *container* (like Kubernetes uses), but it runs and scales that container for you with no cluster (like serverless). Examples are **AWS Fargate** and **Google Cloud Run**.
-
-**Benefits:** You get container portability and consistency **plus** scale-to-zero economics and zero cluster management. It’s often described as “the 80% of Kubernetes’ value for 20% of the effort.”
-
-**Relation to Kubernetes:** This is the most direct “lighter alternative” to Kubernetes. For a single app — and even many small-to-medium systems — serverless containers deliver the reliability, fault tolerance, and repeatability of Kubernetes without the operational tax. **This is a top recommendation for your scale.**
-
-### 4.4 Edge Computing
-
-**Plain language:** Instead of running your app in one data center, the cloud runs copies of it in many locations physically close to your users around the world. When someone in Tokyo and someone in London both visit, each is served from a nearby city, so responses arrive faster. Examples are **Cloudflare Workers**, **Vercel Edge**, **AWS Lambda@Edge**, and **Fastly Compute**.
-
-**Benefits:** Very low latency (the app is near the user), strong global fault tolerance (many locations, no single point), automatic scaling, and built-in protection against traffic spikes and some attacks.
-
-**Costs / limits:** Edge runtimes are constrained — limited execution time, smaller code size, restricted libraries, and harder access to a central database. Best for lightweight, latency-sensitive logic (auth checks, redirects, personalization, caching), not heavy backends.
-
-**Relation to Kubernetes:** Complementary rather than competing. Many teams run a Kubernetes or container backend **and** push a thin edge layer in front for speed. For a global, latency-sensitive front end, edge beats a single-region Kubernetes cluster outright.
-
-### 4.5 Backend-as-a-Service (BaaS)
-
-**Plain language:** A ready-made backend you don’t build yourself. The provider gives you a database, user login/authentication, file storage, and APIs out of the box, so you mostly write the front end. Examples are **Firebase**, **Supabase**, and **AWS Amplify**.
-
-**Benefits:** Dramatically faster to launch (common backend pieces are pre-built), very low ops burden, generous free tiers, real-time data sync built in. Excellent for MVPs, mobile apps, and small teams.
-
-**Costs / limits:** Less control, potential lock-in, costs that can climb at scale, and limits when your logic gets complex or unusual.
-
-**Relation to Kubernetes:** Polar opposite philosophies — BaaS removes the backend you’d otherwise orchestrate. For a small team that wants to ship features rather than run infrastructure, BaaS can eliminate the need for Kubernetes entirely.
-
-### 4.6 Static Site + APIs (Jamstack)
-
-**Plain language:** The website’s pages are pre-built ahead of time and served as plain files from a global CDN (extremely fast and cheap), while anything dynamic is handled by separate API calls (often serverless). The name reflects “JavaScript, APIs, and Markup.” Examples pair **Netlify**, **Vercel**, or **Cloudflare Pages** with serverless functions.
-
-**Benefits:** Blazing performance, excellent reliability (static files rarely fail), strong security (little server surface to attack), low cost, and effortless scaling.
-
-**Costs / limits:** Best when much of the content is presentational; highly dynamic, per-user-heavy apps fit less cleanly.
-
-**Relation to Kubernetes:** For content-heavy or marketing-style front ends, Jamstack vastly out-simplifies Kubernetes. Dynamic apps still need a backend somewhere — which could be serverless, containers, or, at scale, Kubernetes.
-
-### 4.7 Hybrid and Multi-Cloud Approaches
-
-**Plain language:** Running across more than one environment — e.g., part in your own data center and part in the public cloud (**hybrid**), or spread across two cloud providers (**multi-cloud**).
-
-**Benefits:** Avoids dependence on a single vendor, can satisfy data-residency or compliance rules, and adds resilience if one provider has an outage.
-
-**Costs / limits:** Significant complexity, harder networking and security, and higher operational cost — usually only justified by regulatory or strategic needs.
-
-**Relation to Kubernetes:** This is one of Kubernetes’ strongest arguments — because Kubernetes is portable, it’s the common foundation for hybrid/multi-cloud. But unless you have a genuine compliance or vendor-risk mandate, this complexity is rarely worth it for a single app.
-
-### 4.8 Quick reference — approaches mapped to benefits and fit
-
-|Approach                 |Standout benefit              |Best for                    |Vs. Kubernetes for your case                        |
-|-------------------------|------------------------------|----------------------------|----------------------------------------------------|
-|**Monolith**             |Simplicity, low cost          |Single app, small team      |Removes most of the reason for K8s                  |
-|**Microservices**        |Independent scaling/teams     |Large, complex systems      |The main reason to adopt K8s — not yet needed       |
-|**Serverless / FaaS**    |No idle cost, infinite burst  |Spiky, event-driven work    |Simpler & cheaper than K8s for glue logic           |
-|**Serverless containers**|K8s benefits, no cluster      |Most small–medium apps      |**Top lighter alternative to K8s**                  |
-|**Edge computing**       |Ultra-low global latency      |Latency-sensitive front ends|Complements, can front a K8s/container backend      |
-|**BaaS**                 |Pre-built backend, fast launch|MVPs, mobile, small teams   |Can remove the need for K8s entirely                |
-|**Jamstack**             |Performance + reliability     |Content-heavy front ends    |Far simpler than K8s for presentational sites       |
-|**Hybrid/Multi-cloud**   |No vendor lock-in, compliance |Regulated/strategic needs   |K8s’ strongest use case — overkill without a mandate|
+|                   |Monolith                                                                                      |Microservices                                                                                                                           |
+|-------------------|----------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------|
+|**Benefits**       |Simple to build, test, deploy, reason about; one codebase; fast for small teams; cheap to run.|Independent scaling/deployment per service; teams work in parallel; one service’s fault needn’t sink the rest; tech freedom per service.|
+|**Costs**          |Scales as one block; a big change is riskier; harder for many teams in parallel.              |Private-network complexity, distributed debugging, more infrastructure, operational overhead.                                           |
+|**Relation to EKS**|A monolith rarely needs EKS — App Runner or ECS/Fargate runs it beautifully inside the VPC.   |Microservices are the classic *reason* to adopt EKS: it orchestrates many internal services elegantly.                                  |
 
 
-> **Takeaway for your profile:** The approaches that fit a single app at 100k non-concurrent users best are a **monolith** (or modular monolith) deployed on **serverless containers** or **PaaS**, optionally fronted by an **edge/CDN layer** for speed. These deliver most of the nine goals with a fraction of Kubernetes’ complexity. Microservices + Kubernetes is the right destination only if the system later grows in service count, team size, or a genuine five-9s/portability mandate.
+> **For your use case:** A single internal app for 100k non-concurrent users is almost certainly best as a **monolith** (or “modular monolith” — one deployable unit with clean internal boundaries). That alone removes most of the case for EKS. Split into microservices later only when team size or clear scaling pressure demands it.
+
+### 5.2 Event-Driven Design (Serverless on AWS)
+
+**Plain language:** Instead of servers running all the time, internal events trigger work — a file lands in **S3**, a message hits **SQS/SNS**, a schedule fires in **EventBridge**, and a **Lambda** runs.
+
+**Benefits:** No idle cost, natural fault tolerance (AWS retries), no servers to patch, very fast to ship small internal automations.
+
+**Relation to EKS:** The philosophical opposite — EKS keeps containers running and you manage capacity; event-driven hides that. For internal batch jobs, integrations, and automations, this beats EKS on simplicity and cost.
+
+### 5.3 Serverless Containers (ECS/Fargate) — the lighter “EKS”
+
+**Plain language:** You give AWS a *container* (like EKS uses), but **Fargate** runs and scales it with no cluster (like serverless). Native to AWS, fully private in your subnets.
+
+**Benefits:** Container portability and consistency **plus** no cluster management — often “80% of Kubernetes’ value for 20% of the effort,” with clean private-VPC, IAM, and endpoint integration.
+
+**Relation to EKS:** The most direct lighter alternative. For a single internal app — and many small-to-medium systems — Fargate delivers EKS-level reliability, fault tolerance, and repeatability without the operational tax. **Top recommendation for your scale.**
+
+### 5.4 Internal API Layer (Private API Gateway / Internal ALB)
+
+**Plain language:** A controlled front door *inside* the network that routes internal callers to the app. **API Gateway (private)** or an **internal ALB** sits in front; nothing is exposed publicly.
+
+**Benefits:** Centralized auth, throttling, and routing for internal consumers; clean separation between callers and the backend; works identically whether the backend is Lambda, Fargate, or EKS.
+
+**Relation to EKS:** Complementary. You’d use a private API layer in front of *any* of these backends; it isn’t a reason to pick or avoid EKS.
+
+### 5.5 Managed Data Services (so you don’t run databases yourself)
+
+**Plain language:** Let AWS run the stateful pieces privately — **RDS/Aurora** (relational), **DynamoDB** (key-value, reached via VPC endpoint), **ElastiCache** (in-memory), **S3** (object storage, via endpoint). All can be locked to private subnets.
+
+**Benefits:** Removes the hardest reliability/backup/patching work; multi-AZ options give strong fault tolerance; reduces what you must orchestrate yourself.
+
+**Relation to EKS:** Strongly reduces the case for EKS — if AWS runs your data tier, the compute tier for one app is light enough for Fargate or App Runner.
+
+### 5.6 Hybrid / On-Prem Connectivity
+
+**Plain language:** Connect the AWS private network to the company’s existing data center via **Direct Connect** or **Site-to-Site VPN**, so internal users and on-prem systems reach the app as if it were local.
+
+**Benefits:** Meets data-residency and compliance needs; integrates with existing corporate identity and networks; resilience across environments.
+
+**Relation to EKS:** This is one of Kubernetes’ stronger arguments — its portability suits hybrid estates. But unless there’s a genuine hybrid mandate, the complexity isn’t worth it for a single internal app.
+
+### 5.7 Quick reference — AWS approaches mapped to benefits and fit
+
+|Approach                 |AWS services                         |Standout benefit         |Best for                       |Vs. EKS for your case                              |
+|-------------------------|-------------------------------------|-------------------------|-------------------------------|---------------------------------------------------|
+|**Monolith**             |App Runner, ECS/Fargate, EC2         |Simplicity, low cost     |Single internal app, small team|Removes most of the reason for EKS                 |
+|**Microservices**        |EKS, ECS                             |Independent scaling/teams|Large, complex internal systems|The main reason to adopt EKS — not yet needed      |
+|**Event-driven**         |Lambda, SQS, SNS, EventBridge, S3    |No idle cost, auto-retry |Internal jobs/automations      |Simpler & cheaper than EKS for glue logic          |
+|**Serverless containers**|ECS on Fargate                       |EKS value, no cluster    |Most small–medium internal apps|**Top lighter alternative to EKS**                 |
+|**Internal API layer**   |Private API Gateway, internal ALB    |Central auth/routing     |Any internal backend           |Complements any choice; neutral to EKS             |
+|**Managed data services**|RDS/Aurora, DynamoDB, ElastiCache, S3|No DB ops                |Almost every app               |Reduces the case for EKS                           |
+|**Hybrid/on-prem**       |Direct Connect, VPN                  |Compliance, integration  |Regulated/hybrid estates       |EKS’ stronger use case — overkill without a mandate|
+
+
+> **Takeaway for your profile:** A **monolith** (or modular monolith) on **ECS/Fargate** or **App Runner**, using **managed AWS data services**, behind an **internal ALB**, all inside private subnets with **VPC endpoints**, delivers most of the nine goals with a fraction of EKS’ complexity. Microservices + EKS is the right destination only if the system later grows in service count, team size, or a genuine five-9s/hybrid mandate.
 
 -----
 
-## 5. Feature-by-Feature Differences
+## 6. Feature-by-Feature Differences (AWS Services)
 
-### 5.1 How each option handles core capabilities
+### 6.1 How each AWS option handles core capabilities (all deployed privately)
 
-|Capability             |Single VM    |PaaS                   |Managed Containers      |Serverless         |Kubernetes                                       |
-|-----------------------|-------------|-----------------------|------------------------|-------------------|-------------------------------------------------|
-|**Who manages servers**|You          |Provider               |Provider                |Provider           |You (nodes) + provider (control plane if managed)|
-|**Scaling**            |Manual       |Auto (within limits)   |Auto, sometimes to zero |Auto, to zero      |Auto, highly configurable                        |
-|**Self-healing**       |None         |Built-in restart       |Built-in restart        |Built-in retry     |Full self-healing & rescheduling                 |
-|**Deploys**            |Manual       |Push-to-deploy, rolling|Defined as code, rolling|Deploy per function|Rolling/blue-green/canary                        |
-|**Multi-AZ redundancy**|DIY/none     |Often built-in         |Built-in                |Built-in           |Built-in (you configure)                         |
-|**Multi-region**       |DIY          |Limited/extra cost     |Achievable, more work   |Provider-dependent |Fully supported (complex)                        |
-|**Containers required**|No           |Optional               |Yes                     |No (functions)     |Yes                                              |
-|**Cold starts**        |No           |On small tiers         |On scale-to-zero        |Yes                |No (with warm pods)                              |
-|**Best traffic shape** |Steady, small|Steady, small–medium   |Steady, medium–large    |Spiky/event-driven |Sustained, large/complex                         |
+|Capability             |EC2                 |App Runner             |ECS/Fargate             |Lambda (in-VPC)      |EKS                              |
+|-----------------------|--------------------|-----------------------|------------------------|---------------------|---------------------------------|
+|**Who manages servers**|You                 |AWS                    |AWS                     |AWS                  |You (nodes) + AWS (control plane)|
+|**Scaling**            |Manual / ASG        |Auto (within limits)   |Auto, configurable      |Auto, to zero        |Auto, highly configurable        |
+|**Self-healing**       |ASG only            |Built-in restart       |Built-in restart        |Built-in retry       |Full self-healing & rescheduling |
+|**Deploys**            |Manual / scripted   |Push-to-deploy, rolling|Defined as code, rolling|Per-function         |Rolling/blue-green/canary        |
+|**Multi-AZ redundancy**|DIY (ASG across AZs)|Built-in               |Built-in                |Built-in             |Built-in (you configure)         |
+|**Private-VPC fit**    |Native              |Via VPC connector      |Native, clean           |Native (VPC-attached)|Native (private cluster)         |
+|**Containers required**|No                  |Optional               |Yes                     |No (functions)       |Yes                              |
+|**Cold starts**        |No                  |On low tiers           |No (tasks stay warm)    |Yes                  |No (with warm pods)              |
+|**Best traffic shape** |Steady, small       |Steady, small–medium   |Steady, medium–large    |Spiky/event-driven   |Sustained, large/complex         |
 
-### 5.2 Operational reality
+### 6.2 Operational reality (internal AWS)
 
-|Dimension                    |Single VM   |PaaS        |Managed Containers|Serverless  |Kubernetes                   |
-|-----------------------------|------------|------------|------------------|------------|-----------------------------|
-|**Learning curve**           |Low–medium  |Lowest      |Medium            |Medium      |Highest                      |
-|**DevOps staff needed**      |1 generalist|None        |Light             |Light       |Dedicated SRE/DevOps         |
-|**Time to first deploy**     |Hours       |Minutes     |Hours–days        |Hours       |Days–weeks                   |
-|**Lock-in risk**             |Low         |High        |Medium            |High        |Low (portable)               |
-|**Config-as-code maturity**  |DIY scripts |Config files|Terraform/CFN     |SAM/CDK/SF  |Manifests + GitOps           |
-|**Blast radius of a mistake**|Whole box   |App-scoped  |Per container     |Per function|Cluster-wide if misconfigured|
-
------
-
-## 6. Full Scorecard and Decision Guide
-
-### 6.1 Scorecard — all options vs. all goals
-
-Assumes a **single typical web/API app at your scale**, run by a small-to-medium team.
-
-|Goal           |Single VM|PaaS|Managed Containers|Serverless|Kubernetes|
-|---------------|---------|----|------------------|----------|----------|
-|Simplicity     |●●○      |●●● |●●○               |●●○       |●○○       |
-|Extensibility  |●○○      |●●○ |●●○               |●●○       |●●●       |
-|Maintainability|●○○      |●●● |●●○               |●●○       |●●○       |
-|Reliability    |●○○      |●●● |●●●               |●●●       |●●●       |
-|Security       |●○○      |●●○ |●●●               |●●●       |●●○       |
-|Repeatability  |●○○      |●●○ |●●●               |●●●       |●●●       |
-|Fault tolerance|●○○      |●●○ |●●●               |●●●       |●●●       |
-|Five 9s capable|●○○      |●●○ |●●○               |●●○       |●●●       |
-|Performance    |●●○      |●●○ |●●●               |●●○*      |●●●       |
-
-*Serverless performance is excellent at steady scale but suffers from **cold starts**.
-
-> **Headline:** For your scale, **PaaS** or **Managed Containers** offer the best balance. **Kubernetes** only wins when you have many services *and* a dedicated platform team. A **single VM** fails most reliability/fault-tolerance goals beyond an MVP.
-
-### 6.2 Decision guide — match situation to option
-
-|If your situation is…                                                      |Best fit              |Why                                                                        |
-|---------------------------------------------------------------------------|----------------------|---------------------------------------------------------------------------|
-|Quick MVP, one developer, predictable load                                 |**Single VM**         |Cheapest and fastest to ship; accept the reliability risk temporarily.     |
-|Small team, want production quality without DevOps overhead                |**PaaS**              |Best balance of simplicity, reliability, maintainability for your scale.   |
-|Want containers, room to grow, strong security/repeatability               |**Managed Containers**|The sweet spot for a serious app that may expand.                          |
-|Spiky/unpredictable or event-driven traffic                                |**Serverless**        |Scales to zero, infinite burst, pay-per-use.                               |
-|Many microservices, dedicated platform team, real five-9s/portability needs|**Kubernetes**        |The only option that fully delivers extensibility + five 9s at large scale.|
-
-**For your profile (100k non-concurrent users, one app):** start with **PaaS** or **Managed Containers**. Both comfortably exceed your scale, deliver most of the nine goals well, and leave a clean path to Kubernetes later *if* — and only if — complexity genuinely demands it. Don’t pay the Kubernetes tax for a problem you don’t yet have.
+|Dimension                    |EC2                   |App Runner     |ECS/Fargate              |Lambda         |EKS                                    |
+|-----------------------------|----------------------|---------------|-------------------------|---------------|---------------------------------------|
+|**Learning curve**           |Low–medium            |Lowest         |Medium                   |Medium         |Highest                                |
+|**DevOps staff needed**      |1 generalist          |None           |Light                    |Light          |Dedicated SRE/DevOps                   |
+|**Time to first deploy**     |Hours                 |Minutes        |Hours–days               |Hours          |Days–weeks                             |
+|**Lock-in risk**             |Low                   |High (AWS-only)|High (AWS-only)          |High (AWS-only)|Low (portable)                         |
+|**Config-as-code maturity**  |ASG + launch templates|App config     |Task defs + Terraform/CFN|SAM/CDK        |Manifests + GitOps                     |
+|**Blast radius of a mistake**|Whole instance        |App-scoped     |Per task                 |Per function   |Cluster-wide if misconfigured          |
+|**Private-networking effort**|Low                   |Low–medium     |Low                      |Low            |**High** (endpoints, IRSA, private API)|
 
 -----
 
-## 7. Cross-Cutting Best Practices (Any Option)
+## 7. Full Scorecard and Decision Guide
 
-These apply regardless of platform — and they’re how you actually approach five 9s.
+### 7.1 Scorecard — AWS options vs. all goals
 
-- **Infrastructure as code:** Terraform/CloudFormation/CDK so any environment is reproducible (*repeatability*).
-- **Automated CI/CD:** test and deploy through a pipeline, not by hand (*maintainability* + *reliability*).
-- **Multi-AZ, then multi-region:** zone redundancy is the baseline for *fault tolerance*; multi-region is the price of *five 9s*.
-- **Observability first:** metrics, logs, traces, dashboards, alerts — before you need them.
+Assumes a **single internal web/API app at your scale**, run by a small-to-medium team, deployed privately in the VPC.
+
+|Goal              |EC2|App Runner|ECS/Fargate|Lambda|EKS|
+|------------------|---|----------|-----------|------|---|
+|Simplicity        |●●○|●●●       |●●○        |●●○   |●○○|
+|Extensibility     |●○○|●●○       |●●○        |●●○   |●●●|
+|Maintainability   |●○○|●●●       |●●○        |●●○   |●●○|
+|Reliability       |●○○|●●●       |●●●        |●●●   |●●●|
+|Security (private)|●●○|●●○       |●●●        |●●●   |●●○|
+|Repeatability     |●○○|●●○       |●●●        |●●●   |●●●|
+|Fault tolerance   |●○○|●●○       |●●●        |●●●   |●●●|
+|Five 9s capable   |●○○|●●○       |●●○        |●●○   |●●●|
+|Performance       |●●○|●●○       |●●●        |●●○*  |●●●|
+
+*Lambda performance is excellent at steady scale but suffers from **cold starts**, slightly more pronounced for VPC-attached functions.
+
+> **Headline:** For your internal scale, **App Runner** or **ECS/Fargate** offer the best balance. **EKS** only wins when you have many internal services *and* a dedicated platform team. **EC2 alone** fails most reliability/fault-tolerance goals beyond a pilot. Security scores are close because *everything here is private* — the boundary does the heavy lifting.
+
+### 7.2 Decision guide — match situation to AWS option
+
+|If your situation is…                                                          |Best fit                        |Why                                                                    |
+|-------------------------------------------------------------------------------|--------------------------------|-----------------------------------------------------------------------|
+|Quick internal pilot, one developer, predictable load                          |**EC2** (via SSM, no public IP) |Cheapest, fastest to ship; accept the reliability risk temporarily.    |
+|Small team, want production quality without DevOps overhead                    |**App Runner** (+ VPC connector)|Best balance of simplicity, reliability, maintainability at this scale.|
+|Want containers, room to grow, strong security/repeatability                   |**ECS on Fargate**              |The sweet spot for a serious internal app that may expand.             |
+|Spiky/scheduled internal jobs and automations                                  |**Lambda** (in-VPC)             |Scales to zero, event-driven, pay-per-use.                             |
+|Many internal microservices, dedicated platform team, real five-9s/hybrid needs|**EKS**                         |The only option that fully delivers extensibility + five 9s at scale.  |
+
+**For your profile (100k non-concurrent internal users, one app):** start with **App Runner** or **ECS/Fargate**, backed by **managed AWS data services**, behind an **internal ALB**, inside private subnets with **VPC endpoints**. Both comfortably exceed your scale, deliver most of the nine goals well, and leave a clean path to EKS later *if* — and only if — complexity genuinely demands it. Don’t pay the EKS tax for a problem you don’t yet have.
+
+-----
+
+## 8. Cross-Cutting AWS Best Practices (Any Option)
+
+These apply regardless of the compute choice — and they’re how you actually approach five 9s on a private AWS estate.
+
+- **Infrastructure as code:** Terraform or CloudFormation/CDK for the whole VPC + app stack, so any environment is reproducible (*repeatability*).
+- **Private by default:** no public IPs on app/data subnets; inbound only via VPN/Direct Connect; outbound via VPC endpoints or controlled NAT (*security*).
+- **Least-privilege IAM everywhere:** task roles / IRSA / function roles, never long-lived keys (*security*).
+- **VPC endpoints (PrivateLink):** for S3, ECR, Secrets Manager, CloudWatch, STS — keep traffic off the internet entirely.
+- **Multi-AZ first:** spread compute and databases across AZs for *fault tolerance*; consider multi-region only if five 9s truly demands it.
+- **Automated CI/CD:** CodePipeline/CodeBuild or your tool of choice — deploy through a pipeline, not by hand (*maintainability* + *reliability*).
+- **Observability first:** CloudWatch metrics/logs, X-Ray traces, dashboards, and alarms — before you need them.
 - **Zero-downtime deploys:** rolling or blue-green so releases don’t cause outages.
-- **Secrets management:** a real secret store + least-privilege access everywhere (*security*).
-- **Backups + tested restores:** untested backups don’t count.
-- **Define your real SLA:** choose honestly between three, four, or five 9s — each tier roughly multiplies cost and complexity.
+- **Secrets in AWS Secrets Manager / Parameter Store:** accessed privately via endpoints, never in code.
+- **Backups + tested restores:** automated RDS/Aurora snapshots; *untested backups don’t count*.
+- **Define your real SLA:** choose honestly between three, four, or five 9s — each tier roughly multiplies cost and complexity. Internal tools can often use maintenance windows, relaxing the target.
 
 -----
 
-## 8. One-Paragraph Summary for Leadership
+## 9. One-Paragraph Summary for Leadership
 
-Kubernetes is the most powerful option here — self-healing, infinitely extensible, cloud-portable, and the standard when genuine five-9s reliability across many services is required. But that power comes with a steep learning curve, real operational complexity, and the need for dedicated DevOps/SRE staff. For a single application serving 100,000 total (non-concurrent) users, it is overkill: a **Platform-as-a-Service** or **managed container service** delivers strong reliability, security, maintainability, and repeatability at this scale with far less effort, and both leave a clean upgrade path to Kubernetes if the system later grows into many services or a true five-9s mandate. A single VM is acceptable only for an early prototype. Pick the simplest option that meets the real uptime requirement — and decide that uptime number deliberately, because five 9s costs far more than three or four.
+For an internal-only application living entirely inside the company’s AWS private network and serving 100,000 total (non-concurrent) users, **Amazon EKS (Kubernetes) is overkill**. EKS is the most powerful option — self-healing, infinitely extensible, portable across clouds and on-prem, and the right choice when genuine five-9s reliability across many services is required — but it carries the steepest learning curve, real operational complexity, extra private-networking surfaces (private endpoints, IRSA, internal ingress), and the need for dedicated DevOps/SRE staff. **AWS App Runner or Amazon ECS on Fargate** delivers strong reliability, security, maintainability, and repeatability at this scale with far less effort, integrates cleanly with private subnets and managed AWS data services, and leaves a clean upgrade path to EKS if the system later grows into many services or a true five-9s/hybrid mandate. A single EC2 instance is acceptable only for an internal pilot. Because the entire estate is private, the **network boundary itself delivers most of the security goal** — so the team should pick the simplest compute option that meets the real uptime requirement, and decide that uptime number deliberately, since five 9s costs far more than three or four.
