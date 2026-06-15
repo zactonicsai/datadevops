@@ -112,6 +112,13 @@ Step 5: Create the EKS Control Plane
 
 # Convert comma-separated subnets into the format the CLI expects
 SUBNET_ARG=$(echo $SUBNET_IDS | tr ',' ' ')
+aws eks create-cluster \
+  --region $AWS_REGION \
+  --name $CLUSTER_NAME \
+  --kubernetes-version $K8S_VERSION \
+  --role-arn $CLUSTER_ROLE_ARN \
+  --resources-vpc-config \
+    subnetIds=$(echo $SUBNET_IDS),securityGroupIds=$SECURITY_GROUP,endpointPublicAccess=false,endpointPrivateAccess=true
 
 aws eks create-cluster \
   --region $AWS_REGION \
