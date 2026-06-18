@@ -2,6 +2,8 @@
 
 A comprehensive, beginner-friendly guide to Apache Kafka CLI commands, admin tasks, tools, directory structure, and real-world use cases. Explained in simple (middle-school) terms.
 
+> **Version note:** This guide targets the **latest Kafka, 4.3.0** (released May 2026), distributed as `kafka_2.13-4.3.0.tgz` and requiring **Java 17 or newer**. The biggest change in the 4.x line: **Kafka no longer uses ZooKeeper at all** — it runs purely in **KRaft mode**, where Kafka manages its own metadata. ZooKeeper commands and configs still appear in older 3.x installs, so they’re noted here as *legacy* where relevant.
+
 -----
 
 ## Table of Contents
@@ -10,11 +12,14 @@ A comprehensive, beginner-friendly guide to Apache Kafka CLI commands, admin tas
 1. [Where the Commands Live (Default Paths)](#2-where-the-commands-live-default-paths)
 1. [Kafka Directory Structure](#3-kafka-directory-structure)
 1. [CLI Commands with Example Outputs](#4-cli-commands-with-example-outputs)
-1. [Admin Tasks Explained Simply](#5-admin-tasks-explained-simply)
-1. [Tools Beyond the CLI](#6-tools-beyond-the-cli)
-1. [Use Cases (Real-World Scenarios)](#7-use-cases-real-world-scenarios)
-1. [Cheat Sheet: Task → Tool](#8-cheat-sheet-task--tool)
-1. [Quick Tips & Gotchas](#9-quick-tips--gotchas)
+1. [Complete `bin/` Directory Reference (Every Script)](#5-complete-bin-directory-reference-every-script)
+1. [Kafka Connect from the CLI](#6-kafka-connect-from-the-cli)
+1. [Complete `config/` Directory Reference (Every File)](#7-complete-config-directory-reference-every-file)
+1. [Admin Tasks Explained Simply](#8-admin-tasks-explained-simply)
+1. [Tools Beyond the CLI](#9-tools-beyond-the-cli)
+1. [Use Cases (Real-World Scenarios)](#10-use-cases-real-world-scenarios)
+1. [Cheat Sheet: Task → Tool](#11-cheat-sheet-task--tool)
+1. [Quick Tips & Gotchas](#12-quick-tips--gotchas)
 
 -----
 
@@ -49,7 +54,7 @@ When you unzip the official download, everything sits under one folder, commonly
 
 ```
 /opt/kafka/                         <- a common choice for $KAFKA_HOME
-~/kafka_2.13-3.7.0/                 <- if you unzipped it in your home folder
+~/kafka_2.13-4.3.0/                 <- if you unzipped it in your home folder
 ```
 
 The scripts are in the `bin/` subfolder:
@@ -102,14 +107,14 @@ $KAFKA_HOME/config/producer.properties     <- default producer settings
 
 ### Default data and log locations
 
-|What                                                       |Default path       |Set by                             |
-|-----------------------------------------------------------|-------------------|-----------------------------------|
-|Message data (“log dirs”)                                  |`/tmp/kafka-logs`  |`log.dirs` in `server.properties`  |
-|ZooKeeper data                                             |`/tmp/zookeeper`   |`dataDir` in `zookeeper.properties`|
-|Broker operational logs (text logs about the server itself)|`$KAFKA_HOME/logs/`|`log4j` config                     |
+|What                                                       |Default path                               |Set by                             |
+|-----------------------------------------------------------|-------------------------------------------|-----------------------------------|
+|Message data (“log dirs”)                                  |`/tmp/kraft-combined-logs` (sample default)|`log.dirs` in `server.properties`  |
+|ZooKeeper data                                             |`/tmp/zookeeper`                           |`dataDir` in `zookeeper.properties`|
+|Broker operational logs (text logs about the server itself)|`$KAFKA_HOME/logs/`                        |`log4j` config                     |
 
 
-> ⚠️ **Important:** The default `/tmp/kafka-logs` is fine for testing but **terrible for production** — many systems wipe `/tmp` on reboot, which deletes all your data. Always change `log.dirs` to a permanent disk in real deployments.
+> ⚠️ **Important:** The sample `log.dirs` points under `/tmp` (e.g. `/tmp/kraft-combined-logs`), which is fine for testing but **terrible for production** — many systems wipe `/tmp` on reboot, which deletes all your data. Always change `log.dirs` to a permanent disk in real deployments.
 
 -----
 
@@ -118,8 +123,8 @@ $KAFKA_HOME/config/producer.properties     <- default producer settings
 Here’s what a freshly unzipped Kafka folder looks like:
 
 ```
-kafka_2.13-3.7.0/
-├── bin/                       # All the CLI commands (the tools)
+kafka_2.13-4.3.0/
+├── bin/                       # All the CLI commands (the tools) — full list in Section 5
 │   ├── kafka-topics.sh
 │   ├── kafka-console-producer.sh
 │   ├── kafka-console-consumer.sh
@@ -129,20 +134,29 @@ kafka_2.13-3.7.0/
 │   ├── kafka-reassign-partitions.sh
 │   ├── kafka-server-start.sh
 │   ├── kafka-server-stop.sh
-│   ├── kafka-storage.sh
-│   ├── zookeeper-server-start.sh
+│   ├── kafka-storage.sh           # format storage (required in KRaft)
+│   ├── kafka-metadata-quorum.sh   # inspect KRaft controllers
+│   ├── connect-distributed.sh     # Kafka Connect (cluster mode)
+│   ├── connect-standalone.sh      # Kafka Connect (single process)
+│   ├── kafka-streams-application-reset.sh
 │   └── windows/               # .bat versions of every script
 │       ├── kafka-topics.bat
 │       └── ...
-├── config/                    # Configuration files
-│   ├── server.properties      # Main broker config (ZooKeeper mode)
-│   ├── zookeeper.properties
+├── config/                    # Configuration files — full list in Section 7
+│   ├── server.properties      # Main broker+controller config (KRaft; the default in 4.x)
 │   ├── consumer.properties
 │   ├── producer.properties
-│   └── kraft/                 # Configs for the newer KRaft mode
-│       ├── server.properties
-│       ├── broker.properties
-│       └── controller.properties
+│   ├── connect-distributed.properties   # Connect worker (cluster)
+│   ├── connect-standalone.properties    # Connect worker (single)
+│   ├── connect-log4j2.yaml
+│   ├── connect-file-source.properties   # example connector
+│   ├── connect-file-sink.properties     # example connector
+│   ├── log4j2.yaml            # logging config (was log4j.properties pre-4.0)
+│   ├── tools-log4j2.yaml
+│   └── kraft/                 # Role-specific KRaft samples
+│       ├── server.properties      # combined broker + controller
+│       ├── broker.properties      # broker-only role
+│       └── controller.properties  # controller-only role
 ├── libs/                      # Java .jar files Kafka needs to run (don't touch)
 ├── logs/                      # Text logs about the running server
 ├── licenses/                  # Legal stuff
@@ -150,10 +164,12 @@ kafka_2.13-3.7.0/
 └── NOTICE
 ```
 
+> In **Kafka 4.x** there is no `zookeeper.properties` and no `zookeeper-*` scripts — they were removed. If you see those, you’re looking at a 3.x (or older) install.
+
 And here’s what the **data directory** (`log.dirs`) looks like once Kafka is running and you’ve created a topic called `orders` with 2 partitions:
 
 ```
-/tmp/kafka-logs/                       # or your configured log.dirs path
+/tmp/kraft-combined-logs/              # or your configured log.dirs path
 ├── orders-0/                          # Partition 0 of "orders"
 │   ├── 00000000000000000000.log       # The actual messages, stored in segments
 │   ├── 00000000000000000000.index     # Speeds up finding messages by offset
@@ -380,24 +396,7 @@ Completed updating config for topic orders.
 
 -----
 
-### 4.5 Other Useful CLI Tools
-
-|Command                                                |What it does (plain terms)               |Typical output                                             |
-|-------------------------------------------------------|-----------------------------------------|-----------------------------------------------------------|
-|`kafka-server-start.sh config/server.properties`       |Turn a broker ON                         |Streams startup logs ending in `[KafkaServer id=1] started`|
-|`kafka-server-stop.sh`                                 |Turn a broker OFF                        |(no output; process stops)                                 |
-|`kafka-acls.sh`                                        |Set permissions — who can read/write     |Lists or confirms access rules                             |
-|`kafka-reassign-partitions.sh`                         |Move data between brokers to balance load|`Successfully started partition reassignment`              |
-|`kafka-leader-election.sh`                             |Pick a new leader broker for a partition |Confirms election per partition                            |
-|`kafka-log-dirs.sh --describe`                         |Check disk space used by data            |JSON of partition sizes in bytes                           |
-|`kafka-dump-log.sh`                                    |Peek inside raw segment files (debugging)|Decoded record batches                                     |
-|`kafka-producer-perf-test.sh`                          |Stress-test sending speed                |`50000 records sent, 9803.9 records/sec...`                |
-|`kafka-consumer-perf-test.sh`                          |Stress-test reading speed                |Throughput in MB/sec and records/sec                       |
-|`kafka-storage.sh`                                     |Format storage for KRaft mode            |`Formatting ... with metadata.version ...`                 |
-|`kafka-metadata-quorum.sh --describe`                  |Check health of KRaft controllers        |Leader ID, voters, observers                               |
-|`zookeeper-server-start.sh config/zookeeper.properties`|Start ZooKeeper (older clusters)         |ZooKeeper startup logs                                     |
-
-**Example — checking disk usage:**
+### 4.5 Checking disk usage (quick example)
 
 ```bash
 kafka-log-dirs.sh --describe --bootstrap-server localhost:9092 \
@@ -407,15 +406,335 @@ kafka-log-dirs.sh --describe --bootstrap-server localhost:9092 \
 Expected (trimmed) output:
 
 ```json
-{"brokers":[{"broker":1,"logDirs":[{"logDir":"/tmp/kafka-logs",
+{"brokers":[{"broker":1,"logDirs":[{"logDir":"/var/lib/kafka-logs",
 "partitions":[{"partition":"orders-0","size":10485760,"offsetLag":0}]}]}]}
 ```
 
-That `size` is in bytes — here partition `orders-0` is using about 10 MB.
+That `size` is in bytes — here partition `orders-0` is using about 10 MB. The full inventory of every other command is in Section 5.
 
 -----
 
-## 5. Admin Tasks Explained Simply
+## 5. Complete `bin/` Directory Reference (Every Script)
+
+Below is every script shipped in Kafka 4.x’s `bin/` folder, grouped by what you’d use it for. On Linux/macOS they end in `.sh`; identical `.bat` versions live in `bin/windows/`. Run any script with no arguments to print its full help.
+
+> **How to read these tables:** the “What it does” column is the plain-terms job. You’ve already seen detailed examples for the most common ones in Section 4; the rest are summarized here so you know they exist and when to reach for them.
+
+### 5.1 Server & cluster lifecycle
+
+|Script                    |What it does (plain terms)                                                                                                         |
+|--------------------------|-----------------------------------------------------------------------------------------------------------------------------------|
+|`kafka-server-start.sh`   |Turn a broker ON. Pass it a config file: `kafka-server-start.sh config/server.properties`. Ends with `Kafka Server started`.       |
+|`kafka-server-stop.sh`    |Turn a broker OFF gracefully.                                                                                                      |
+|`kafka-storage.sh`        |**KRaft only, required once before first start.** Generates a cluster ID and formats the metadata/log directories. See Section 5.6.|
+|`kafka-metadata-quorum.sh`|Inspect the KRaft controller “quorum” — who’s the leader, who are the voters. Replaces the old ZooKeeper health checks.            |
+|`kafka-cluster.sh`        |Cluster-wide actions like printing or unregistering the cluster ID.                                                                |
+|`kafka-features.sh`       |View or upgrade/downgrade cluster **feature levels** (e.g. the `metadata.version`) as you roll out new Kafka versions.             |
+
+### 5.2 Topics, messages & groups (the everyday tools)
+
+|Script                                                         |What it does (plain terms)                                                                              |
+|---------------------------------------------------------------|--------------------------------------------------------------------------------------------------------|
+|`kafka-topics.sh`                                              |Create, list, describe, alter, delete topics. (Section 4.1)                                             |
+|`kafka-console-producer.sh`                                    |Type messages in and send them, for testing. (Section 4.2)                                              |
+|`kafka-console-consumer.sh`                                    |Read messages out to your screen, for testing. (Section 4.2)                                            |
+|`kafka-consumer-groups.sh`                                     |List groups, check **lag**, reset offsets. (Section 4.3)                                                |
+|`kafka-configs.sh`                                             |View and change settings on topics, brokers, users, clients. (Section 4.4)                              |
+|`kafka-get-offsets.sh`                                         |Ask a topic for its earliest/latest offsets (how many messages, and the boundaries).                    |
+|`kafka-delete-records.sh`                                      |Permanently delete messages **before** a given offset (e.g. to purge bad data or free space).           |
+|`kafka-leader-election.sh`                                     |Manually trigger a new leader election for partitions (e.g. to rebalance leadership after a restart).   |
+|`kafka-verifiable-producer.sh` / `kafka-verifiable-consumer.sh`|Test/validation producers and consumers that print machine-readable results — used in automated testing.|
+
+### 5.3 Data movement, balancing & replication
+
+|Script                         |What it does (plain terms)                                                                                                    |
+|-------------------------------|------------------------------------------------------------------------------------------------------------------------------|
+|`kafka-reassign-partitions.sh` |Move partitions between brokers to balance load or drain a broker. (Section 10, Use Case F)                                   |
+|`kafka-replica-verification.sh`|Check that replicas (the backup copies) actually match across brokers.                                                        |
+|`kafka-mirror-maker.sh`        |Copy data from one cluster to another (older MirrorMaker; for DR/migration). MirrorMaker 2 is usually run via Connect instead.|
+
+### 5.4 Security & access control
+
+|Script                      |What it does (plain terms)                                                                      |
+|----------------------------|------------------------------------------------------------------------------------------------|
+|`kafka-acls.sh`             |Grant or revoke permissions — who may read/write/manage which topics and groups.                |
+|`kafka-delegation-tokens.sh`|Create/renew/expire delegation tokens (lightweight credentials for clients in secured clusters).|
+
+### 5.5 Kafka Connect (move data in/out of external systems)
+
+|Script                   |What it does (plain terms)                                                                    |
+|-------------------------|----------------------------------------------------------------------------------------------|
+|`connect-distributed.sh` |Start a Connect **worker in cluster mode** (scalable, fault-tolerant). See Section 6.         |
+|`connect-standalone.sh`  |Start a Connect worker as a **single process** (simple, good for one-off jobs). See Section 6.|
+|`connect-mirror-maker.sh`|Run **MirrorMaker 2** (cross-cluster replication) on top of Connect.                          |
+|`connect-plugin-path.sh` |List and inspect installed Connect plugins (connectors/transforms) on the plugin path.        |
+
+### 5.6 Kafka Streams
+
+|Script                              |What it does (plain terms)                                                                                               |
+|------------------------------------|-------------------------------------------------------------------------------------------------------------------------|
+|`kafka-streams-application-reset.sh`|Reset a Streams app so it can reprocess input from the start — clears its offsets and internal topics. See example below.|
+
+**Example — resetting a Streams application:**
+
+```bash
+kafka-streams-application-reset.sh \
+  --application-id my-streams-app \
+  --input-topics orders \
+  --bootstrap-server localhost:9092
+```
+
+Expected output:
+
+```
+Reset-offsets for input topics [orders]
+Following input topics offsets will be reset to (for consumer group my-streams-app)
+Topic: orders Partition: 0 Offset: 0
+Topic: orders Partition: 1 Offset: 0
+Done.
+```
+
+> ⚠️ **Stop all instances of the app first.** Running this against a live app can corrupt its state. Verify the group is inactive with `kafka-consumer-groups.sh` before resetting.
+
+### 5.7 Performance testing & debugging
+
+|Script                        |What it does (plain terms)                                                                |
+|------------------------------|------------------------------------------------------------------------------------------|
+|`kafka-producer-perf-test.sh` |Stress-test write speed: e.g. `50000 records sent, 9803.9 records/sec`.                   |
+|`kafka-consumer-perf-test.sh` |Stress-test read speed (throughput in MB/sec and records/sec).                            |
+|`kafka-log-dirs.sh`           |Report disk usage per partition (Section 4.5).                                            |
+|`kafka-dump-log.sh`           |Decode and peek inside raw `.log` segment files for deep debugging.                       |
+|`kafka-jmx.sh`                |Read JMX metrics (Kafka’s built-in health numbers) straight from the command line.        |
+|`kafka-e2e-latency.sh`        |Measure end-to-end produce→consume latency.                                               |
+|`kafka-broker-api-versions.sh`|List which API versions a broker supports — handy for diagnosing client/broker mismatches.|
+
+### 5.8 Format-only example: first-time KRaft setup
+
+Because Kafka 4.x is KRaft-only, a brand-new cluster needs a one-time format step before the very first start:
+
+```bash
+# 1. Generate a unique cluster ID
+KAFKA_CLUSTER_ID="$(bin/kafka-storage.sh random-uuid)"
+
+# 2. Format the storage directories using that ID and your config
+bin/kafka-storage.sh format --standalone \
+  -t "$KAFKA_CLUSTER_ID" \
+  -c config/server.properties
+
+# 3. Now start the server
+bin/kafka-server-start.sh config/server.properties
+```
+
+Expected output of the format step:
+
+```
+Formatting metadata directory /var/lib/kafka-logs with metadata.version 4.3-IV0.
+```
+
+> You only format **once** per node. Re-formatting wipes metadata, so don’t repeat it on an existing cluster.
+
+-----
+
+## 6. Kafka Connect from the CLI
+
+**Kafka Connect** is the built-in way to move data **into** Kafka (from databases, files, queues) and **out of** Kafka (to S3, Elasticsearch, data warehouses) — without writing custom code. You run “connectors,” which are reusable plugins. Think of Connect as a set of **pre-built adapters** that plug your other systems into the Kafka post office.
+
+Connect runs in two modes:
+
+|Mode           |Script                  |When to use it                                                                                                |
+|---------------|------------------------|--------------------------------------------------------------------------------------------------------------|
+|**Standalone** |`connect-standalone.sh` |One process, config from files. Simple; great for a single source like tailing a log file. No fault tolerance.|
+|**Distributed**|`connect-distributed.sh`|A scalable, fault-tolerant cluster of workers managed over a REST API. The production choice.                 |
+
+### 6.1 Standalone mode
+
+You give it one **worker** config plus one or more **connector** configs:
+
+```bash
+connect-standalone.sh config/connect-standalone.properties \
+  config/connect-file-source.properties \
+  config/connect-file-sink.properties
+```
+
+The first file configures the worker (where Kafka is, how data is serialized); the remaining files each define a connector. All run together in one process.
+
+### 6.2 Distributed mode
+
+You start the worker with only its worker config — connectors are added later over the REST API:
+
+```bash
+connect-distributed.sh config/connect-distributed.properties
+```
+
+Expected (trimmed) startup output:
+
+```
+[INFO] Kafka Connect started
+[INFO] REST server listening at http://localhost:8083/, advertising URL http://localhost:8083/
+```
+
+### 6.3 Managing connectors over REST (port 8083)
+
+In distributed mode you control everything through Connect’s REST interface, which **listens on port 8083 by default**.
+
+**List installed connector plugins:**
+
+```bash
+curl http://localhost:8083/connector-plugins
+```
+
+**Create a connector** (send it a JSON config):
+
+```bash
+curl -X POST http://localhost:8083/connectors \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "file-source",
+    "config": {
+      "connector.class": "FileStreamSource",
+      "tasks.max": "1",
+      "file": "/var/log/app.log",
+      "topic": "app-logs"
+    }
+  }'
+```
+
+**List running connectors:**
+
+```bash
+curl http://localhost:8083/connectors
+```
+
+Expected output:
+
+```json
+["file-source"]
+```
+
+**Check a connector’s status:**
+
+```bash
+curl http://localhost:8083/connectors/file-source/status
+```
+
+Expected output:
+
+```json
+{"name":"file-source","connector":{"state":"RUNNING","worker_id":"10.0.0.5:8083"},
+"tasks":[{"id":0,"state":"RUNNING","worker_id":"10.0.0.5:8083"}],"type":"source"}
+```
+
+**Pause, resume, or delete a connector:**
+
+```bash
+curl -X PUT    http://localhost:8083/connectors/file-source/pause
+curl -X PUT    http://localhost:8083/connectors/file-source/resume
+curl -X DELETE http://localhost:8083/connectors/file-source
+```
+
+> **Source vs. sink, in plain terms:** a **source** connector pulls data *into* Kafka (e.g. database → topic). A **sink** connector pushes data *out of* Kafka (e.g. topic → S3). The example above is a source reading a log file into the `app-logs` topic.
+
+-----
+
+## 7. Complete `config/` Directory Reference (Every File)
+
+Configuration files are plain-text `key=value` files (logging uses YAML in 4.x). Here’s what each one in `config/` controls. You point a startup script at the file you want, e.g. `kafka-server-start.sh config/server.properties`.
+
+### 7.1 `server.properties` — the main broker/controller config
+
+The single most important file: it defines what this Kafka node *is* and how it behaves. In KRaft mode (Kafka 4.x) one node can be a broker, a controller, or both. Key settings you’ll actually touch:
+
+|Setting                           |Plain meaning                                                                                  |
+|----------------------------------|-----------------------------------------------------------------------------------------------|
+|`process.roles`                   |What this node does: `broker`, `controller`, or `broker,controller` (combined). KRaft-specific.|
+|`node.id`                         |A unique number identifying this node in the cluster.                                          |
+|`controller.quorum.voters`        |The list of controller nodes (id@host:port) that vote on metadata — KRaft’s brain.             |
+|`listeners`                       |The address/port this node listens on (default broker port `9092`).                            |
+|`advertised.listeners`            |The address clients are told to connect back on (important behind NAT/containers).             |
+|`log.dirs`                        |**Where message data is stored on disk.** Change this from the default for production.         |
+|`num.partitions`                  |Default partition count for auto-created topics.                                               |
+|`default.replication.factor`      |Default number of copies for new topics.                                                       |
+|`offsets.topic.replication.factor`|Copies of the internal offsets topic (set ≥3 in production).                                   |
+|`log.retention.hours`             |How long messages are kept by default (168 hours = 7 days).                                    |
+|`log.segment.bytes`               |How big each `.log` segment file grows before rolling over.                                    |
+
+
+> The samples in `config/kraft/` (`server.properties`, `broker.properties`, `controller.properties`) are the same file tuned for the three role choices: combined, broker-only, and controller-only. Pick the one matching the node’s job.
+
+### 7.2 `producer.properties` — default producer settings
+
+Defaults used by the console producer and as a template for your own producers.
+
+|Setting                   |Plain meaning                                                                                |
+|--------------------------|---------------------------------------------------------------------------------------------|
+|`bootstrap.servers`       |Which broker(s) to connect to.                                                               |
+|`compression.type`        |Compress messages before sending (`none`, `gzip`, `snappy`, `lz4`, `zstd`) to save bandwidth.|
+|`acks`                    |How many copies must confirm a write before it’s “done” (`all` = safest).                    |
+|`batch.size` / `linger.ms`|How much to batch messages for efficiency vs. latency.                                       |
+
+### 7.3 `consumer.properties` — default consumer settings
+
+Defaults used by the console consumer and as a template for your own consumers.
+
+|Setting             |Plain meaning                                                       |
+|--------------------|--------------------------------------------------------------------|
+|`bootstrap.servers` |Which broker(s) to connect to.                                      |
+|`group.id`          |Which consumer group this consumer joins (shared reading).          |
+|`auto.offset.reset` |Where to start if there’s no saved bookmark: `earliest` or `latest`.|
+|`enable.auto.commit`|Whether the bookmark (offset) is saved automatically.               |
+
+### 7.4 `connect-distributed.properties` — Connect worker (cluster mode)
+
+Settings for a distributed Connect worker. Connectors are *not* listed here — they’re added via REST.
+
+|Setting                                                               |Plain meaning                                                                |
+|----------------------------------------------------------------------|-----------------------------------------------------------------------------|
+|`bootstrap.servers`                                                   |The Kafka cluster Connect reads/writes through.                              |
+|`group.id`                                                            |Connect cluster name — workers with the same id share the work.              |
+|`key.converter` / `value.converter`                                   |How data is serialized (e.g. JSON, Avro).                                    |
+|`config.storage.topic`, `offset.storage.topic`, `status.storage.topic`|Internal topics where Connect stores connector configs, progress, and status.|
+|`*.storage.replication.factor`                                        |Copies of those internal topics (≥3 in production).                          |
+|`plugin.path`                                                         |Folder(s) where connector plugins are installed.                             |
+|`listeners`                                                           |The REST API address (default port `8083`).                                  |
+
+### 7.5 `connect-standalone.properties` — Connect worker (single process)
+
+Like the distributed file, but for one process. The key difference:
+
+|Setting                       |Plain meaning                                                                                        |
+|------------------------------|-----------------------------------------------------------------------------------------------------|
+|`offset.storage.file.filename`|A **local file** (not a Kafka topic) where progress is saved, since there’s no cluster to coordinate.|
+
+Plus the same `bootstrap.servers`, converters, and `plugin.path` as above.
+
+### 7.6 Example connector configs
+
+|File                            |What it demonstrates                                                                                            |
+|--------------------------------|----------------------------------------------------------------------------------------------------------------|
+|`connect-file-source.properties`|A source connector that reads lines from a file into a Kafka topic. Sets `connector.class`, `file`, and `topic`.|
+|`connect-file-sink.properties`  |A sink connector that writes messages from a topic out to a file.                                               |
+
+These are templates to copy and adapt, not production connectors.
+
+### 7.7 Logging configuration
+
+|File                 |What it controls                                                                                               |
+|---------------------|---------------------------------------------------------------------------------------------------------------|
+|`log4j2.yaml`        |Logging for the broker/server: log levels, file locations, rotation. (Was `log4j.properties` before Kafka 4.0.)|
+|`tools-log4j2.yaml`  |Logging for the CLI tools (so command output isn’t drowned in log noise).                                      |
+|`connect-log4j2.yaml`|Logging specifically for Kafka Connect workers.                                                                |
+
+### 7.8 Legacy files (3.x and earlier only — **not** in Kafka 4.x)
+
+|File                             |What it was for                                                               |
+|---------------------------------|------------------------------------------------------------------------------|
+|`zookeeper.properties`           |Configured the embedded ZooKeeper (data dir, client port `2181`). Gone in 4.x.|
+|`connect-mirror-maker.properties`|Config for MirrorMaker 2 replication (still used where MM2 is deployed).      |
+|`trogdor.conf`                   |Config for Trogdor, Kafka’s internal test/fault-injection framework.          |
+
+-----
+
+## 8. Admin Tasks Explained Simply
 
 ### Task 1: Creating and managing topics
 
@@ -467,7 +786,7 @@ Sometimes you transform messages as they flow — filtering, counting, combining
 
 -----
 
-## 6. Tools Beyond the CLI
+## 9. Tools Beyond the CLI
 
 |Tool                    |Category       |What it’s for                                         |
 |------------------------|---------------|------------------------------------------------------|
@@ -486,7 +805,7 @@ Sometimes you transform messages as they flow — filtering, counting, combining
 
 -----
 
-## 7. Use Cases (Real-World Scenarios)
+## 10. Use Cases (Real-World Scenarios)
 
 ### Use Case A: Spin up a new topic for an order system
 
@@ -590,36 +909,41 @@ kafka-topics.sh --describe --under-replicated-partitions \
 
 -----
 
-## 8. Cheat Sheet: Task → Tool
+## 11. Cheat Sheet: Task → Tool
 
-|Admin Task           |CLI Command                                              |Bigger Tool          |
-|---------------------|---------------------------------------------------------|---------------------|
-|Make / change topics |`kafka-topics.sh`                                        |AKHQ, Conduktor      |
-|Test send / receive  |`kafka-console-producer.sh` / `kafka-console-consumer.sh`|Conduktor            |
-|Watch lag            |`kafka-consumer-groups.sh`                               |Burrow               |
-|Change settings      |`kafka-configs.sh`                                       |—                    |
-|Permissions          |`kafka-acls.sh`                                          |—                    |
-|Balance load         |`kafka-reassign-partitions.sh`                           |Cruise Control       |
-|Monitor health       |`kafka-log-dirs.sh`, `kafka-topics.sh --describe`        |Prometheus + Grafana |
-|Backup / mirror      |—                                                        |MirrorMaker 2        |
-|Connect systems      |—                                                        |Kafka Connect        |
-|Process streams      |—                                                        |Kafka Streams, ksqlDB|
-|Enforce message shape|—                                                        |Schema Registry      |
+|Admin Task                  |CLI Command                                                    |Bigger Tool          |
+|----------------------------|---------------------------------------------------------------|---------------------|
+|Format storage (first start)|`kafka-storage.sh format`                                      |—                    |
+|Start / stop a broker       |`kafka-server-start.sh` / `kafka-server-stop.sh`               |—                    |
+|Make / change topics        |`kafka-topics.sh`                                              |AKHQ, Conduktor      |
+|Test send / receive         |`kafka-console-producer.sh` / `kafka-console-consumer.sh`      |Conduktor            |
+|Watch lag                   |`kafka-consumer-groups.sh`                                     |Burrow               |
+|Change settings             |`kafka-configs.sh`                                             |—                    |
+|Purge old messages          |`kafka-delete-records.sh`                                      |—                    |
+|Permissions                 |`kafka-acls.sh`                                                |—                    |
+|Balance load                |`kafka-reassign-partitions.sh`                                 |Cruise Control       |
+|Check controllers (KRaft)   |`kafka-metadata-quorum.sh`                                     |—                    |
+|Monitor health              |`kafka-log-dirs.sh`, `kafka-topics.sh --describe`              |Prometheus + Grafana |
+|Connect systems             |`connect-distributed.sh` / `connect-standalone.sh` + REST :8083|Kafka Connect        |
+|Backup / mirror             |`connect-mirror-maker.sh`                                      |MirrorMaker 2        |
+|Reset a Streams app         |`kafka-streams-application-reset.sh`                           |Kafka Streams        |
+|Process streams             |—                                                              |Kafka Streams, ksqlDB|
+|Enforce message shape       |—                                                              |Schema Registry      |
 
 -----
 
-## 9. Quick Tips & Gotchas
+## 12. Quick Tips & Gotchas
 
 - **Default port is 9092.** Almost every command needs `--bootstrap-server localhost:9092` (or your broker’s address).
 - **`--zookeeper` is dead.** Old guides used `--zookeeper`; modern Kafka uses `--bootstrap-server` for nearly everything. If a command rejects `--zookeeper`, switch to `--bootstrap-server`.
-- **Change `log.dirs` for production.** The default `/tmp/kafka-logs` can be wiped on reboot. Point it at a permanent disk.
+- **Change `log.dirs` for production.** The sample path lives under `/tmp` and can be wiped on reboot. Point it at a permanent disk.
 - **Partitions only go up.** You can add partitions but never remove them. Plan ahead.
 - **Replication factor can’t exceed broker count.** Asking for 3 copies with only 2 brokers fails.
 - **Stop consumers before resetting offsets.** Offset resets only work when the group has no active members.
 - **No output is often good output.** Commands like `--under-replicated-partitions` print nothing when everything is healthy.
-- **KRaft is the future.** Kafka 3.x+ is phasing out ZooKeeper. In KRaft mode you use `kafka-storage.sh` and `kafka-metadata-quorum.sh` instead of the `zookeeper-*` scripts. Kafka 4.0 removes ZooKeeper entirely.
+- **KRaft is now the only mode.** As of Kafka 4.0, ZooKeeper is **removed entirely** — there are no `zookeeper-*` scripts or `zookeeper.properties`. You use `kafka-storage.sh` (one-time format) and `kafka-metadata-quorum.sh` (health) instead. If you’re on a 3.x cluster, ZooKeeper may still be present; 3.9 is the last line that supports it.
 - **Windows users:** use the `.bat` files in `bin\windows\` and back-slashes in paths.
 
 -----
 
-*Reference guide — Apache Kafka administration. Examples use Kafka 3.x conventions.*
+*Reference guide — Apache Kafka administration. Targets the latest release, Kafka 4.3.0 (May 2026), which is KRaft-only and requires Java 17+. Where commands or files differ in older 3.x installs, this is noted inline.*
