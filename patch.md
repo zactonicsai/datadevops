@@ -141,7 +141,169 @@ kernel-headers
 
 ### 5e. The watch list (`manifests/approved-watchlist.txt`)
 
-This is the authoritative answer to “what should be installed and at what version.” It is generated from a known-good build, reviewed, and committed. Every later verification compares the live server against this file. You regenerate and re-approve it each cycle once the new build passes Stage.
+This is the authoritative answer to “what should be installed and at what version.” It is generated from a known-good build, reviewed, and committed. Every later verification compares the live server against this file. You regenerate and re-approve it each cycle once the new build passes Stage. The add/remove/pin decisions above are not just intentions — they are **physically enforced by our internal yum repo**, which is the subject of the next section.
+
+-----
+
+## 5.5 — The internal yum/dnf repo: the authority for the final patch state
+
+In our environment, **production servers do not patch directly from AWS’s public Amazon Linux 2023 repositories.** They patch from an **internal mirror repo that we control.** That internal repo — frozen into a dated *snapshot* each cycle — is the single thing that decides the final patch state of every host. If a package, or a specific version of a package, is not in the published internal snapshot, **no client can install it.** This is how “add or remove patches” is physically enforced, and how Dev, Stage, and Prod are guaranteed to converge on exactly the same result.
+
+Why we run our own repo instead of pointing at AWS directly:
+
+- **Determinism / final-state control** — the snapshot *is* the approved package set, so patch state can’t drift; there is nothing else to pull from.
+- **Curation** — we can *remove* a package with a known regression and *add* our own internal RPMs into the same repo.
+- **Egress control** — hosts in private subnets reach one internal endpoint (or an S3 VPC endpoint) instead of the open internet.
+- **Auditability** — the snapshot, its exact contents, and its publish time are recorded and reviewable.
+
+### The pipeline (upstream → internal → clients)
+
+```
+        (1) SYNC                  (2) CURATE              (3) PUBLISH               (4) CONSUME
+AWS AL2023 ───────► staging mirror ───────► cycle snapshot ───────► S3 / web / Nexus ───────► Dev / Stage / Prod
+public repo reposync  (all RPMs)    add/remove  "2026-06"   createrepo_c  "production"        dnf upgrade --security
+(releasever)          on sync host  custom RPMs            + sign metadata + aws s3 sync      (internal repo ONLY)
+```
+
+The snapshot label (`2026-06`) lines up with the `Cycle` tag on the golden AMI and with the Jira epic — one identifier ties the **repo**, the **AMI**, and the **ticket** together.
+
+### Part A — The SYNC process (build/repo team, on a sync host)
+
+Only the sync host needs outbound access to AWS’s repos; clients never do.
+
+```bash
+# 0) Tooling. dnf-plugins-core provides reposync + config-manager; dnf-utils adds repoquery compat.
+sudo dnf install -y dnf-plugins-core createrepo_c dnf-utils
+
+# 1) Mirror a SPECIFIC upstream snapshot of the amazonlinux repo into staging.
+#    --releasever pins WHICH upstream snapshot we pull (this is determinism at the source).
+RELEASEVER=2023.x.2026MMDD
+sudo dnf reposync \
+  --repoid=amazonlinux \
+  --releasever="$RELEASEVER" \
+  --arch=x86_64 \
+  --download-path=/srv/repos/staging \
+  --download-metadata \
+  --gpgcheck \
+  --delete
+#   --repoid            : sync only the amazonlinux repo
+#   --download-metadata : also fetch upstream repodata (lets us mirror as-is if we choose)
+#   --gpgcheck          : verify Amazon's signatures while downloading
+#   --delete            : drop local RPMs that disappeared upstream
+#   (add --newest-only / -n to keep only the latest build of each package)
+# RPMs land under /srv/repos/staging/amazonlinux/  (the exact subpath can vary by version)
+```
+
+Now **curate** — this is the literal “remove or add patches” step that shapes the final state:
+
+```bash
+# This cycle's publish directory (the snapshot)
+PUB=/srv/repos/published/al2023/2026-06/x86_64
+sudo mkdir -p "$PUB"
+
+# Bring the synced RPMs into the snapshot
+sudo rsync -a --delete /srv/repos/staging/amazonlinux/ "$PUB/"
+
+# REMOVE a patch we are deliberately holding back this cycle
+#   (e.g., a kernel build with a regression, or a package policy forbids it)
+sudo rm -f "$PUB"/Packages/kernel-6.1.<bad-build>*.rpm
+
+# ADD our own internal / custom RPMs into the same repo
+sudo cp /srv/internal-rpms/acme-baseline-1.4-1.amzn2023.noarch.rpm "$PUB/Packages/"
+```
+
+Rebuild the metadata so the repo reflects exactly the curated set, then sign it:
+
+```bash
+# (Re)generate repodata: repomd.xml + primary / filelists / etc.
+sudo createrepo_c --update "$PUB"
+
+# Sign the repo metadata so clients can verify it (repo_gpgcheck on the client side)
+gpg --detach-sign --armor "$PUB/repodata/repomd.xml"   # → repomd.xml.asc
+```
+
+Publish the snapshot. We keep every dated snapshot immutable and move a `production` pointer **only after Stage passes** — this is the Phase 8 “freeze/approve” gesture expressed in the repo:
+
+```bash
+# Publish the immutable dated snapshot
+aws s3 sync "$PUB/" s3://acme-internal-repo/al2023/2026-06/x86_64/ --delete
+
+# AFTER Stage passes (Phase 8): promote it to the pointer clients actually use
+aws s3 sync s3://acme-internal-repo/al2023/2026-06/x86_64/ \
+            s3://acme-internal-repo/al2023/production/x86_64/ --delete
+```
+
+> Hosting options are interchangeable — the client config below only changes its `baseurl`: an **S3 bucket reached over a VPC gateway endpoint** (no public access; bucket policy restricts to your VPC), a plain internal **httpd/nginx** web root, or **Nexus / Artifactory** as a hosted yum repo.
+
+### Part B — The YUM/DNF process (how every client consumes it)
+
+Bake this into the **golden AMI** (Phase 3) so every instance is born pointing at the internal repo.
+
+```bash
+# 1) Import the signing keys the repo will be verified against.
+#    Amazon's key already ships on AL2023; add ours too.
+sudo rpm --import https://acme-internal-repo.s3.us-east-1.amazonaws.com/RPM-GPG-KEY-acme-internal
+# (Amazon's key is already at /etc/pki/rpm-gpg/RPM-GPG-KEY-amazon-linux-2023)
+```
+
+```ini
+# 2) /etc/yum.repos.d/acme-al2023.repo  — point clients at the internal repo
+[acme-al2023]
+name=ACME Internal AL2023 (production snapshot)
+baseurl=https://acme-internal-repo.s3.us-east-1.amazonaws.com/al2023/production/$basearch/
+enabled=1
+gpgcheck=1          # verify each RPM's signature (package integrity)
+repo_gpgcheck=1     # verify the repo metadata signature (repomd.xml.asc)
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-amazon-linux-2023
+       https://acme-internal-repo.s3.us-east-1.amazonaws.com/RPM-GPG-KEY-acme-internal
+priority=1
+```
+
+```bash
+# 3) DISABLE the stock public repos so packages can ONLY come from internal.
+#    This is the step that makes the internal snapshot the *authority*.
+sudo dnf config-manager --set-disabled amazonlinux
+# (repeat for any other stock repos present, e.g. amazonlinux-kernel-livepatch)
+
+# 4) Rebuild the cache against the internal repo
+sudo dnf clean all
+sudo dnf makecache
+
+# 5) Confirm the ONLY enabled repo is ours
+dnf repolist enabled
+# → acme-al2023 ... and nothing public
+```
+
+Patching is now identical to before, but every package is guaranteed to come from the frozen internal snapshot:
+
+```bash
+# Apply security updates from the internal repo.
+# No --releasever needed here: the active repo is already the frozen snapshot.
+sudo dnf upgrade --security -y
+
+# Prove a package actually came from the internal repo
+dnf repoquery --installed --qf '%{name}-%{evr} (%{from_repo})\n' openssl
+# → openssl-... (acme-al2023)
+```
+
+> **Relationship to `--releasever`:** once the internal repo is in place, `--releasever` is no longer the control lever on clients — the *repo content* is. We still pin `--releasever` during the **sync** (Part A) so we always mirror a known upstream snapshot; on clients you can drop it.
+
+### Part C — How this defines the final patch state and the watch list
+
+The chain is now airtight:
+
+1. The published **internal snapshot** is the complete and only set of packages any client may install.
+1. Therefore the snapshot **deterministically defines the final patch state** of every host that points at it.
+1. A host built from the golden AMI (which points at the snapshot) is manifested with `rpm -qa …` — and **that manifest becomes the approved watch list** (Phase 8).
+1. Every later verification reduces to: does the live host’s manifest equal the watch list? Because both derive from the same snapshot, a clean `diff` is both expected and meaningful.
+
+```bash
+# The verification loop, unchanged — but now grounded in the repo snapshot
+rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' | sort > /tmp/live.txt
+diff manifests/approved-watchlist.txt /tmp/live.txt && echo "MATCHES SNAPSHOT ✔"
+```
+
+Keep the client repo file and the snapshot id in GitLab (`config/acme-al2023.repo`, `config/snapshot.txt`) so the repo the fleet uses is reviewed and versioned like everything else.
 
 -----
 
@@ -272,6 +434,8 @@ echo "Patching + shaping complete."
 - `upgrade --security` → installs *only* security-flagged updates, not every cosmetic update.
 - `--exclude=` → skip packages on our exclude list.
 - `versionlock add` → pin a package so next month’s run can’t bump it.
+
+> **In our environment these commands run against the internal yum repo snapshot (Section 5.5), not the public AWS repos** — that snapshot is what fixes the final patch state. The builder’s `/etc/yum.repos.d/acme-al2023.repo` is set first and the stock repo disabled, so `dnf upgrade --security` can only pull approved packages. `--releasever` then matters only at sync time, not on the builder.
 
 Copy the config files up before running:
 
@@ -807,6 +971,17 @@ aws ssm get-parameters --names /aws/service/ami-amazon-linux-latest/al2023-ami-k
 
 # Patch to an exact version (deterministic)
 sudo dnf --releasever=2023.x.2026MMDD upgrade --security -y
+
+# Sync upstream → internal mirror, then publish a curated snapshot
+sudo dnf reposync --repoid=amazonlinux --releasever=2023.x.2026MMDD --download-path=/srv/repos/staging --download-metadata --gpgcheck --delete
+sudo createrepo_c --update /srv/repos/published/al2023/2026-06/x86_64
+aws s3 sync /srv/repos/published/al2023/2026-06/x86_64/ s3://acme-internal-repo/al2023/2026-06/x86_64/ --delete
+
+# Point a client at the internal repo ONLY (disable stock, rebuild cache, confirm)
+sudo dnf config-manager --set-disabled amazonlinux && sudo dnf clean all && sudo dnf makecache && dnf repolist enabled
+
+# Prove a package came from the internal repo
+dnf repoquery --installed --qf '%{name}-%{evr} (%{from_repo})\n' openssl
 
 # Manifest a host
 rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' | sort > live.txt
