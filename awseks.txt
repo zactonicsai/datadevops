@@ -1,0 +1,395 @@
+#!/usr/bin/env bash
+###############################################################################
+#  EKS: add a managed node group to an EXISTING cluster, then prove it works
+#  by deploying a tiny "hello world" web server and curl-ing it.
+#
+#  WHAT THIS SCRIPT DOES (the whole journey, end to end):
+#    0. Pre-flight checks  (tools installed? credentials work? cluster exists?)
+#    1. Create / reuse the Node IAM role  (the "permission badge" for workers)
+#    2. Discover subnets   (where the workers will live on the network)
+#    3. Create the managed node group + wait until it is ACTIVE
+#    4. Point kubectl at the cluster + confirm the workers are "Ready"
+#    5. Deploy a hello-world app onto those workers
+#    6. Reach it with curl and get "hello world" back
+#       6a. ALWAYS: port-forward (works even for PRIVATE nodes, no firewall edit)
+#       6b. OPTIONAL: LoadBalancer  (public URL, curl from anywhere)
+#       6c. OPTIONAL: curl the node's own IP  (literal "connect to the node")
+#    +  Prints the exact SSM command to log INTO a node if you want a shell.
+#
+#  HOW TO RUN:
+#       chmod +x eks-nodegroup-helloworld.sh
+#       ./eks-nodegroup-helloworld.sh            # do everything
+#       ./eks-nodegroup-helloworld.sh cleanup    # tear the demo down
+#
+#  Read README.md (shipped alongside this) for the plain-language background.
+###############################################################################
+
+set -euo pipefail
+
+# =============================================================================
+#  >>>>>>>>>>>>>>>>>>>>>>>>  EDIT THIS CONFIG BLOCK  <<<<<<<<<<<<<<<<<<<<<<<<<<<
+# =============================================================================
+REGION="us-east-1"                       # AWS region your cluster is in
+CLUSTER_NAME="MY_CLUSTER"                # <-- the EXISTING cluster's name
+NODEGROUP_NAME="my-nodegroup"           # a name for the new node group
+NODE_ROLE_NAME="eksNodeRole"            # IAM role name (created if missing)
+
+# Leave SUBNETS empty to auto-use the cluster's own subnets, OR set your own
+# (space-separated). Private subnets are recommended for real workloads.
+SUBNETS=""                               # e.g. "subnet-aaa subnet-bbb subnet-ccc"
+
+# Worker machine + operating-system image.
+#   AL2 is RETIRED (no new AMIs since 2025-11-26). Use AL2023 or Bottlerocket.
+#   Match the AMI architecture to the instance: ARM AMI <-> Graviton (m7g, etc.)
+INSTANCE_TYPES="m6i.large"              # 1+ types, space-separated
+AMI_TYPE="AL2023_x86_64_STANDARD"       # see README for the full list
+CAPACITY_TYPE="ON_DEMAND"               # ON_DEMAND (stable) or SPOT (cheap)
+DISK_SIZE="50"                           # GiB root volume
+
+# Scaling: how many workers to keep.
+MIN_SIZE="2"
+MAX_SIZE="5"
+DESIRED_SIZE="2"
+MAX_UNAVAILABLE_PCT="33"                # % of nodes updated at once during upgrades
+
+NODE_REPAIR="true"                       # auto-replace unhealthy nodes (needs a recent CLI;
+                                         # if create fails citing this flag, set to "false")
+ENABLE_SSM="true"                        # also allow Session Manager shell access to nodes
+
+# The hello-world app.
+APP_IMAGE="hashicorp/http-echo"         # you may pin a tag, e.g. hashicorp/http-echo:0.2.3
+APP_TEXT="hello world"                  # the exact words curl will receive
+NODE_PORT="30080"                        # door opened on every node (range 30000-32767)
+
+# Optional curl tests (default off because they touch the network/firewall).
+TEST_LOADBALANCER="false"               # create a public LoadBalancer and curl it
+TEST_NODEPORT_DIRECT="false"            # open the node firewall for YOUR ip and curl the node
+
+# Cleanup behaviour.
+DELETE_NODEGROUP_ON_CLEANUP="false"     # set true to also delete the node group on `cleanup`
+# =============================================================================
+#  >>>>>>>>>>>>>>>>>>>>>>>>  END CONFIG BLOCK  <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+# =============================================================================
+
+say()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }      # cyan banner
+ok()   { printf '\033[1;32m    ✓ %s\033[0m\n' "$*"; }      # green tick
+warn() { printf '\033[1;33m    ! %s\033[0m\n' "$*"; }      # yellow warning
+die()  { printf '\033[1;31m    ✗ %s\033[0m\n' "$*" >&2; exit 1; }
+
+# -----------------------------------------------------------------------------
+#  CLEANUP MODE: `./script cleanup`
+# -----------------------------------------------------------------------------
+if [[ "${1:-}" == "cleanup" ]]; then
+  say "Cleaning up the hello-world demo"
+  aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1 || true
+  kubectl delete deployment hello --ignore-not-found
+  kubectl delete service hello hello-lb --ignore-not-found
+  ok "App, NodePort service, and any LoadBalancer removed"
+
+  if [[ "$DELETE_NODEGROUP_ON_CLEANUP" == "true" ]]; then
+    say "Deleting the node group (this takes a few minutes)"
+    aws eks delete-nodegroup --cluster-name "$CLUSTER_NAME" \
+      --nodegroup-name "$NODEGROUP_NAME" --region "$REGION"
+    aws eks wait nodegroup-deleted --cluster-name "$CLUSTER_NAME" \
+      --nodegroup-name "$NODEGROUP_NAME" --region "$REGION"
+    ok "Node group deleted"
+  else
+    warn "Node group left in place (set DELETE_NODEGROUP_ON_CLEANUP=true to remove it)"
+  fi
+  exit 0
+fi
+
+# -----------------------------------------------------------------------------
+#  STEP 0 — PRE-FLIGHT CHECKS
+#  Why: catch the boring problems (no tools, bad creds, wrong cluster) up front
+#  instead of failing halfway through.
+# -----------------------------------------------------------------------------
+say "Step 0: Pre-flight checks"
+command -v aws     >/dev/null || die "aws CLI not found. Install AWS CLI v2."
+command -v kubectl >/dev/null || die "kubectl not found. Needed for the hello-world test."
+command -v curl    >/dev/null || die "curl not found."
+
+aws sts get-caller-identity >/dev/null 2>&1 \
+  || die "AWS credentials are not configured/valid. Run: aws configure"
+ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+ok "Signed in to AWS account ${ACCOUNT_ID}"
+
+aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1 \
+  || die "Cluster '${CLUSTER_NAME}' not found in ${REGION}. Check CLUSTER_NAME/REGION."
+CLUSTER_VERSION="$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" \
+  --query 'cluster.version' --output text)"
+ok "Cluster '${CLUSTER_NAME}' exists (Kubernetes ${CLUSTER_VERSION})"
+warn "Worker nodes are created at the SAME version as the cluster (${CLUSTER_VERSION})."
+
+# -----------------------------------------------------------------------------
+#  STEP 1 — NODE IAM ROLE (the "permission badge" the workers wear)
+#  The kubelet on each worker calls AWS APIs on your behalf; it gets permission
+#  through this role. Three policies are the minimum:
+#    AmazonEKSWorkerNodePolicy            -> talk to the EKS control plane
+#    AmazonEC2ContainerRegistryReadOnly   -> pull container images from ECR
+#    AmazonEKS_CNI_Policy                 -> set up pod networking
+#  (+ AmazonSSMManagedInstanceCore if ENABLE_SSM=true, to allow shell access)
+# -----------------------------------------------------------------------------
+say "Step 1: Node IAM role"
+if aws iam get-role --role-name "$NODE_ROLE_NAME" >/dev/null 2>&1; then
+  ok "Role '${NODE_ROLE_NAME}' already exists — reusing it"
+else
+  say "Creating role '${NODE_ROLE_NAME}'"
+  TRUST_FILE="$(mktemp)"
+  cat > "$TRUST_FILE" <<'JSON'
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "Service": "ec2.amazonaws.com" },
+    "Action": "sts:AssumeRole"
+  }]
+}
+JSON
+  aws iam create-role --role-name "$NODE_ROLE_NAME" \
+    --assume-role-policy-document "file://${TRUST_FILE}" >/dev/null
+  rm -f "$TRUST_FILE"
+  ok "Role created"
+fi
+
+# Attaching the same policy twice is harmless, so we attach every run.
+for POLICY in \
+  arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy \
+  arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly \
+  arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy ; do
+  aws iam attach-role-policy --role-name "$NODE_ROLE_NAME" --policy-arn "$POLICY"
+done
+ok "Core worker policies attached"
+
+if [[ "$ENABLE_SSM" == "true" ]]; then
+  aws iam attach-role-policy --role-name "$NODE_ROLE_NAME" \
+    --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  ok "SSM policy attached (Session Manager shell access enabled)"
+fi
+
+NODE_ROLE_ARN="$(aws iam get-role --role-name "$NODE_ROLE_NAME" --query 'Role.Arn' --output text)"
+ok "Node role ARN: ${NODE_ROLE_ARN}"
+
+# -----------------------------------------------------------------------------
+#  STEP 2 — SUBNETS (which part of the network the workers join)
+# -----------------------------------------------------------------------------
+say "Step 2: Subnets"
+if [[ -z "$SUBNETS" ]]; then
+  SUBNETS="$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" \
+    --query 'cluster.resourcesVpcConfig.subnetIds' --output text)"
+  warn "SUBNETS was empty — using the cluster's own subnets:"
+fi
+echo "    ${SUBNETS}"
+warn "PRIVATE subnets need a NAT gateway or ECR PrivateLink endpoints to pull images."
+warn "PUBLIC subnets must have MapPublicIpOnLaunch=true or nodes won't join."
+
+# -----------------------------------------------------------------------------
+#  STEP 3 — CREATE THE MANAGED NODE GROUP
+#  A managed node group = an EC2 Auto Scaling group of identical workers that
+#  AWS babysits for you (replaces broken ones, drains them on updates).
+# -----------------------------------------------------------------------------
+say "Step 3: Create the managed node group"
+if aws eks describe-nodegroup --cluster-name "$CLUSTER_NAME" \
+     --nodegroup-name "$NODEGROUP_NAME" --region "$REGION" >/dev/null 2>&1; then
+  ok "Node group '${NODEGROUP_NAME}' already exists — skipping create"
+else
+  # Build the argument list; optional flags only added when requested.
+  CREATE_ARGS=(
+    --cluster-name   "$CLUSTER_NAME"
+    --nodegroup-name "$NODEGROUP_NAME"
+    --node-role      "$NODE_ROLE_ARN"
+    --subnets        $SUBNETS
+    --scaling-config "minSize=${MIN_SIZE},maxSize=${MAX_SIZE},desiredSize=${DESIRED_SIZE}"
+    --instance-types $INSTANCE_TYPES
+    --ami-type       "$AMI_TYPE"
+    --capacity-type  "$CAPACITY_TYPE"
+    --disk-size      "$DISK_SIZE"
+    --update-config  "maxUnavailablePercentage=${MAX_UNAVAILABLE_PCT}"
+    --region         "$REGION"
+  )
+  [[ "$NODE_REPAIR" == "true" ]] && CREATE_ARGS+=( --node-repair-config "enabled=true" )
+
+  echo "    Running: aws eks create-nodegroup ${CREATE_ARGS[*]}"
+  aws eks create-nodegroup "${CREATE_ARGS[@]}" >/dev/null
+  ok "Create request accepted (status: CREATING)"
+fi
+
+say "Waiting for the node group to become ACTIVE (usually 2-4 minutes)..."
+aws eks wait nodegroup-active --cluster-name "$CLUSTER_NAME" \
+  --nodegroup-name "$NODEGROUP_NAME" --region "$REGION"
+ok "Node group is ACTIVE"
+
+# -----------------------------------------------------------------------------
+#  STEP 4 — POINT kubectl AT THE CLUSTER + CONFIRM WORKERS ARE READY
+# -----------------------------------------------------------------------------
+say "Step 4: Connect kubectl and check the nodes"
+aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$REGION" >/dev/null
+ok "kubeconfig updated"
+kubectl get nodes -o wide
+warn "If nodes are missing/NotReady: usually (1) subnet can't reach ECR, or"
+warn "(2) the node role is missing one of the three core policies."
+
+# -----------------------------------------------------------------------------
+#  STEP 5 — DEPLOY THE HELLO-WORLD APP
+#  Deployment = "keep N copies of this program running."
+#  Service     = a stable front desk that forwards traffic to those copies.
+#  http-echo   = a one-trick program that replies with whatever -text you give.
+# -----------------------------------------------------------------------------
+say "Step 5: Deploy the hello-world app"
+MANIFEST="$(mktemp)"
+cat > "$MANIFEST" <<YAML
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: hello
+  template:
+    metadata:
+      labels:
+        app: hello
+    spec:
+      containers:
+        - name: hello
+          image: ${APP_IMAGE}
+          args:
+            - "-text=${APP_TEXT}"
+            - "-listen=:5678"
+          ports:
+            - containerPort: 5678
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello
+spec:
+  type: NodePort
+  selector:
+    app: hello
+  ports:
+    - port: 80
+      targetPort: 5678
+      nodePort: ${NODE_PORT}
+YAML
+kubectl apply -f "$MANIFEST"
+rm -f "$MANIFEST"
+kubectl rollout status deployment/hello --timeout=120s
+kubectl get pods -l app=hello -o wide
+ok "App is running on the node group"
+
+# -----------------------------------------------------------------------------
+#  STEP 6a — CURL VIA PORT-FORWARD  (always works; no firewall changes)
+#  Builds a private tunnel from this shell into the cluster through the
+#  Kubernetes API, so it works even when the nodes are in private subnets.
+# -----------------------------------------------------------------------------
+say "Step 6a: curl test via port-forward (the guaranteed proof)"
+kubectl port-forward svc/hello 18080:80 >/tmp/eks_pf.log 2>&1 &
+PF_PID=$!
+sleep 5
+RESPONSE="$(curl -s http://localhost:18080 || true)"
+kill "$PF_PID" 2>/dev/null || true
+if [[ "$RESPONSE" == *"${APP_TEXT}"* ]]; then
+  ok "curl returned: '${RESPONSE}'   <-- SUCCESS"
+else
+  warn "Unexpected response: '${RESPONSE}' (see /tmp/eks_pf.log)"
+fi
+
+# -----------------------------------------------------------------------------
+#  STEP 6b — OPTIONAL: PUBLIC LOADBALANCER  (curl from anywhere)
+# -----------------------------------------------------------------------------
+if [[ "$TEST_LOADBALANCER" == "true" ]]; then
+  say "Step 6b: Creating a public LoadBalancer (this can take 2-5 minutes)"
+  cat <<YAML | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello-lb
+spec:
+  type: LoadBalancer
+  selector:
+    app: hello
+  ports:
+    - port: 80
+      targetPort: 5678
+YAML
+  LB_HOST=""
+  for _ in $(seq 1 30); do
+    LB_HOST="$(kubectl get svc hello-lb \
+      -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+    [[ -n "$LB_HOST" ]] && break
+    sleep 10
+  done
+  if [[ -n "$LB_HOST" ]]; then
+    ok "LoadBalancer hostname: ${LB_HOST}"
+    say "Curling it (retrying while it warms up)..."
+    LB_RESPONSE="$(curl -s --retry 10 --retry-delay 15 --retry-all-errors "http://${LB_HOST}" || true)"
+    [[ "$LB_RESPONSE" == *"${APP_TEXT}"* ]] \
+      && ok "LoadBalancer curl returned: '${LB_RESPONSE}'" \
+      || warn "Not reachable yet: '${LB_RESPONSE}' (give it another minute and curl http://${LB_HOST})"
+  else
+    warn "LoadBalancer hostname not assigned yet; check: kubectl get svc hello-lb"
+  fi
+fi
+
+# -----------------------------------------------------------------------------
+#  STEP 6c — OPTIONAL: CURL THE NODE'S OWN IP  (literal "connect to the node")
+#  Only works if nodes have a PUBLIC IP and you open their firewall for your IP.
+# -----------------------------------------------------------------------------
+if [[ "$TEST_NODEPORT_DIRECT" == "true" ]]; then
+  say "Step 6c: curl the node directly on NodePort ${NODE_PORT}"
+  NODE_IP="$(kubectl get nodes \
+    -o jsonpath='{.items[0].status.addresses[?(@.type=="ExternalIP")].address}' 2>/dev/null || true)"
+  if [[ -z "$NODE_IP" ]]; then
+    warn "No node ExternalIP found — your nodes are private. Use 6a or 6b instead."
+  else
+    INSTANCE_ID="$(aws ec2 describe-instances \
+      --filters "Name=tag:eks:nodegroup-name,Values=${NODEGROUP_NAME}" \
+                "Name=instance-state-name,Values=running" \
+      --query 'Reservations[0].Instances[0].InstanceId' --output text --region "$REGION")"
+    NODE_SG="$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
+      --query 'Reservations[0].Instances[0].SecurityGroups[0].GroupId' \
+      --output text --region "$REGION")"
+    MY_IP="$(curl -s https://checkip.amazonaws.com)"
+    ok "Node IP ${NODE_IP}, security group ${NODE_SG}, your IP ${MY_IP}"
+
+    say "Opening the firewall for ${MY_IP}/32 on port ${NODE_PORT} (temporary)"
+    aws ec2 authorize-security-group-ingress --group-id "$NODE_SG" \
+      --protocol tcp --port "$NODE_PORT" --cidr "${MY_IP}/32" --region "$REGION" >/dev/null 2>&1 \
+      || warn "Rule may already exist"
+
+    NODE_RESPONSE="$(curl -s --retry 5 --retry-delay 3 "http://${NODE_IP}:${NODE_PORT}" || true)"
+    [[ "$NODE_RESPONSE" == *"${APP_TEXT}"* ]] \
+      && ok "Direct node curl returned: '${NODE_RESPONSE}'" \
+      || warn "No response from node: '${NODE_RESPONSE}'"
+
+    say "Closing the firewall again (leaving no lingering rule)"
+    aws ec2 revoke-security-group-ingress --group-id "$NODE_SG" \
+      --protocol tcp --port "$NODE_PORT" --cidr "${MY_IP}/32" --region "$REGION" >/dev/null 2>&1 || true
+    ok "Firewall restored"
+  fi
+fi
+
+# -----------------------------------------------------------------------------
+#  BONUS — how to get a SHELL on a node (SSM), then curl from on the box
+# -----------------------------------------------------------------------------
+if [[ "$ENABLE_SSM" == "true" ]]; then
+  INSTANCE_ID="$(aws ec2 describe-instances \
+    --filters "Name=tag:eks:nodegroup-name,Values=${NODEGROUP_NAME}" \
+              "Name=instance-state-name,Values=running" \
+    --query 'Reservations[0].Instances[0].InstanceId' --output text --region "$REGION" 2>/dev/null || true)"
+  if [[ -n "$INSTANCE_ID" && "$INSTANCE_ID" != "None" ]]; then
+    say "To open a shell ON a node and curl locally, run:"
+    echo "    aws ssm start-session --target ${INSTANCE_ID} --region ${REGION}"
+    echo "    # then on the node:  curl http://localhost:${NODE_PORT}"
+    warn "Note: Bottlerocket AMIs have no normal shell (you'll land in the admin container)."
+  fi
+fi
+
+# -----------------------------------------------------------------------------
+#  DONE
+# -----------------------------------------------------------------------------
+say "All done!"
+echo "    Tear everything down with:  ./$(basename "$0") cleanup"
