@@ -1,396 +1,220 @@
+# EKS node group + hello-world test — background guide
 
-# Adding a node group to an existing EKS cluster (AWS CLI)
+This explains, in plain terms, everything the companion script
+(`eks-nodegroup-helloworld.sh`) does and why. Read this once and the script
+will make complete sense.
 
-## The big-picture analogy first
-
-Think of your EKS **cluster** as the brain of a robot factory. The brain knows what should happen, but it has no hands. A **node group** is a set of identical worker robots (EC2 servers) that actually do the work. You already built the brain; now you’re hiring a crew of workers and plugging them in.
-
-A **managed node group** means AWS babysits those workers for you: it groups them in an Auto Scaling group, replaces broken ones, and drains them politely during updates. Every managed node is provisioned as part of an Amazon EC2 Auto Scaling group that’s managed for you by Amazon EKS, and every resource runs within your AWS account. 
-
-## Tools you need installed in your shell
-
-- **AWS CLI v2** — the main tool. Everything below is `aws eks ...`. (If you’re in AWS CloudShell, it’s already there.)
-- **kubectl** — optional but strongly recommended, to check that the workers actually showed up.
-- That’s it. You do **not** need eksctl for this; the question asks for plain AWS CLI.
-
-Check versions:
-
-```bash
-aws --version        # want aws-cli/2.x
-kubectl version --client
-```
-
-## Information you must gather before running anything
-
-You need five pieces of info. Three are non-negotiable; the worker robots literally cannot start without them.
-
-1. **Cluster name** — which brain you’re attaching to.
-1. **Node IAM role ARN** — a permission badge for the workers. The EKS worker node kubelet daemon makes calls to AWS APIs on your behalf, and worker nodes receive permissions for these API calls through an IAM instance profile; before you can launch worker nodes and register them into a cluster, you must create an IAM role for those worker nodes. 
-1. **Subnets** — which parts of your network the workers live in.
-1. **Scaling numbers** — min / max / desired count.
-1. **Instance type + AMI type** — what kind of machine, and what OS image.
-
-### Step 1 — Confirm the cluster exists and note its version
-
-```bash
-aws eks list-clusters --region us-east-1
-
-aws eks describe-cluster \
-  --name MY_CLUSTER \
-  --region us-east-1 \
-  --query 'cluster.{version:version,status:status}'
-```
-
-Why this matters: you can only create a node group for your cluster that is equal to the current Kubernetes version for the cluster.  The workers must speak the same version as the brain.
-
-### Step 2 — Find your subnets
-
-```bash
-aws eks describe-cluster \
-  --name MY_CLUSTER \
-  --region us-east-1 \
-  --query 'cluster.resourcesVpcConfig.subnetIds'
-```
-
-You can reuse these or pick a subset (often the private ones). Note: if you put workers in a **public** subnet, the subnet must have MapPublicIpOnLaunch set to true for the instances to successfully join a cluster.  If you use **private** subnets, you must ensure they can access Amazon ECR for pulling container images, either by connecting a NAT gateway to the route table of the subnet or by adding the AWS PrivateLink VPC endpoints.  Otherwise the workers boot but can’t download anything and silently fail.
-
-### Step 3 — Create the Node IAM role (skip if you already have one)
-
-This is the part people forget. The role needs three managed policies attached.
-
-First, a trust file that says “EC2 servers may wear this badge”:
-
-```bash
-cat > node-trust-policy.json << 'EOF'
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Principal": { "Service": "ec2.amazonaws.com" },
-    "Action": "sts:AssumeRole"
-  }]
-}
-EOF
-```
-
-Create the role and attach the policies:
-
-```bash
-aws iam create-role \
-  --role-name eksNodeRole \
-  --assume-role-policy-document file://node-trust-policy.json
-
-aws iam attach-role-policy --role-name eksNodeRole \
-  --policy-arn arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
-
-aws iam attach-role-policy --role-name eksNodeRole \
-  --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
-
-aws iam attach-role-policy --role-name eksNodeRole \
-  --policy-arn arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
-```
-
-In plain terms: policy one lets the worker talk to EKS, policy two lets it pull container images from ECR, policy three lets it set up pod networking. Grab the ARN for the next step:
-
-```bash
-aws iam get-role --role-name eksNodeRole --query 'Role.Arn' --output text
-```
-
-## The latest AMI type options (this is the part that changed recently)
-
-The `--ami-type` flag picks the operating system image. **This is the most important “latest options” detail**, because the old default is gone: Amazon EKS stopped publishing EKS-optimized Amazon Linux 2 (AL2) AMIs on November 26, 2025; AL2023 and Bottlerocket based AMIs are available for all supported Kubernetes versions including 1.33 and higher.  And any newly created managed node groups in clusters on version 1.30 or newer will automatically default to using AL2023 as the node operating system. 
-
-The current valid values include AL2023_x86_64_STANDARD, AL2023_ARM_64_STANDARD, AL2023_x86_64_NEURON, AL2023_x86_64_NVIDIA, AL2023_ARM_64_NVIDIA, the BOTTLEROCKET family (x86_64, ARM_64, plus FIPS and NVIDIA variants), and the WINDOWS Core/Full 2019–2025 types. 
-
-Quick chooser:
-
-- **General workloads, Intel/AMD** → `AL2023_x86_64_STANDARD`
-- **Cheaper / Graviton ARM** → `AL2023_ARM_64_STANDARD` (match this with ARM instances like `m7g.large`)
-- **GPU workloads** → `AL2023_x86_64_NVIDIA`
-- **Locked-down container-only OS** → `BOTTLEROCKET_x86_64`. Bottlerocket includes only the essential software to run containers, which improves resource usage, reduces security threats, and lowers management overhead. 
-
-One gotcha worth knowing if pods misbehave after launch: AL2023 requires IMDSv2 by default, and for managed node groups not using a launch template, the default metadata hop count is set to 1.  That can break apps relying on node metadata unless you use IRSA or a launch template raising the hop limit.
-
-## Step 4 — Capacity type and scaling
-
-`--capacity-type` is `ON_DEMAND` (stable, full price) or `SPOT` (cheap, can be reclaimed). If you go Spot, it’s recommended to specify multiple values for instanceTypes. 
-
-Scaling note: if you use the Kubernetes Cluster Autoscaler, you shouldn’t change the desiredSize value directly, as this can cause the Cluster Autoscaler to suddenly scale up or scale down. 
-
-## Step 5 — Run the command
-
-Basic on-demand group:
-
-```bash
-aws eks create-nodegroup \
-  --cluster-name MY_CLUSTER \
-  --nodegroup-name MY_NODEGROUP \
-  --node-role arn:aws:iam::111122223333:role/eksNodeRole \
-  --subnets subnet-aaa subnet-bbb subnet-ccc \
-  --scaling-config minSize=2,maxSize=5,desiredSize=2 \
-  --instance-types m6i.large \
-  --ami-type AL2023_x86_64_STANDARD \
-  --capacity-type ON_DEMAND \
-  --disk-size 50 \
-  --region us-east-1
-```
-
-Fuller version with labels, taints, update control, and **node auto-repair** (a newer feature where node auto repair continuously monitors the health of nodes and automatically reacts to detected problems and replaces nodes when possible ):
-
-```bash
-aws eks create-nodegroup \
-  --cluster-name MY_CLUSTER \
-  --nodegroup-name app-spot-arm \
-  --node-role arn:aws:iam::111122223333:role/eksNodeRole \
-  --subnets subnet-aaa subnet-bbb \
-  --scaling-config minSize=2,maxSize=10,desiredSize=3 \
-  --instance-types m7g.large m7g.xlarge \
-  --ami-type AL2023_ARM_64_STANDARD \
-  --capacity-type SPOT \
-  --disk-size 50 \
-  --update-config maxUnavailablePercentage=33 \
-  --node-repair-config enabled=true \
-  --labels role=app,team=payments \
-  --taints 'key=dedicated,value=payments,effect=NO_SCHEDULE' \
-  --tags Owner=platform,Env=prod \
-  --region us-east-1
-```
-
-A couple of flag notes. `--disk-size` default is 20 GiB for Linux and Bottlerocket, and 50 GiB for Windows.  And a critical rule if you ever add `--launch-template`: if you specify launchTemplate, then don’t specify diskSize, and don’t specify SubnetId in your launch template, or the node group deployment will fail.  The launch template and these direct flags are mutually exclusive for the same settings.
-
-Tip for getting the syntax exactly right:
-
-```bash
-aws eks create-nodegroup --generate-cli-skeleton > ng.json
-# edit ng.json, then:
-aws eks create-nodegroup --cli-input-json file://ng.json
-```
-
-## Step 6 — Watch it come up
-
-Creation takes a few minutes. Poll the status:
-
-```bash
-aws eks describe-nodegroup \
-  --cluster-name MY_CLUSTER \
-  --nodegroup-name MY_NODEGROUP \
-  --region us-east-1 \
-  --query 'nodegroup.status'
-```
-
-Wait for `ACTIVE` (it passes through `CREATING` first). Or block until done:
-
-```bash
-aws eks wait nodegroup-active \
-  --cluster-name MY_CLUSTER \
-  --nodegroup-name MY_NODEGROUP \
-  --region us-east-1
-```
-
-Then confirm the workers joined the brain:
-
-```bash
-aws eks update-kubeconfig --name MY_CLUSTER --region us-east-1
-kubectl get nodes -o wide
-```
-
-You should see your new nodes in `Ready` state. If they never appear, it’s almost always (1) subnet has no route to ECR/internet, or (2) the node IAM role is missing one of the three policies.
-
-## One-line mental summary
-
-Gather **cluster name + node role ARN + subnets**, pick an **AL2023 or Bottlerocket AMI type** (AL2 is retired), set **min/max/desired**, run `aws eks create-nodegroup`, then `aws eks wait nodegroup-active` and `kubectl get nodes` to verify.
-
-Want me to turn this into a single ready-to-run script with your actual cluster name and region filled in, or generate the `--cli-input-json` skeleton pre-filled?
-## First, the one fork in the road
-
-Where your nodes live decides how `curl` can reach them:
-
-- If your nodes are in **public** subnets (with public IPs) → you can `curl` the node’s own IP directly (Option A below). This is the most literal “connect to the node instance via curl.”
-- If your nodes are in **private** subnets (the recommended setup I mentioned earlier) → the internet (and AWS CloudShell) can’t see the node’s IP. Use a **LoadBalancer** (Option B) or **port-forward** (Option C) instead.
-
-All three end the same way: `curl` → `hello world`.
-
-## Step 7 — Deploy the hello-world app onto your nodes
-
-Plain terms: a **Deployment** is “please keep N copies of this little program running,” and Kubernetes will place those copies on your worker nodes. We’ll use `http-echo`, a one-trick program whose only job is to reply with whatever text you give it.
-
-Create the file:
-
-```bash
-cat > hello.yaml << 'EOF'
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: hello
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: hello
-  template:
-    metadata:
-      labels:
-        app: hello
-    spec:
-      containers:
-        - name: hello
-          image: hashicorp/http-echo      # you can pin a tag, e.g. :0.2.3
-          args:
-            - "-text=hello world"          # <-- the words curl will get back
-            - "-listen=:5678"              # the port the program listens on
-          ports:
-            - containerPort: 5678
 ---
-apiVersion: v1
-kind: Service
-metadata:
-  name: hello
-spec:
-  type: NodePort                           # change to LoadBalancer for Option B
-  selector:
-    app: hello
-  ports:
-    - port: 80                             # the service's own port
-      targetPort: 5678                     # forwards to the container's port
-      nodePort: 30080                      # the door opened on every node (30000–32767)
-EOF
+
+## 1. The mental model
+
+Think of your EKS **cluster** as the *brain* of a robot factory. The brain
+decides what should happen, but it has no hands. A **node group** is a crew of
+identical *worker robots* (EC2 servers) that do the actual work. You already
+built the brain (the existing cluster); now you're hiring a crew and plugging
+them in.
+
+A **managed node group** means AWS babysits those workers for you: it puts them
+in an EC2 Auto Scaling group, replaces broken ones, and drains them politely
+during updates. Everything still runs inside *your* AWS account, so you pay
+normal EC2 prices for the instances — there's no extra charge for the
+"managed" part itself.
+
+---
+
+## 2. What you must know before starting (the inputs)
+
+Workers literally cannot start without these:
+
+1. **Cluster name** — which brain you're attaching to.
+2. **Node IAM role** — the permission badge the workers wear (see §4).
+3. **Subnets** — which part of the network the workers live in (see §5).
+4. **Scaling numbers** — minimum, maximum, and desired worker count.
+5. **Instance type + AMI type** — the kind of machine, and the OS image (see §3).
+
+The script's CONFIG block at the top is where you fill these in. If you leave
+`SUBNETS` empty, the script borrows the cluster's own subnets automatically.
+
+One hard rule: worker nodes are always created at the **same Kubernetes
+version as the cluster**. You can't mix versions at creation time.
+
+---
+
+## 3. The AMI type — the most important "latest" decision
+
+The `--ami-type` flag picks the operating-system image baked onto each worker.
+This is the part that changed recently and trips people up:
+
+- **Amazon Linux 2 (AL2) is retired.** AWS stopped publishing new EKS-optimized
+  AL2 images in late November 2025. Don't build new node groups on it.
+- **AL2023 is now the default** for clusters on Kubernetes 1.30 or newer. It's
+  the modern Amazon Linux: newer kernel, `cgroup v2`, and IMDSv2-only by default.
+- **Bottlerocket** is a stripped-down, container-only OS — smaller, faster to
+  boot, more secure, and self-updating. It has *no shell and no SSH server* by
+  design (you reach it through SSM's admin container instead).
+
+### Quick chooser
+
+| You want…                         | Use this `--ami-type`            | Pair with instances like |
+|-----------------------------------|----------------------------------|--------------------------|
+| General Intel/AMD workloads       | `AL2023_x86_64_STANDARD`         | `m6i.large`, `c6i.*`     |
+| Cheaper ARM (Graviton)            | `AL2023_ARM_64_STANDARD`         | `m7g.large`, `c7g.*`     |
+| GPU workloads                     | `AL2023_x86_64_NVIDIA`           | `g5.*`, `p4d.*`          |
+| Locked-down container-only OS     | `BOTTLEROCKET_x86_64`            | `m6i.large`, etc.        |
+
+There are also ARM/NVIDIA/FIPS/Neuron variants and Windows images (Core/Full,
+2019 through 2025). Always match the AMI **architecture** to the instance:
+an ARM AMI needs Graviton instances, and vice-versa.
+
+### A gotcha worth remembering
+
+AL2023 enforces **IMDSv2** and, for managed node groups without a launch
+template, sets the metadata "hop count" to 1. That can break pods that fetch
+node metadata or credentials directly. The fixes are to use IAM Roles for
+Service Accounts / EKS Pod Identity, or raise the hop limit via a launch
+template.
+
+---
+
+## 4. The Node IAM role — the "permission badge"
+
+Each worker runs an agent (the kubelet) that calls AWS APIs on your behalf. It
+gets permission through an IAM role attached to the instance. Three managed
+policies are the minimum:
+
+- **AmazonEKSWorkerNodePolicy** — lets the worker talk to the EKS control plane.
+- **AmazonEC2ContainerRegistryReadOnly** — lets it pull container images from ECR.
+- **AmazonEKS_CNI_Policy** — lets it wire up pod networking.
+
+The script adds a fourth, **AmazonSSMManagedInstanceCore**, when `ENABLE_SSM`
+is true, so you can open a shell on a node without SSH keys or open ports.
+
+If workers never show up or sit in `NotReady`, a missing policy here is one of
+the two usual culprits (the other is networking, below).
+
+---
+
+## 5. Networking — public vs private subnets
+
+Workers must reach the registry to download container images.
+
+- **Private subnets (recommended):** the workers have no public address. They
+  reach the internet/ECR through a **NAT gateway**, or you add **ECR
+  PrivateLink endpoints** to the subnet. The upside is they aren't exposed to
+  the internet.
+- **Public subnets:** the subnet must have `MapPublicIpOnLaunch=true`, or the
+  instances won't get an IP and won't join the cluster.
+
+This choice also decides **how you can curl the app** (see §8). From the
+internet (or AWS CloudShell, which sits outside your VPC) you simply cannot
+reach a private node's IP — so for private nodes you use a LoadBalancer or
+port-forward instead.
+
+---
+
+## 6. Capacity type and scaling
+
+- **`ON_DEMAND`** — normal, stable instances at full price.
+- **`SPOT`** — spare capacity at a deep discount that AWS can reclaim with a
+  short warning. If you choose Spot, list **several instance types** so the
+  group can always find capacity.
+
+Scaling caution: if you later add the **Cluster Autoscaler**, don't change
+`desiredSize` by hand — the autoscaler manages it, and manual edits can cause it
+to suddenly scale up or down.
+
+`--node-repair-config enabled=true` turns on **node auto-repair**: EKS watches
+node health and automatically replaces nodes that go bad. (Needs a reasonably
+recent AWS CLI; if `create-nodegroup` complains about the flag, set
+`NODE_REPAIR="false"` in the config.)
+
+---
+
+## 7. The hello-world app — Kubernetes objects explained
+
+- **Deployment** — a standing instruction: "keep N copies of this program
+  running, and replace any that die." We ask for 2 copies.
+- **Pod** — one running copy of the program (one container here).
+- **Service** — a stable "front desk" address. Pods come and go, but the
+  Service's address stays put and forwards traffic to whichever pods are alive.
+- **`http-echo`** — a tiny program whose only job is to reply with the text you
+  give it (`-text="hello world"`). It listens on port 5678.
+
+Service types you'll meet:
+
+- **NodePort** — opens the *same numbered door* (here 30080, in the allowed
+  30000–32767 range) on *every* node. Hit any node on that port and you reach
+  the app.
+- **LoadBalancer** — AWS builds a public load balancer with its own address in
+  front of the nodes. Curl that address from anywhere. (Costs a little while it
+  exists.)
+
+---
+
+## 8. Three ways to curl, and when to use each
+
+| Option | Command shape | Reaches | Works with private nodes? | Touches firewall? |
+|--------|---------------|---------|---------------------------|-------------------|
+| **Port-forward** (6a) | `kubectl port-forward svc/hello 18080:80` then `curl localhost:18080` | a tunnel into the cluster | ✅ yes | ❌ no |
+| **LoadBalancer** (6b) | `curl http://<elb-hostname>` | a public AWS load balancer | ✅ yes | ❌ no |
+| **Direct NodePort** (6c) | `curl http://<node-public-ip>:30080` | the node instance itself | ❌ no (needs public IP) | ✅ yes (opens it for your IP) |
+
+The script always runs **6a** (the guaranteed proof, works everywhere) and
+leaves 6b and 6c behind flags because they touch the network or firewall.
+
+**6c is the most literal "connect to the node instance via curl."** It needs
+the node to have a public IP and its security group opened for your address.
+The script opens that rule for *just your IP* (`/32`), curls, then closes it
+again so nothing is left exposed.
+
+---
+
+## 9. Getting a shell ON a node (the other reading of "connect")
+
+If you meant logging *into* the EC2 box itself, use **SSM Session Manager** (no
+SSH keys, no open ports). The script prints the exact command once `ENABLE_SSM`
+is on:
+
+```
+aws ssm start-session --target <instance-id> --region <region>
+# then, on the node:
+curl http://localhost:30080      # NodePort listens on the node's own interface
 ```
 
-Apply it and confirm the copies actually landed on your new node group:
+Remember: **Bottlerocket has no normal shell** — you'll land in its special
+admin/control container, not a regular Linux prompt. AL2023 gives you a normal
+shell.
+
+---
+
+## 10. Running it
 
 ```bash
-kubectl apply -f hello.yaml
+chmod +x eks-nodegroup-helloworld.sh
 
-kubectl get pods -l app=hello -o wide      # NODE column = which worker it's on
-kubectl get svc hello                      # shows the NodePort mapping
+# edit the CONFIG block (CLUSTER_NAME, REGION, etc.), then:
+./eks-nodegroup-helloworld.sh
+
+# optional public + direct-node tests: set these in CONFIG first
+#   TEST_LOADBALANCER="true"
+#   TEST_NODEPORT_DIRECT="true"
+
+# tear the demo down when finished:
+./eks-nodegroup-helloworld.sh cleanup
 ```
 
-A **Service** is a stable front desk: pods come and go, but the Service’s address stays put and forwards traffic to whichever pods are alive. A **NodePort** Service opens the same numbered door (here `30080`) on *every* node, so hitting any node on that port reaches the app.
+The script is **idempotent**: if the IAM role or node group already exists, it
+reuses them instead of erroring, so it's safe to run more than once.
 
------
+---
 
-## Option A — curl the node instance directly (public nodes)
+## 11. Troubleshooting cheat-sheet
 
-This is the literal “connect to the node instance via curl.” Two things must be true: the node has a public IP, and its firewall (security group) lets your computer in on port `30080`.
-
-**A1. Get a node’s public address:**
-
-```bash
-kubectl get nodes -o wide
-```
-
-Look at the `EXTERNAL-IP` column. If it says `<none>`, your nodes are private → skip to Option B or C.
-
-**A2. Find the security group that node uses.** Grab one instance ID, then read its security group:
-
-```bash
-NODE_INSTANCE=$(aws ec2 describe-instances \
-  --filters "Name=tag:eks:nodegroup-name,Values=MY_NODEGROUP" \
-            "Name=instance-state-name,Values=running" \
-  --query 'Reservations[0].Instances[0].InstanceId' --output text --region us-east-1)
-
-aws ec2 describe-instances --instance-ids $NODE_INSTANCE \
-  --query 'Reservations[].Instances[].SecurityGroups' --region us-east-1
-```
-
-**A3. Open the door for *your* IP only** (not the whole internet):
-
-```bash
-MY_IP=$(curl -s https://checkip.amazonaws.com)
-
-aws ec2 authorize-security-group-ingress \
-  --group-id sg-REPLACE_WITH_NODE_SG \
-  --protocol tcp --port 30080 \
-  --cidr ${MY_IP}/32 \
-  --region us-east-1
-```
-
-The `/32` means “exactly this one address.” A security group is a bouncer; by default it turns away unexpected visitors, so we explicitly let yourself in.
-
-**A4. Knock on the door:**
-
-```bash
-curl http://<NODE_EXTERNAL_IP>:30080
-# -> hello world
-```
-
------
-
-## Option B — curl a public URL (works for private nodes too, most robust)
-
-Change the Service type to `LoadBalancer` (edit `hello.yaml`, set `type: LoadBalancer`, remove the `nodePort` line), then:
-
-```bash
-kubectl apply -f hello.yaml
-kubectl get svc hello -w        # wait until EXTERNAL-IP changes from <pending> to a hostname
-```
-
-AWS builds a load balancer in front of your nodes (takes ~2–3 minutes). Then from anywhere:
-
-```bash
-curl http://<EXTERNAL-IP-hostname>
-# -> hello world
-```
-
-A load balancer is a public receptionist with its own address that quietly passes calls to your private workers, so you never need to touch node IPs or firewalls. (Small note: a load balancer costs a little money while it exists.)
-
------
-
-## Option C — port-forward (always works, no firewall changes)
-
-Best when nodes are private and you just want proof it works from your shell:
-
-```bash
-kubectl port-forward svc/hello 8080:80
-```
-
-Leave that running, open a second shell:
-
-```bash
-curl http://localhost:8080
-# -> hello world
-```
-
-`port-forward` builds a private tunnel from your laptop straight into the cluster through the Kubernetes API, so no node IP or security-group rule is involved.
-
------
-
-## Optional Step 9 — actually log *into* the node and curl from on the box
-
-If by “connect to the node instance” you meant getting a shell **on the EC2 server itself** and curling locally, use SSM Session Manager (no SSH keys, no open ports needed).
-
-One extra permission is required — the node role I set up earlier didn’t include it:
-
-```bash
-aws iam attach-role-policy --role-name eksNodeRole \
-  --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-```
-
-Then start a shell on a node and curl the NodePort from inside it:
-
-```bash
-aws ssm start-session --target $NODE_INSTANCE --region us-east-1
-
-# now you're ON the node:
-curl http://localhost:30080
-# -> hello world
-```
-
-Because a NodePort listens on every node’s own network, `localhost:30080` from on the box reaches the app. One caveat from earlier research: if you chose a **Bottlerocket** AMI, the OS deliberately ships with no shell — Bottlerocket images don’t include an SSH server or a shell  — so you’d land in its special admin/control container rather than a normal Linux prompt. AL2023 gives you a regular shell.
-
-## Cleanup when you’re done
-
-```bash
-kubectl delete -f hello.yaml     # removes the app + service (+ load balancer if used)
-
-# if you opened the firewall in Option A, close it again:
-aws ec2 revoke-security-group-ingress \
-  --group-id sg-REPLACE_WITH_NODE_SG \
-  --protocol tcp --port 30080 --cidr ${MY_IP}/32 --region us-east-1
-```
-
-## Where this leaves you
-
-Full arc: create node group → `kubectl get nodes` shows workers `Ready` → `kubectl apply -f hello.yaml` puts the app on them → expose via NodePort / LoadBalancer / port-forward → `curl` returns `hello world`.
-
-Want me to bundle everything from both turns — node-group creation plus this hello-world test — into one runnable `.sh` script with placeholders (cluster name, region, subnets) marked clearly at the top?
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| Nodes never appear / `NotReady` | Subnet can't reach ECR, or missing node-role policy | Add NAT/PrivateLink; confirm the 3 core policies |
+| `create-nodegroup` fails on `--node-repair-config` | Old AWS CLI | Set `NODE_REPAIR="false"` or upgrade CLI v2 |
+| Pods stuck `Pending` | A taint with no matching toleration, or not enough capacity | Remove the taint, or raise `MAX_SIZE` |
+| Pods crash with exit code 137 (OOMKilled) on a new OS | AL2023/Bottlerocket use `cgroup v2`; memory accounted differently | Raise the pod's memory limit |
+| Can't curl the node IP | Nodes are private, or firewall closed | Use port-forward (6a) or a LoadBalancer (6b) |
+| LoadBalancer curl times out at first | It's still warming up / DNS propagating | Wait 2–5 minutes and retry |
