@@ -1,4 +1,505 @@
-Yes—splitting each phase into its own playbook file orchestrated by a thin controller is recommended for an AMI pipeline. Here's the structure, then the honest tradeoff analysis.
+Below is a complete, production-grade Ansible solution for patching an AL2023 AMI. The flow is: pre-checks → snapshot → patch → verify → bake new AMI → rollback path.
+
+## Directory Structure
+
+```
+ami-patching/
+├── ansible.cfg
+├── inventory/
+│   └── hosts.yml
+├── group_vars/
+│   └── all.yml
+├── playbooks/
+│   ├── patch-ami.yml          # main orchestrator
+│   └── rollback.yml           # rollback playbook
+├── roles/
+│   ├── prechecks/
+│   │   └── tasks/main.yml
+│   ├── snapshot/
+│   │   └── tasks/main.yml
+│   ├── patch/
+│   │   ├── tasks/main.yml
+│   │   └── handlers/main.yml
+│   ├── verify/
+│   │   └── tasks/main.yml
+│   └── bake_ami/
+│       └── tasks/main.yml
+├── logs/                       # patch run logs (gitignored)
+└── requirements.yml            # collections
+```
+
+**Why this layout:** roles isolate each phase so failures are localized and re-runnable. Separating `snapshot` and `bake_ami` lets you roll back at the EBS-snapshot level (fast, granular) *or* the AMI level (full, immutable). Logs are kept out of the repo.
+
+---
+
+## Core Pattern: Launch → Patch → Bake
+
+The correct AL2023 AMI-patching pattern is **not** patching a static AMI in place. You launch a temporary EC2 instance from the source AMI, patch the running instance, verify, snapshot, then create a new AMI from it and terminate the temp instance. This is the AWS-recommended "golden AMI pipeline."
+
+### `requirements.yml`
+```yaml
+collections:
+  - name: amazon.aws
+    version: ">=7.0.0"
+  - name: community.general
+```
+Install: `ansible-galaxy collection install -r requirements.yml`
+
+### `ansible.cfg`
+```ini
+[defaults]
+inventory = inventory/hosts.yml
+roles_path = roles
+host_key_checking = False
+log_path = logs/ansible-run.log
+stdout_callback = yaml
+retry_files_enabled = False
+```
+`host_key_checking=False` because the temp instance is ephemeral with an unknown host key. `log_path` captures every run.
+
+### `group_vars/all.yml`
+```yaml
+# Source AMI — resolved dynamically to "latest AL2023"
+source_ami_ssm_param: "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
+aws_region: us-east-1
+instance_type: t3.medium
+subnet_id: subnet-xxxxxxxx
+security_group_id: sg-xxxxxxxx
+key_name: ami-bakery-key
+iam_instance_profile: ssm-managed-instance     # for SSM patching/no-SSH option
+
+# Tagging policy (internal)
+ami_name_prefix: "al2023-hardened"
+owner_tag: "platform-team"
+compliance_tag: "cis-baseline-1.0"
+
+# Patching policy
+security_only: true            # internal policy: security patches only by default
+reboot_if_required: true
+patch_exclusions: []           # e.g. ["kernel*"] if you pin kernels
+
+# Safety
+create_snapshot: true
+keep_temp_instance_on_failure: true   # leave box up for debugging
+```
+
+---
+
+## Main Playbook: `playbooks/patch-ami.yml`
+
+```yaml
+---
+- name: Resolve source AMI and launch temp instance
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+  tasks:
+    - name: Resolve latest AL2023 AMI from SSM Parameter Store
+      amazon.aws.ssm_parameter_info:
+        name: "{{ source_ami_ssm_param }}"
+        region: "{{ aws_region }}"
+      register: ami_param
+      # WHY: SSM always points to the newest AL2023 AMI — no hardcoding stale IDs.
+
+    - name: Set source AMI fact
+      ansible.builtin.set_fact:
+        source_ami_id: "{{ ami_param.parameters[0].value }}"
+
+    - name: Display resolved AMI
+      ansible.builtin.debug:
+        msg: "Patching from source AMI {{ source_ami_id }}"
+
+    - name: Launch temporary patching instance
+      amazon.aws.ec2_instance:
+        name: "ami-patch-temp-{{ ansible_date_time.epoch | default(lookup('pipe','date +%s')) }}"
+        image_id: "{{ source_ami_id }}"
+        instance_type: "{{ instance_type }}"
+        subnet_id: "{{ subnet_id }}"
+        security_groups: ["{{ security_group_id }}"]
+        key_name: "{{ key_name }}"
+        iam_instance_profile: "{{ iam_instance_profile }}"
+        region: "{{ aws_region }}"
+        wait: true
+        tags:
+          Purpose: ami-patching
+          Owner: "{{ owner_tag }}"
+          Ephemeral: "true"
+      register: temp_instance
+
+    - name: Wait for SSH/boot to be ready
+      ansible.builtin.wait_for:
+        host: "{{ temp_instance.instances[0].private_ip_address }}"
+        port: 22
+        delay: 20
+        timeout: 300
+
+    - name: Add temp instance to in-memory inventory
+      ansible.builtin.add_host:
+        name: "{{ temp_instance.instances[0].private_ip_address }}"
+        groups: patch_target
+        instance_id: "{{ temp_instance.instances[0].instance_id }}"
+        ansible_user: ec2-user
+
+- name: Pre-checks, snapshot, patch, verify
+  hosts: patch_target
+  become: true
+  gather_facts: true
+  vars_files:
+    - ../group_vars/all.yml
+  roles:
+    - prechecks
+    - snapshot
+    - patch
+    - verify
+
+- name: Bake new AMI from patched instance
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+  roles:
+    - bake_ami
+```
+
+---
+
+## Role: `prechecks`
+
+`roles/prechecks/tasks/main.yml`
+```yaml
+---
+- name: Confirm OS is Amazon Linux 2023
+  ansible.builtin.assert:
+    that:
+      - ansible_distribution == "Amazon"
+      - ansible_distribution_major_version == "2023"
+    fail_msg: "Target is not AL2023 — aborting."
+  # WHY: never patch the wrong base OS into a hardened pipeline.
+
+- name: Check available disk space on /
+  ansible.builtin.shell: df --output=avail -BG / | tail -1 | tr -dc '0-9'
+  register: free_gb
+  changed_when: false
+
+- name: Fail if less than 2GB free
+  ansible.builtin.assert:
+    that: free_gb.stdout | int >= 2
+    fail_msg: "Insufficient disk space ({{ free_gb.stdout }}GB) for patching."
+
+- name: Capture pre-patch package state (for diff/audit)
+  ansible.builtin.shell: dnf list installed > /tmp/pre-patch-packages.txt
+  changed_when: false
+
+- name: Capture pre-patch kernel version
+  ansible.builtin.command: uname -r
+  register: pre_kernel
+  changed_when: false
+
+- name: Record start of patch run to log
+  ansible.builtin.lineinfile:
+    path: /var/log/ami-patch.log
+    line: "PATCH START {{ ansible_date_time.iso8601 }} kernel={{ pre_kernel.stdout }}"
+    create: true
+```
+**What/why:** verifies OS identity, ensures disk headroom (dnf transactions fail on full disks), and snapshots package + kernel state so you can prove exactly what changed and diff post-patch.
+
+---
+
+## Role: `snapshot`
+
+`roles/snapshot/tasks/main.yml`
+```yaml
+---
+- name: Find root EBS volume of temp instance
+  amazon.aws.ec2_instance_info:
+    instance_ids: ["{{ hostvars[inventory_hostname]['instance_id'] }}"]
+    region: "{{ aws_region }}"
+  delegate_to: localhost
+  become: false
+  register: inst_info
+  when: create_snapshot | bool
+
+- name: Create EBS snapshot before patching
+  amazon.aws.ec2_snapshot:
+    region: "{{ aws_region }}"
+    volume_id: "{{ inst_info.instances[0].block_device_mappings[0].ebs.volume_id }}"
+    description: "Pre-patch snapshot {{ ansible_date_time.iso8601 }}"
+    snapshot_tags:
+      Purpose: pre-patch-rollback
+      SourceAMI: "{{ source_ami_id }}"
+      Owner: "{{ owner_tag }}"
+    wait: true
+  delegate_to: localhost
+  become: false
+  register: pre_patch_snapshot
+  when: create_snapshot | bool
+
+- name: Show snapshot ID (record this for rollback)
+  ansible.builtin.debug:
+    msg: "ROLLBACK SNAPSHOT: {{ pre_patch_snapshot.snapshot_id }}"
+  when: create_snapshot | bool
+```
+**Why:** the snapshot is your fast rollback point. Even though baking a new AMI keeps the old AMI intact, the snapshot lets you recover the *exact* pre-patch disk state if patching corrupts something mid-transaction. Tasks are `delegate_to: localhost` because AWS API calls run from the controller, not the target.
+
+---
+
+## Role: `patch`
+
+`roles/patch/tasks/main.yml`
+```yaml
+---
+- name: Refresh dnf metadata
+  ansible.builtin.dnf:
+    update_cache: true
+
+- name: Apply security updates only (internal policy default)
+  ansible.builtin.dnf:
+    name: "*"
+    state: latest
+    security: true
+    exclude: "{{ patch_exclusions }}"
+  register: patch_result
+  when: security_only | bool
+  notify: check reboot required
+
+- name: Apply ALL updates (when security_only is false)
+  ansible.builtin.dnf:
+    name: "*"
+    state: latest
+    exclude: "{{ patch_exclusions }}"
+  register: patch_result_full
+  when: not (security_only | bool)
+  notify: check reboot required
+
+- name: Log patched packages
+  ansible.builtin.lineinfile:
+    path: /var/log/ami-patch.log
+    line: "PATCHED {{ (patch_result.results | default(patch_result_full.results) | default([])) | length }} packages at {{ ansible_date_time.iso8601 }}"
+    create: true
+
+- name: Flush handlers to trigger reboot logic now
+  ansible.builtin.meta: flush_handlers
+```
+
+`roles/patch/handlers/main.yml`
+```yaml
+---
+- name: check reboot required
+  ansible.builtin.command: dnf needs-restarting -r
+  register: needs_restart
+  failed_when: false
+  changed_when: false
+  notify: reboot instance
+
+- name: reboot instance
+  ansible.builtin.reboot:
+    reboot_timeout: 300
+  when:
+    - reboot_if_required | bool
+    - needs_restart.rc == 1     # rc=1 means a reboot IS required
+```
+**What/why:** AL2023 uses `dnf`. `security: true` enforces the internal "security-only" policy. `dnf needs-restarting -r` is the canonical AL2023 way to detect whether a kernel/glibc update mandates reboot — return code 1 means reboot required. We reboot only when truly needed, minimizing AMI bake time.
+
+---
+
+## Role: `verify`
+
+`roles/verify/tasks/main.yml`
+```yaml
+---
+- name: Re-gather facts after reboot
+  ansible.builtin.setup:
+
+- name: Confirm no pending security updates remain
+  ansible.builtin.command: dnf updateinfo list security
+  register: remaining_sec
+  changed_when: false
+  failed_when: false
+
+- name: Assert zero outstanding security advisories
+  ansible.builtin.assert:
+    that: "'No security updates' in remaining_sec.stdout or remaining_sec.stdout | trim == ''"
+    fail_msg: "Security updates still pending after patch — investigate."
+    success_msg: "All security updates applied."
+
+- name: Capture post-patch package state
+  ansible.builtin.shell: dnf list installed > /tmp/post-patch-packages.txt
+  changed_when: false
+
+- name: Generate package diff
+  ansible.builtin.shell: diff /tmp/pre-patch-packages.txt /tmp/post-patch-packages.txt || true
+  register: pkg_diff
+  changed_when: false
+
+- name: Write diff to patch log
+  ansible.builtin.copy:
+    content: "{{ pkg_diff.stdout }}"
+    dest: /var/log/ami-patch-diff.log
+
+- name: Verify critical services are running
+  ansible.builtin.service_facts:
+
+- name: Assert sshd is active
+  ansible.builtin.assert:
+    that: ansible_facts.services['sshd.service'].state == "running"
+    fail_msg: "sshd not running post-patch — AMI would be unbootable/unreachable."
+
+- name: Confirm system booted cleanly (no failed units)
+  ansible.builtin.command: systemctl --failed --no-legend
+  register: failed_units
+  changed_when: false
+
+- name: Assert no failed systemd units
+  ansible.builtin.assert:
+    that: failed_units.stdout | trim == ""
+    fail_msg: "Failed systemd units detected: {{ failed_units.stdout }}"
+```
+**Why:** this is the gate before baking. It proves the patch took, the box still boots, sshd works (or you'd lock yourself out of the AMI), and no services broke. The package diff is your audit artifact.
+
+---
+
+## Role: `bake_ami`
+
+`roles/bake_ami/tasks/main.yml`
+```yaml
+---
+- name: Create new patched AMI
+  amazon.aws.ec2_ami:
+    instance_id: "{{ hostvars[groups['patch_target'][0]]['instance_id'] }}"
+    region: "{{ aws_region }}"
+    name: "{{ ami_name_prefix }}-{{ lookup('pipe','date +%Y%m%d-%H%M%S') }}"
+    description: "AL2023 patched from {{ source_ami_id }}"
+    wait: true
+    wait_timeout: 1200
+    tags:
+      Owner: "{{ owner_tag }}"
+      Compliance: "{{ compliance_tag }}"
+      SourceAMI: "{{ source_ami_id }}"
+      PatchDate: "{{ lookup('pipe','date +%Y-%m-%d') }}"
+    reboot: false   # we already rebooted+verified; avoids double reboot
+  register: new_ami
+
+- name: Display new AMI ID
+  ansible.builtin.debug:
+    msg: "NEW PATCHED AMI: {{ new_ami.image_id }}"
+
+- name: Terminate temporary patching instance
+  amazon.aws.ec2_instance:
+    instance_ids: ["{{ hostvars[groups['patch_target'][0]]['instance_id'] }}"]
+    region: "{{ aws_region }}"
+    state: absent
+  when: new_ami.image_id is defined
+  # WHY: only clean up the temp box once the AMI exists successfully.
+```
+**Why `reboot: false`:** the AMI create normally reboots the instance for filesystem consistency, but we already did a controlled reboot + verification, so we skip it to save time. (If you skip the verify-reboot, set `reboot: true` here instead.)
+
+---
+
+## Rollback Playbook: `playbooks/rollback.yml`
+
+```yaml
+---
+- name: Roll back — restore volume from pre-patch snapshot
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+  vars:
+    rollback_snapshot_id: ""    # pass via -e
+    target_instance_id: ""      # the instance to restore, pass via -e
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - rollback_snapshot_id | length > 0
+          - target_instance_id | length > 0
+        fail_msg: "Provide -e rollback_snapshot_id=snap-xxx -e target_instance_id=i-xxx"
+
+    - name: Get instance + AZ details
+      amazon.aws.ec2_instance_info:
+        instance_ids: ["{{ target_instance_id }}"]
+        region: "{{ aws_region }}"
+      register: ri
+
+    - name: Stop instance before volume swap
+      amazon.aws.ec2_instance:
+        instance_ids: ["{{ target_instance_id }}"]
+        region: "{{ aws_region }}"
+        state: stopped
+        wait: true
+
+    - name: Create new volume from pre-patch snapshot
+      amazon.aws.ec2_vol:
+        region: "{{ aws_region }}"
+        snapshot: "{{ rollback_snapshot_id }}"
+        zone: "{{ ri.instances[0].placement.availability_zone }}"
+        volume_type: gp3
+      register: restored_vol
+
+    - name: Detach current (patched) root volume
+      amazon.aws.ec2_vol:
+        region: "{{ aws_region }}"
+        id: "{{ ri.instances[0].block_device_mappings[0].ebs.volume_id }}"
+        instance: None
+
+    - name: Attach restored volume as root
+      amazon.aws.ec2_vol:
+        region: "{{ aws_region }}"
+        id: "{{ restored_vol.volume_id }}"
+        instance: "{{ target_instance_id }}"
+        device_name: /dev/xvda
+
+    - name: Start instance on pre-patch volume
+      amazon.aws.ec2_instance:
+        instance_ids: ["{{ target_instance_id }}"]
+        region: "{{ aws_region }}"
+        state: running
+        wait: true
+
+    - name: Rollback complete
+      ansible.builtin.debug:
+        msg: "Restored {{ target_instance_id }} to snapshot {{ rollback_snapshot_id }}."
+```
+
+---
+
+## How to Run
+
+```bash
+# 1. Install collections
+ansible-galaxy collection install -r requirements.yml
+
+# 2. Dry-run check mode first (validates logic, no changes to packages)
+ansible-playbook playbooks/patch-ami.yml --check
+
+# 3. Real run
+ansible-playbook playbooks/patch-ami.yml
+
+# 4. Roll back if verification later fails downstream
+ansible-playbook playbooks/rollback.yml \
+  -e rollback_snapshot_id=snap-0abc123 \
+  -e target_instance_id=i-0def456
+```
+
+## How to Verify After
+
+1. **AMI exists & tagged:** `aws ec2 describe-images --owners self --filters "Name=tag:PatchDate,Values=$(date +%Y-%m-%d)"`
+2. **Launch a smoke-test instance** from the new AMI ID, SSH in, and run `dnf updateinfo list security` — should report none pending.
+3. **Check logs** on the temp instance (captured before termination) or pull `/var/log/ami-patch-diff.log` to audit exactly which packages changed.
+4. **Kernel check:** `uname -r` on the new instance vs the `pre_kernel` value logged at start — confirms kernel update applied if one was pending.
+
+## Rollback Decision Tree
+
+- **Patch failed mid-run** → temp instance left up (`keep_temp_instance_on_failure: true`); SSH in, inspect `/var/log/ami-patch.log`, fix, re-run. No AMI was created, so nothing downstream is affected.
+- **AMI baked but smoke test fails** → just don't promote the new AMI ID; the previous AMI is untouched and still valid. Delete the bad AMI: `aws ec2 deregister-image --image-id ami-xxx`.
+- **Need exact disk-level restore** → run `rollback.yml` with the snapshot ID printed during the snapshot phase.
+
+## Key Best Practices Baked In
+
+Immutable golden-AMI pattern (patch a temp instance, never mutate a running fleet); dynamic latest-AMI resolution via SSM so you never hardcode stale IDs; security-only patching by default with an override switch; reboot only when `needs-restarting -r` demands it; mandatory pre-flight assertions and post-patch verification gates so an unbootable or sshd-broken image never gets baked; full package diffing and logging for compliance audit; and three independent rollback layers (re-run, discard AMI, snapshot restore).
+
+One caveat: fill in the real `subnet_id`, `security_group_id`, `key_name`, and `iam_instance_profile` in `group_vars/all.yml` before running, and confirm the SSM parameter path matches your architecture (use the `arm64` variant if you bake Graviton AMIs).
 
 ## Restructured Layout
 
