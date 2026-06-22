@@ -1,8 +1,3 @@
-I’ll research the latest AWS EKS node group options before walking you through this.
-
-Let me check the newest AMI types and the auto-repair feature, since those are the most current pieces.
-
-I have what I need. Here’s the complete walkthrough.
 
 # Adding a node group to an existing EKS cluster (AWS CLI)
 
