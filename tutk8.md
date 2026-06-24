@@ -11,7 +11,518 @@
 
 **Kubernetes Enterprise Training — Stateful Workloads (Kafka, Keycloak, OpenSearch, NiFi)**
 
+# CLI Cheat Sheet — Kafka on AWS EKS
+
+**Kubernetes Enterprise Training — Stateful Workloads**
+
+A task-organized reference for every command you'll use to **build, operate, and maintain** a Kafka cluster on EKS. Grouped by what you're trying to *do*.
+
+> **Conventions used below**
+> - Replace anything in `<angle-brackets>` with your real value.
+> - `$NS` = namespace (e.g. `kafka`), `$REGION` = AWS region (e.g. `us-east-1`), `$CLUSTER` = cluster name (e.g. `enterprise-training`).
+> - Set them once per shell: `export NS=kafka REGION=us-east-1 CLUSTER=enterprise-training`
+> - Flags drift between tool versions — if a flag is rejected, check `--help` or the official docs for your version.
+> - Quick alias to save typing: `alias k=kubectl`
+
 ---
+
+## 0. Quick Setup & Auth
+
+```bash
+# --- AWS CLI ---
+aws configure                              # set access key, secret, default region, output
+aws sts get-caller-identity                # confirm WHO you are authenticated as
+aws configure list-profiles                # list saved profiles
+export AWS_PROFILE=<profile-name>          # switch profile for this shell
+
+# --- Connect kubectl to your EKS cluster ---
+aws eks update-kubeconfig --name $CLUSTER --region $REGION
+kubectl config current-context             # confirm you're pointed at the right cluster
+
+# --- Tool versions (sanity check) ---
+aws --version
+eksctl version
+kubectl version --client
+helm version
+```
+
+---
+
+## 1. Cluster Lifecycle (Create / Inspect / Delete)
+
+### With eksctl (declarative, recommended)
+
+```bash
+# Create from a config file (see Lesson 1 for the YAML)
+eksctl create cluster -f eks-cluster.yaml
+
+# Create a quick cluster without a file
+eksctl create cluster --name $CLUSTER --region $REGION --nodes 3 --node-type m5.xlarge
+
+# Inspect
+eksctl get cluster --region $REGION
+eksctl get nodegroup --cluster $CLUSTER --region $REGION
+
+# Scale a node group
+eksctl scale nodegroup --cluster $CLUSTER --name stateful --nodes 5 --region $REGION
+
+# Delete the whole cluster (TEARDOWN — stops billing)
+eksctl delete cluster -f eks-cluster.yaml
+# or
+eksctl delete cluster --name $CLUSTER --region $REGION
+```
+
+### With AWS CLI (lower-level inspection)
+
+```bash
+aws eks list-clusters --region $REGION
+aws eks describe-cluster --name $CLUSTER --region $REGION
+aws eks describe-cluster --name $CLUSTER --region $REGION \
+  --query 'cluster.status'                 # ACTIVE / CREATING / DELETING
+aws eks list-nodegroups --cluster-name $CLUSTER --region $REGION
+aws eks describe-nodegroup --cluster-name $CLUSTER --nodegroup-name stateful --region $REGION
+aws eks list-addons --cluster-name $CLUSTER --region $REGION
+```
+
+---
+
+## 2. Nodes & Compute (EC2 / EKS Nodes)
+
+### View nodes (kubectl)
+
+```bash
+kubectl get nodes                          # list nodes + status
+kubectl get nodes -o wide                  # + internal IP, OS, version
+kubectl get nodes --show-labels            # see all labels (incl. AZ + your node-pool labels)
+kubectl describe node <node-name>          # full detail: capacity, taints, pods, events
+kubectl top nodes                          # live CPU / memory usage (needs metrics-server)
+```
+
+### Which nodes are in which AZ (critical for Kafka rack awareness)
+
+```bash
+kubectl get nodes \
+  -L topology.kubernetes.io/zone           # shows the AZ column for each node
+kubectl get nodes -L workload-type         # shows your system/stateful pool labels
+```
+
+### Taints, labels, cordon/drain (node maintenance)
+
+```bash
+# Label a node (e.g. tag it for Kafka)
+kubectl label node <node-name> workload-type=stateful
+
+# Taint a node so only tolerating pods land there
+kubectl taint nodes <node-name> workload-type=stateful:NoSchedule
+# Remove that taint (note trailing minus)
+kubectl taint nodes <node-name> workload-type=stateful:NoSchedule-
+
+# Safely take a node out of service for maintenance
+kubectl cordon <node-name>                 # stop NEW pods scheduling here
+kubectl drain <node-name> \
+  --ignore-daemonsets --delete-emptydir-data   # evict existing pods
+kubectl uncordon <node-name>               # return node to service
+```
+
+### Underlying EC2 (AWS CLI)
+
+```bash
+aws ec2 describe-instances --region $REGION \
+  --filters "Name=tag:eks:cluster-name,Values=$CLUSTER" \
+  --query 'Reservations[].Instances[].[InstanceId,InstanceType,Placement.AvailabilityZone,State.Name]' \
+  --output table
+aws ec2 describe-availability-zones --region $REGION --output table
+```
+
+---
+
+## 3. Namespaces
+
+```bash
+kubectl get namespaces
+kubectl create namespace $NS
+kubectl delete namespace $NS               # deletes EVERYTHING inside it
+kubectl config set-context --current --namespace=$NS   # default ns for this context
+```
+
+---
+
+## 4. Storage (StorageClass / PVC / PV / EBS)
+
+Kafka lives or dies by storage. These are your day-to-day storage commands.
+
+### kubectl
+
+```bash
+kubectl get storageclass                   # list available StorageClasses
+kubectl get sc                             # short form
+kubectl describe sc <storageclass-name>    # see provisioner + parameters (e.g. gp3, io2)
+
+kubectl get pvc -n $NS                      # PersistentVolumeClaims (what pods request)
+kubectl get pv                              # PersistentVolumes (actual disks), cluster-wide
+kubectl describe pvc <pvc-name> -n $NS      # status, capacity, bound volume, events
+
+# Expand a volume (only works if StorageClass allowVolumeExpansion: true)
+kubectl edit pvc <pvc-name> -n $NS          # increase spec.resources.requests.storage
+kubectl patch pvc <pvc-name> -n $NS \
+  -p '{"spec":{"resources":{"requests":{"storage":"500Gi"}}}}'
+```
+
+### Example gp3 StorageClass (apply with `kubectl apply -f`)
+
+```bash
+cat <<'EOF' | kubectl apply -f -
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: kafka-gp3
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp3
+  iops: "3000"
+  throughput: "250"
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+reclaimPolicy: Retain
+EOF
+```
+
+### Underlying EBS volumes (AWS CLI)
+
+```bash
+aws ec2 describe-volumes --region $REGION \
+  --filters "Name=tag:kubernetes.io/cluster/$CLUSTER,Values=owned" \
+  --query 'Volumes[].[VolumeId,Size,VolumeType,Iops,Throughput,State]' --output table
+aws ec2 describe-snapshots --owner-ids self --region $REGION --output table
+```
+
+---
+
+## 5. Workloads — Pods, StatefulSets, Deployments
+
+### Viewing
+
+```bash
+kubectl get pods -n $NS                     # list pods
+kubectl get pods -n $NS -o wide             # + node + IP (see which node each broker is on)
+kubectl get pods -n $NS -w                  # WATCH live status changes
+kubectl get statefulset -n $NS              # Kafka brokers run as a StatefulSet
+kubectl get sts,deploy,svc,pvc -n $NS       # everything Kafka-related at once
+kubectl describe pod <pod-name> -n $NS      # full detail; EVENTS at the bottom are gold
+```
+
+### Apply / delete manifests
+
+```bash
+kubectl apply -f <file-or-dir>/             # create or update from YAML
+kubectl delete -f <file>.yaml               # delete what that file defines
+kubectl apply -k <kustomize-dir>/           # apply a kustomize overlay
+```
+
+### Restart / scale a StatefulSet (rolling, ordered)
+
+```bash
+kubectl rollout restart statefulset/<name> -n $NS    # safe rolling restart
+kubectl rollout status statefulset/<name> -n $NS     # watch the rollout progress
+kubectl scale statefulset/<name> -n $NS --replicas=5 # add brokers (then rebalance!)
+```
+
+---
+
+## 6. Logs, Exec & Debugging
+
+```bash
+# Logs
+kubectl logs <pod-name> -n $NS                       # current logs
+kubectl logs <pod-name> -n $NS --tail=100            # last 100 lines
+kubectl logs <pod-name> -n $NS -f                    # follow (stream) live
+kubectl logs <pod-name> -n $NS --previous            # logs from the CRASHED container
+kubectl logs -l app=kafka -n $NS --tail=50           # logs from all pods with a label
+
+# Shell into a running pod
+kubectl exec -it <pod-name> -n $NS -- bash           # interactive shell
+kubectl exec <pod-name> -n $NS -- <command>          # run one command
+
+# Copy files in/out
+kubectl cp $NS/<pod-name>:/path/in/pod ./local-file
+kubectl cp ./local-file $NS/<pod-name>:/path/in/pod
+
+# Reach a service from your laptop (no public exposure needed)
+kubectl port-forward -n $NS svc/<service-name> 9092:9092
+
+# Temporary debug pod (handy for testing Kafka connectivity)
+kubectl run tmp-shell --rm -it --image=busybox -n $NS -- sh
+```
+
+---
+
+## 7. Services & Networking
+
+```bash
+kubectl get svc -n $NS                      # services + cluster IPs + ports
+kubectl get svc -n $NS -o wide
+kubectl describe svc <service-name> -n $NS  # endpoints, selectors, ports
+kubectl get endpoints -n $NS                # which pods back each service
+kubectl get ingress -n $NS                  # ingress rules (external access)
+kubectl get networkpolicy -n $NS            # network policies in effect
+```
+
+### AWS load balancers (when a Service is type LoadBalancer)
+
+```bash
+aws elbv2 describe-load-balancers --region $REGION --output table
+aws elbv2 describe-target-groups --region $REGION --output table
+```
+
+---
+
+## 8. Config & Secrets
+
+```bash
+# ConfigMaps
+kubectl get configmap -n $NS
+kubectl describe configmap <name> -n $NS
+kubectl create configmap <name> -n $NS --from-file=./config.properties
+
+# Secrets
+kubectl get secret -n $NS
+kubectl create secret generic <name> -n $NS \
+  --from-literal=password='<value>'
+# Decode a secret value (base64)
+kubectl get secret <name> -n $NS -o jsonpath='{.data.password}' | base64 -d
+```
+
+---
+
+## 9. RBAC & Permissions
+
+```bash
+kubectl get serviceaccounts -n $NS
+kubectl get roles,rolebindings -n $NS                 # namespace-scoped
+kubectl get clusterroles,clusterrolebindings          # cluster-wide
+kubectl describe clusterrole <name>
+
+# "Can I do X?" — test permissions
+kubectl auth can-i create pods -n $NS
+kubectl auth can-i '*' '*' --all-namespaces            # am I a full admin?
+kubectl auth can-i delete statefulset -n $NS --as=<user>   # check as another user
+```
+
+### IAM / OIDC / IRSA (AWS side — lets pods assume AWS roles)
+
+```bash
+# Associate an OIDC provider with the cluster (one-time, for IRSA)
+eksctl utils associate-iam-oidc-provider --cluster $CLUSTER --region $REGION --approve
+
+# Create a service account bound to an IAM role
+eksctl create iamserviceaccount \
+  --cluster $CLUSTER --region $REGION \
+  --namespace $NS --name <sa-name> \
+  --attach-policy-arn arn:aws:iam::aws:policy/<PolicyName> \
+  --approve
+
+aws iam list-roles --query 'Roles[].RoleName' --output table
+```
+
+---
+
+## 10. Container Registry (ECR)
+
+```bash
+aws ecr describe-repositories --region $REGION --output table
+aws ecr create-repository --repository-name <name> --region $REGION
+
+# Log Docker in to ECR (for pushing custom images)
+aws ecr get-login-password --region $REGION | \
+  docker login --username AWS --password-stdin \
+  <account-id>.dkr.ecr.$REGION.amazonaws.com
+```
+
+---
+
+## 11. Helm (used to install operators like Strimzi)
+
+```bash
+helm repo add strimzi https://strimzi.io/charts/
+helm repo update
+helm search repo strimzi
+helm install strimzi-operator strimzi/strimzi-kafka-operator -n $NS --create-namespace
+helm list -n $NS                            # what's installed
+helm upgrade strimzi-operator strimzi/strimzi-kafka-operator -n $NS
+helm uninstall strimzi-operator -n $NS
+helm rollback strimzi-operator <revision> -n $NS
+```
+
+---
+
+## 12. Kafka-Specific Operations (Strimzi)
+
+With Strimzi, Kafka is managed through Kubernetes **custom resources**, *and* you run Kafka's own CLI tools by `exec`-ing into a broker pod.
+
+### Manage the cluster via custom resources
+
+```bash
+kubectl get kafka -n $NS                    # the Kafka cluster CR
+kubectl describe kafka <cluster-name> -n $NS
+kubectl get kafkatopic -n $NS               # topics (managed declaratively)
+kubectl get kafkauser -n $NS                # users (auth)
+kubectl get kafkanodepool -n $NS            # broker/controller node pools (KRaft)
+kubectl get pods -n $NS -l strimzi.io/cluster=<cluster-name>
+```
+
+### Create a topic declaratively (best practice)
+
+```bash
+cat <<'EOF' | kubectl apply -f -
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: orders
+  labels:
+    strimzi.io/cluster: my-kafka
+spec:
+  partitions: 12          # more "lanes" — see Lesson 6A
+  replicas: 3             # survive an AZ outage
+  config:
+    retention.ms: "604800000"   # 7 days
+EOF
+```
+
+### Run Kafka's built-in CLI tools (inside a broker pod)
+
+```bash
+# Set a reusable variable for the broker pod + bootstrap address
+export KPOD=<cluster-name>-kafka-0
+export BOOT=<cluster-name>-kafka-bootstrap:9092
+
+# List topics
+kubectl exec -it $KPOD -n $NS -- \
+  bin/kafka-topics.sh --bootstrap-server $BOOT --list
+
+# Describe a topic (partitions, leaders, replicas, in-sync replicas)
+kubectl exec -it $KPOD -n $NS -- \
+  bin/kafka-topics.sh --bootstrap-server $BOOT --describe --topic orders
+
+# Create a topic imperatively (prefer the declarative CR above for prod)
+kubectl exec -it $KPOD -n $NS -- \
+  bin/kafka-topics.sh --bootstrap-server $BOOT \
+  --create --topic test --partitions 6 --replication-factor 3
+
+# List consumer groups
+kubectl exec -it $KPOD -n $NS -- \
+  bin/kafka-consumer-groups.sh --bootstrap-server $BOOT --list
+
+# *** CHECK CONSUMER LAG *** (the #1 health metric — see Lesson 6A)
+kubectl exec -it $KPOD -n $NS -- \
+  bin/kafka-consumer-groups.sh --bootstrap-server $BOOT \
+  --describe --group <group-name>
+# LAG column shows how far behind each consumer is.
+
+# Quick produce / consume test
+kubectl exec -it $KPOD -n $NS -- \
+  bin/kafka-console-producer.sh --bootstrap-server $BOOT --topic test
+kubectl exec -it $KPOD -n $NS -- \
+  bin/kafka-console-consumer.sh --bootstrap-server $BOOT --topic test --from-beginning
+```
+
+### Rebalancing after adding brokers (Cruise Control)
+
+```bash
+# Strimzi exposes rebalancing as a custom resource
+kubectl get kafkarebalance -n $NS
+kubectl describe kafkarebalance <name> -n $NS
+# Approve a proposed rebalance:
+kubectl annotate kafkarebalance <name> -n $NS \
+  strimzi.io/rebalance=approve
+```
+
+---
+
+## 13. Monitoring & Health Checks
+
+```bash
+# Live resource usage
+kubectl top nodes
+kubectl top pods -n $NS                      # spot a broker hogging CPU/RAM
+
+# Cluster-wide health snapshot
+kubectl get componentstatuses               # control-plane component health
+kubectl get pods -A | grep -v Running        # anything NOT running, all namespaces
+kubectl get events -n $NS --sort-by=.lastTimestamp   # recent events, newest last
+
+# Prometheus / Grafana access (if installed in cluster)
+kubectl port-forward -n monitoring svc/grafana 3000:80
+kubectl port-forward -n monitoring svc/prometheus-server 9090:80
+```
+
+---
+
+## 14. Troubleshooting Quick Map
+
+| Symptom | First command to run |
+|---|---|
+| Pod stuck `Pending` | `kubectl describe pod <pod> -n $NS` → read **Events** (usually storage, resources, or taints) |
+| Pod `CrashLoopBackOff` | `kubectl logs <pod> -n $NS --previous` |
+| Broker won't get storage | `kubectl get pvc -n $NS` and `kubectl describe pvc <pvc> -n $NS` |
+| Can't reach Kafka | `kubectl get svc,endpoints -n $NS`; test with `port-forward` |
+| Consumers falling behind | `kafka-consumer-groups.sh --describe --group <g>` → check **LAG** |
+| Node `NotReady` | `kubectl describe node <node>`; check CNI pods in `kube-system` |
+| `kubectl` won't connect | `kubectl config current-context`; re-run `aws eks update-kubeconfig` |
+| Cross-AZ costs spiking | confirm rack awareness: `kubectl get nodes -L topology.kubernetes.io/zone` |
+| EKS create/update failed | `aws cloudformation describe-stack-events` for the failing stack |
+
+---
+
+## 15. Cleanup / Teardown (stop the billing)
+
+```bash
+# Remove a workload
+kubectl delete -f kafka-cluster.yaml
+kubectl delete namespace $NS                 # nukes everything in the namespace
+
+# Remove the operator
+helm uninstall strimzi-operator -n $NS
+
+# Delete the whole EKS cluster
+eksctl delete cluster --name $CLUSTER --region $REGION
+
+# Verify nothing is left billing you
+aws eks list-clusters --region $REGION
+aws ec2 describe-volumes --region $REGION \
+  --filters "Name=tag:kubernetes.io/cluster/$CLUSTER,Values=owned" --output table
+aws elbv2 describe-load-balancers --region $REGION --output table
+aws cloudformation list-stacks --region $REGION \
+  --query "StackSummaries[?contains(StackName,'$CLUSTER')].[StackName,StackStatus]" --output table
+```
+
+> **Teardown rule of thumb:** after deleting a cluster, always confirm there are no leftover **EBS volumes**, **load balancers**, or **CloudFormation stacks** — these keep charging you even after the nodes are gone.
+
+---
+
+## Appendix — The 15 Commands You'll Use Most
+
+```bash
+kubectl get pods -n $NS -o wide                          # what's running, where
+kubectl describe pod <pod> -n $NS                        # why is it unhappy
+kubectl logs <pod> -n $NS -f                             # what is it saying
+kubectl exec -it <pod> -n $NS -- bash                    # get inside it
+kubectl get nodes -L topology.kubernetes.io/zone         # nodes by AZ
+kubectl top pods -n $NS                                  # resource usage
+kubectl get pvc -n $NS                                   # storage status
+kubectl rollout restart statefulset/<name> -n $NS        # safe restart
+kubectl rollout status statefulset/<name> -n $NS         # watch it
+kubectl port-forward -n $NS svc/<svc> 9092:9092          # reach it locally
+kubectl get events -n $NS --sort-by=.lastTimestamp       # recent events
+kubectl apply -f <file>                                  # create/update
+aws eks update-kubeconfig --name $CLUSTER --region $REGION  # (re)connect
+aws sts get-caller-identity                              # who am I
+eksctl get nodegroup --cluster $CLUSTER --region $REGION # node group status
+```
+
+---
+
+*End of cheat sheet. Companion to Lesson 1 (cluster setup) and Lesson 6A (Kafka on EKS).*
+
 
 ## About This Lesson
 
