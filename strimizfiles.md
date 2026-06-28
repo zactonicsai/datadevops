@@ -1,6 +1,36 @@
 # Setting Up an EKS Node Group and the Strimzi Cluster Operator
 ### A step-by-step guide, explained simply
 
+**True airgap Strimzi (no internet, no helm, bucket files only)**
+
+**Bucket must contain (prepared offline):**
+- Edited Strimzi release (images mirrored to your ECR, all `quay.io/strimzi` replaced + `STRIMZI_KAFKA_IMAGES` / `STRIMZI_*_IMAGES` env vars updated in operator Deployment)
+- Internal-only Kafka CR (no external listener)
+- Tarball or `load-strimzi.sh` + YAMLs
+
+**In airgap (aws cli + kubectl only):**
+
+```bash
+aws s3 cp s3://your-bucket/strimzi-airgap.tar.gz /tmp/
+tar -xzf /tmp/strimzi-airgap.tar.gz -C /tmp/strimzi
+
+kubectl create namespace kafka
+
+kubectl apply -f /tmp/strimzi/install/cluster-operator/ -n kafka
+
+kubectl apply -f /tmp/strimzi/examples/kafka/kafka-single-node.yaml -n kafka   # or your edited internal CR
+
+kubectl wait kafka/my-cluster --for=condition=Ready -n kafka --timeout=300s
+```
+
+**Pre-reqs (EKS private airgap):**
+- S3 + ECR VPC endpoints enabled
+- Node IAM role has ECR pull perms for strimzi/* repos
+- If image pull fails: create `docker-registry` secret with `aws ecr get-login-password` and reference it in operator Deployment + Kafka CR pod templates
+
+All files local from bucket. No external URLs or updates.
+
+
 ---
 
 ## The Big Rule for This Whole Guide (Read This First)
