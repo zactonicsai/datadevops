@@ -1,3 +1,166 @@
+# IAM: least-privilege role + permissions boundary
+
+This directory creates the locked-down identity the pipeline assumes. It is
+applied **once, by an administrator** (someone who already has IAM rights) —
+it is *not* run by the pipeline, because it is what *creates* the pipeline's
+role in the first place.
+
+## What you get
+
+| Resource | File | Purpose |
+|---|---|---|
+| IAM role `ami-baseline-pipeline` | `role.tf` | The identity the GitLab pipeline assumes via OIDC. |
+| Inline permission policy | `role.tf` | Grants **exactly** the EC2/SSM actions the build + verify need, tag-scoped. |
+| Permissions boundary policy | `boundary.tf` | A hard ceiling: the role can never exceed it, no matter how its policy changes. |
+
+## The two-layer model
+
+![IAM model](../docs/iam-model-diagram.svg)
+
+A principal's **effective permissions = its permission policy AND its
+permissions boundary**. Both must allow an action; either can deny it.
+
+```
+              ┌───────────────────────────┐
+              │   Permissions BOUNDARY     │  ← max ceiling (boundary.tf)
+              │  EC2+SSM build/verify only │
+              │  region-locked; hard denies│
+              │  on IAM, VPC, billing, …   │
+              └─────────────┬─────────────┘
+                            │  AND
+              ┌─────────────┴─────────────┐
+              │   Permission POLICY        │  ← exact grant (role.tf)
+              │  tag-scoped to Pipeline=   │
+              │  ami-baseline resources    │
+              └───────────────────────────┘
+                            =
+                  what the role can do
+```
+
+Why both? The **policy** is the precise day-to-day grant. The **boundary**
+guarantees that even a future mistake — someone widens the policy, or attaches
+an admin policy — can never let this principal touch IAM, networking, or
+anything outside building an AMI in one region. Defense in depth.
+
+## How "can't change anything unrelated to the AMI" is enforced
+
+Three independent mechanisms, all in play at once:
+
+1. **Tag-on-create, locked.** Everything the pipeline creates — the Packer build
+   instance, its volume, Packer's temporary security group and key pair, the
+   test instance, the test security group — is tagged `Pipeline=ami-baseline`
+   at creation. The role's `RunInstances` grant *requires* that tag
+   (`aws:RequestTag/Pipeline`), and `CreateTags` is allowed **only** at
+   create-time (`ec2:CreateAction`), so the role **cannot retag existing
+   resources** to sneak them into scope.
+
+2. **Tag-scoped mutation/deletion.** Every destructive or modifying action —
+   `TerminateInstances`, `DeregisterImage`, `DeleteSnapshot`, `DeleteVolume`,
+   `DeleteSecurityGroup`, `DeleteKeyPair`, `Modify*Attribute` — is conditioned on
+   `ec2:ResourceTag/Pipeline = ami-baseline`. The role literally cannot delete or
+   change a resource it didn't create. An AMI, instance, or volume belonging to
+   anything else is invisible to these verbs.
+
+3. **Hard denies for whole categories.** Both the boundary and an in-role `Deny`
+   block forbid VPC/subnet/route-table/gateway/EIP/transit-gateway changes, all
+   IAM, billing, and any action on a resource tagged `Environment=prod`/
+   `production`. An explicit `Deny` always beats any `Allow`.
+
+Add the region lock (`aws:RequestedRegion`) and the result is: **the pipeline can
+build, snapshot, test, and clean up its own AMIs in one region, and can do
+nothing else.**
+
+## Setup (one time, as an admin)
+
+### 1. Create the GitLab OIDC provider in IAM
+
+If you don't already have it (gitlab.com example; use your host for self-managed):
+
+```bash
+aws iam create-open-id-connect-provider \
+  --url "https://gitlab.com" \
+  --client-id-list "sts.amazonaws.com" \
+  --thumbprint-list "<current gitlab.com thumbprint>"
+```
+
+(Modern AWS verifies the OIDC TLS cert against trusted CAs, but the API still
+requires a thumbprint value.) Note the resulting provider ARN.
+
+### 2. Apply this module
+
+```bash
+cd iam
+cp terraform.tfvars.example terraform.tfvars
+# edit: account_id, region, the OIDC provider ARN, and your project's sub pattern
+terraform init
+terraform apply
+```
+
+### 3. Wire the role into the pipeline
+
+Take the `role_arn` output and set it as a **protected** CI/CD variable in your
+project:
+
+```
+AWS_ROLE_ARN = arn:aws:iam::<acct>:role/ami-baseline-pipeline
+```
+
+The pipeline's `.aws-auth` block already exchanges its OIDC token for this role.
+
+### 4. (Recommended) Make the boundary mandatory for everyone
+
+So nobody can create a *new* role that escapes boundaries, attach a governance
+policy elsewhere requiring that any `iam:CreateRole`/`PutRolePolicy` includes
+`--permissions-boundary`. That is an account/org-level control outside this
+module, but this boundary policy is designed to be the one you reference.
+
+## The `allowed_oidc_subjects` lock
+
+The role's trust policy only lets your **specific project and branch(es)** assume
+it. The `sub` claim looks like:
+
+```
+project_path:my-group/ami-baseline-pipeline:ref_type:branch:ref:main
+```
+
+Set `allowed_oidc_subjects` to match exactly what should be allowed. Examples:
+
+- One branch: `project_path:my-group/ami-baseline-pipeline:ref_type:branch:ref:main`
+- Any branch in the project (looser): `project_path:my-group/ami-baseline-pipeline:*`
+- Protected tags only: `project_path:my-group/ami-baseline-pipeline:ref_type:tag:ref:v*`
+
+This prevents a fork or another repo in your group from assuming the role.
+
+## Verifying the policy before you trust it
+
+Use the IAM policy simulator or `aws iam simulate-custom-policy` to confirm, for
+example, that the role **can** `TerminateInstances` on a `Pipeline=ami-baseline`
+instance but **cannot** on an untagged one:
+
+```bash
+# should be allowed
+aws iam simulate-custom-policy \
+  --policy-input-list file://<(terraform show -json | jq -r '...') \
+  --action-names ec2:TerminateInstances \
+  --resource-arns arn:aws:ec2:us-east-1:ACCT:instance/i-OURS \
+  --resource-policy ... # with tag context Pipeline=ami-baseline
+
+# should be denied: same action on an instance tagged Environment=production
+```
+
+(The simplest check is functional: run the pipeline; if a stage is denied, the
+job log shows the exact action/resource AWS refused, which tells you which
+statement to adjust.)
+
+## Tightening further (optional)
+
+- **Pin instance types** to keep cost bounded: add a `Deny` on `ec2:RunInstances`
+  unless `ec2:InstanceType` is in an allow-list.
+- **Restrict the source AMI** to Amazon-owned only: add a condition on
+  `ec2:Owner` for the image resource in `RunInstancesReferenced`.
+- **Lock the subnet/VPC** the build runs in by replacing the `subnet/*` wildcard
+  with specific subnet ARNs.
+
 # AMI Baseline Build Pipeline
 
 A complete, runnable GitLab CI/CD pipeline that:
