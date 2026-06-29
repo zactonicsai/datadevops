@@ -545,6 +545,151 @@ adds partitions if your file asks for more).
 
 ---
 
+## 11b. Example F — Strimzi: Kafka *on* Kubernetes
+
+**Goal:** instead of pointing at an existing broker (Example E), **run a real
+3-node Kafka cluster inside your EKS cluster**, managed declaratively by the
+**Strimzi operator**. You'll install the operator, deploy a `Kafka` custom
+resource, declare topics as `KafkaTopic` resources, and produce/consume a
+hello-world message end to end.
+
+### When to use this vs Example E
+
+These are two different answers to "how do I do Kafka":
+
+| | Example E (`70-kafka.yml`) | Example F — Strimzi (`75-strimzi.yml`) |
+|---|---|---|
+| Where Kafka runs | An **existing** broker you already have | **Created for you inside Kubernetes** |
+| How you manage it | `kafka-topics.sh` CLI from a job | Kubernetes **custom resources** (`Kafka`, `KafkaTopic`, `KafkaUser`) |
+| You need | A reachable bootstrap server | An EKS cluster + the Strimzi operator |
+| Best for | Managed Kafka (MSK, Confluent Cloud), existing clusters | Running and versioning Kafka yourself, GitOps |
+
+Use **one or the other**, not both, for the same Kafka. This example assumes you
+finished Example B (so EKS auth already works).
+
+### F.1 Turn Strimzi on
+
+In `ci/includes/00-variables.yml`:
+
+```yaml
+  ENABLE_STRIMZI: "true"
+  STRIMZI_OPERATOR_VERSION: "0.42.0"
+  STRIMZI_NAMESPACE: "kafka"
+  STRIMZI_CLUSTER_NAME: "hello-kafka"     # must match the Kafka CR name
+  STRIMZI_DIR: "examples/strimzi"         # or move these to kubernetes/strimzi/
+  EKS_CLUSTER_NAME: "my-eks-cluster"
+  EKS_CLUSTER_REGION: "us-east-1"
+```
+
+Leave `ENABLE_KAFKA: "false"` — you don't want the CLI path running too.
+
+### F.2 The manifests (already provided)
+
+The hello-world Strimzi resources ship under `examples/strimzi/`:
+
+- `cluster/kafka-cluster.yaml` — a `KafkaNodePool` of **3 nodes** (combined
+  broker+controller) plus a `Kafka` CR in **KRaft mode** (no ZooKeeper), sized
+  for replication-factor 3.
+- `topics/hello-topics.yaml` — three `KafkaTopic` resources
+  (`hello.greetings`, `hello.events`, `hello.logs`).
+- `users/hello-user.yaml` — an optional `KafkaUser` with ACLs (only used if you
+  enable authentication on a listener).
+
+The cluster CR is the heart of it:
+
+```yaml
+apiVersion: kafka.strimzi.io/v1beta2
+kind: Kafka
+metadata:
+  name: hello-kafka
+  annotations:
+    strimzi.io/node-pools: enabled
+    strimzi.io/kraft: enabled
+spec:
+  kafka:
+    version: 3.7.1
+    config:
+      default.replication.factor: 3
+      min.insync.replicas: 2
+    listeners:
+      - name: plain
+        port: 9092
+        type: internal
+        tls: false
+  entityOperator:
+    topicOperator: {}        # reconciles KafkaTopic resources
+    userOperator: {}         # reconciles KafkaUser resources
+```
+
+For real use, move `examples/strimzi/` to `kubernetes/strimzi/` and update
+`STRIMZI_DIR` so it lives with the rest of your infrastructure code.
+
+### F.3 Validate and plan
+
+Push. In **validate**, `strimzi:validate` does a client-side dry-run of all the
+CRs. In **plan**, `strimzi:plan` adds the Strimzi Helm repo, renders the operator
+chart, and runs `kubectl diff` for the cluster and topics. (On the very first
+run the diff for the cluster is limited because the Strimzi CRDs aren't installed
+yet — that's expected and noted in the job output.)
+
+### F.4 Deploy — operator, then cluster, then topics
+
+Deploys are manual, and they're ordered with `needs:` so they run in the right
+sequence. Click ▶ on them in this order (or just click the first — the others
+become available as each succeeds):
+
+1. **`strimzi:deploy-operator`** — installs the Strimzi operator via Helm into
+   the `kafka` namespace and waits for it to be ready. The operator is the thing
+   that watches for `Kafka`/`KafkaTopic` resources and turns them into running
+   pods.
+2. **`strimzi:deploy-cluster`** — applies the node pool + `Kafka` CR, then
+   **blocks until Strimzi reports the cluster `Ready`** (`kubectl wait
+   kafka/hello-kafka --for=condition=Ready`). This is the step that actually
+   spins up the 3 broker pods and their storage. It can take a few minutes.
+3. **`strimzi:deploy-topics`** — applies the `KafkaTopic` (and optional
+   `KafkaUser`) resources; the operators reconcile them into the cluster.
+
+After step 2 you can watch it come up locally:
+
+```bash
+kubectl get kafka,kafkanodepool,pods -n kafka
+# NAME                              ...   READY
+# kafka.kafka.strimzi.io/hello-kafka      True
+# pod/hello-kafka-dual-role-0       1/1   Running
+# pod/hello-kafka-dual-role-1       1/1   Running
+# pod/hello-kafka-dual-role-2       1/1   Running
+```
+
+### F.5 End-to-end smoke test
+
+In the **test** stage, `strimzi:smoke-test` spins up a throwaway client pod,
+**produces** a `hello world` message to `hello.greetings`, then **consumes** it
+back — proving the cluster works for real, not just that the pods are up:
+
+```
+hello world from the pipeline
+Strimzi end-to-end smoke test passed.
+```
+
+### F.6 Debug and cleanup
+
+`strimzi:debug` (manual) dumps all the custom resources, the `Kafka` status
+conditions, pods, and the operator logs — your first stop if the cluster won't
+go Ready.
+
+`strimzi:cleanup` (manual, needs `ALLOW_DESTROY: "true"`) tears down in the
+**correct order** — topics/users CRs, then the `Kafka` CR (so the operator
+removes the brokers cleanly), then the operator itself. Note that the
+PersistentVolumeClaims are kept by default (`deleteClaim: false`) so your data
+survives; the job prints the exact command to delete them if you truly want them
+gone.
+
+> **Why the ordering matters:** if you uninstalled the operator first, nothing
+> would be left to clean up the broker StatefulSets and you'd get orphaned
+> resources. Always delete the CRs while the operator is still running.
+
+---
+
 ## 12. Putting it together
 
 A realistic project configures **infrastructure first, then the application on
@@ -651,6 +796,7 @@ a schedule.
 | Helm      | `helm/values/dev.yaml` (+ chart in `helm/charts/`)     | `helm:deploy`     |
 | Ansible   | `ansible/playbooks/hello.yml`, `ansible/inventory/dev.ini` | `ansible:run` |
 | Kafka     | `kafka/topics/topics.yml`                              | `kafka:apply`     |
+| Strimzi   | `examples/strimzi/{cluster,topics,users}/`             | `strimzi:deploy-cluster` |
 
 **The golden rules:**
 
