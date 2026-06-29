@@ -61,7 +61,44 @@ stage order. This means:
 └── docs/
     ├── ONBOARDING.md
     └── VARIABLES.md
+
+
+
+$dirs = @(
+  "ci\includes",
+  "ci\templates",
+  "ci\scripts\prerequisites",
+  "ci\scripts\validation",
+  "ci\scripts\debug",
+  "ci\scripts\cleanup",
+  "terraform\backend",
+  "terraform\modules\network",
+  "terraform\environments\dev",
+  "terraform\environments\staging",
+  "terraform\environments\prod",
+  "kubernetes\manifests",
+  "kubernetes\kustomize\base",
+  "kubernetes\kustomize\overlays\dev",
+  "kubernetes\kustomize\overlays\prod",
+  "helm\charts\my-app\templates",
+  "helm\values",
+  "ansible\playbooks",
+  "ansible\roles\common\tasks",
+  "ansible\inventory",
+  "ansible\group_vars",
+  "kafka\config",
+  "kafka\topics",
+  "config\aws",
+  "config\eks",
+  "docs",
+  ".gitlab"
+)
+$dirs | ForEach-Object { New-Item -ItemType Directory -Force -Path $_ | Out-Null }
+Write-Host "Created $($dirs.Count) directories"
+
 ```
+
+
 
 ## Pipeline phases (stages)
 
