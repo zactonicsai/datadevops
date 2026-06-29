@@ -9,17 +9,22 @@
 1. [What Kubernetes Is](#1-what-kubernetes-is)
 2. [Core Resource Types](#2-core-resource-types)
 3. [Essential kubectl Commands](#3-essential-kubectl-commands)
-4. [What Strimzi Is](#4-what-strimzi-is)
-5. [Strimzi Custom Resource Types](#5-strimzi-custom-resource-types)
-6. [Tutorial: Set Up Kafka with Strimzi](#6-tutorial-set-up-kafka-with-strimzi)
-7. [Strimzi-Specific Commands](#7-strimzi-specific-commands)
-8. [Best Practices](#8-best-practices)
-9. [Routine Health Checks](#9-routine-health-checks)
-10. [Maintenance Activities](#10-maintenance-activities)
-11. [AMI Updates & Node Patching (AWS)](#11-ami-updates--node-patching-aws)
-12. [Patching the EKS Control Plane](#12-patching-the-eks-control-plane)
-13. [Maintenance Cadence](#13-maintenance-cadence)
-14. [Quick Mental Model](#14-quick-mental-model)
+4. [What a CRD Is (and Why)](#4-what-a-crd-is-and-why)
+5. [What Strimzi Is](#5-what-strimzi-is)
+6. [Strimzi Custom Resource Types](#6-strimzi-custom-resource-types)
+7. [Tutorial: Set Up Kafka with Strimzi](#7-tutorial-set-up-kafka-with-strimzi)
+8. [Strimzi-Specific Commands](#8-strimzi-specific-commands)
+9. [Networking: Services, Ingress and Egress](#9-networking-services-ingress-and-egress)
+10. [Kafka UI: Seeing Kafka Visually](#10-kafka-ui-seeing-kafka-visually)
+11. [Taints and Tolerations](#11-taints-and-tolerations)
+12. [Security and Network Policies](#12-security-and-network-policies)
+13. [Best Practices](#13-best-practices)
+14. [Routine Health Checks](#14-routine-health-checks)
+15. [Maintenance Activities](#15-maintenance-activities)
+16. [AMI Updates & Node Patching (AWS)](#16-ami-updates--node-patching-aws)
+17. [Patching the EKS Control Plane](#17-patching-the-eks-control-plane)
+18. [Maintenance Cadence](#18-maintenance-cadence)
+19. [Quick Mental Model](#19-quick-mental-model)
 
 ---
 
@@ -93,7 +98,47 @@ These are the "things" Kubernetes manages. The ones that matter most:
 
 ---
 
-## 4. What Strimzi Is
+## 4. What a CRD Is (and Why)
+
+**CRD** stands for **Custom Resource Definition**. It's how you teach Kubernetes a brand-new kind of "thing" it didn't know about before.
+
+### The idea
+
+Out of the box, Kubernetes only understands its built-in resource types — Pod, Deployment, Service, and so on (the ones in [Section 2](#2-core-resource-types)). A **CRD adds a new word to Kubernetes' vocabulary.** Once you install a CRD called `Kafka`, you can suddenly write `kind: Kafka` in a YAML file and Kubernetes accepts it as a real, first-class resource — the same way it accepts `kind: Pod`.
+
+- **Custom** = your own type, not one that ships with Kubernetes.
+- **Resource** = a "thing" Kubernetes stores and manages.
+- **Definition** = the rulebook describing what that thing looks like (its allowed fields, like `replicas` or `storage`).
+
+### A simple analogy
+
+Think of Kubernetes as a form-processing office that only accepts a fixed set of paper forms. A CRD is like **designing a brand-new form** and handing it to the office, saying "from now on, accept this form too, and here are the rules for filling it out." After that, anyone can submit the new form and the office knows what to do with it.
+
+### Why CRDs exist (why they matter)
+
+- **They let tools extend Kubernetes without changing Kubernetes itself.** You don't have to modify or rebuild Kubernetes to add Kafka support — you just install Strimzi's CRDs.
+- **You describe complex software in plain YAML.** Instead of hand-assembling dozens of Pods, Services, and disks, you write one short `Kafka` resource and let the operator build the rest.
+- **A CRD usually comes with an operator** (the "robot assistant" from later sections). The CRD defines *what* you can ask for; the operator contains the know-how to actually *make it happen* and keep it healthy.
+- **Everything stays consistent.** Your custom resources live in the same place, use the same `kubectl` commands, and follow the same rules as built-in ones.
+
+> **The key connection:** Strimzi works by installing CRDs. When you ran `kubectl create -f '.../install/latest...'` back in the tutorial, part of what got installed were the CRDs for `Kafka`, `KafkaTopic`, `KafkaUser`, and the rest. That's *why* Kubernetes understands those types in the next section — the CRDs taught it.
+
+### CRD commands
+
+- `kubectl get crds`
+  Lists every CRD installed in your cluster (you'll see lots, including Strimzi's `kafkas.kafka.strimzi.io`).
+- `kubectl get crds | grep strimzi`
+  Filters that list to just the Strimzi ones. `grep` keeps only lines containing the word "strimzi."
+- `kubectl describe crd kafkas.kafka.strimzi.io`
+  Shows the full rulebook for the `Kafka` type — its fields, versions, and validation rules.
+- `kubectl explain kafka.spec`
+  Explains the available fields under a custom resource, right in your terminal. Great for discovering what you're allowed to configure.
+
+> **Note:** A *CRD* is the definition (the new form's rulebook). A **custom resource (CR)** is an actual filled-in copy of it — for example, your `my-cluster` Kafka resource is a CR based on the `Kafka` CRD.
+
+---
+
+## 5. What Strimzi Is
 
 Kafka is software for sending streams of messages between programs — like a **post office that handles huge amounts of mail reliably**. But running Kafka on Kubernetes by hand is complicated.
 
@@ -101,7 +146,7 @@ Kafka is software for sending streams of messages between programs — like a **
 
 ---
 
-## 5. Strimzi Custom Resource Types
+## 6. Strimzi Custom Resource Types
 
 Once Strimzi is installed, Kubernetes understands these extra "things":
 
@@ -114,7 +159,7 @@ Once Strimzi is installed, Kubernetes understands these extra "things":
 
 ---
 
-## 6. Tutorial: Set Up Kafka with Strimzi
+## 7. Tutorial: Set Up Kafka with Strimzi
 
 ### Step 1 — Make a namespace to keep things tidy
 
@@ -224,7 +269,7 @@ spec:
 
 ---
 
-## 7. Strimzi-Specific Commands
+## 8. Strimzi-Specific Commands
 
 - `kubectl get kafka -n kafka`
   Lists your Kafka clusters and whether they're ready.
@@ -241,7 +286,302 @@ spec:
 
 ---
 
-## 8. Best Practices
+## 9. Networking: Services, Ingress and Egress
+
+Once Kafka is running, the big question is: *how do programs actually reach it?* That's networking. Three ideas cover most of it — **Services** (talking inside the cluster), **Ingress** (traffic coming in from outside), and **Egress** (traffic going out).
+
+### Services (svc) — the stable phone number
+
+A Service gives one steady address to a group of pods that keep changing. Pods restart and get new IPs constantly; the Service stays put so nothing breaks. There are a few kinds:
+
+- **ClusterIP** (the default) — reachable **only inside** the cluster. `my-cluster-kafka-bootstrap` is this type — which is why apps *inside* the cluster use that address.
+- **NodePort** — opens the same port on every node, so outside traffic can come in through a node's IP and port.
+- **LoadBalancer** — asks AWS to create a load balancer with a public address that forwards to your pods.
+- **Headless** (`clusterIP: None`) — has no single shared address; instead **each pod gets its own DNS name**. Kafka relies on this so clients can reach a *specific* broker, not just "any" broker.
+
+Commands:
+
+- `kubectl get svc -n kafka`
+  Lists all Services. For Kafka you'll see a bootstrap Service plus one per broker.
+- `kubectl describe svc my-cluster-kafka-bootstrap -n kafka`
+  Shows the Service's address, ports, and which pods it targets.
+- `kubectl get endpoints -n kafka`
+  Shows the actual pod IPs sitting behind each Service. If a Service "isn't working," empty endpoints here means it's pointing at nothing.
+
+> **Strimzi tip:** Don't hand-create Services for Kafka. Instead add a **listener** and Strimzi makes the right Services for you. To reach Kafka from *outside* AWS, add an external listener:
+>
+> ```yaml
+>     listeners:
+>       - name: external
+>         port: 9094
+>         type: loadbalancer   # asks AWS for a load balancer
+>         tls: true
+> ```
+
+### Ingress — the front door for traffic coming IN
+
+Think of Ingress as a **receptionist** who directs visitors based on the name they ask for. It routes outside HTTP/HTTPS requests to the right Service by hostname or path. It needs an **ingress controller** running in the cluster (like ingress-nginx or the AWS Load Balancer Controller).
+
+**Important Kafka caveat:** Kafka speaks a raw TCP protocol, *not* HTTP, so a plain Ingress can't carry Kafka traffic directly. So Ingress is mainly for the web tools *around* Kafka — like **Kafka UI** (next section) or the **Kafka Bridge** (which is HTTP). Strimzi *can* expose brokers with an `ingress`-type listener, but that needs an ingress controller with TLS passthrough enabled and a hostname per broker.
+
+Commands:
+
+- `kubectl get ingress -n kafka`
+  Lists ingress rules and the external addresses assigned to them.
+- `kubectl describe ingress <name> -n kafka`
+  Shows the hostnames, paths, target Services, and any errors.
+
+### Egress — traffic going OUT
+
+Egress is connections **leaving** your pods — to other namespaces, AWS services, or the internet. By default, pods can reach anything. You usually only think about egress when **locking things down for security**: restricting where Kafka and its clients are allowed to connect. You do that with NetworkPolicies (see [Security and Network Policies](#12-security-and-network-policies)).
+
+Common task — check what a pod can reach from the inside:
+
+- `kubectl exec -it my-cluster-kafka-0 -n kafka -- bash`
+  Opens a shell in a broker so you can test outbound connections (e.g. with `curl` or `nc`). If a connection hangs, egress may be blocked — useful for diagnosing firewall rules.
+
+---
+
+## 10. Kafka UI: Seeing Kafka Visually
+
+The command-line tools work, but a **web dashboard** makes Kafka far easier to explore — you can browse topics, read messages, and watch consumer groups and their "lag" (how far behind readers are), all in a browser.
+
+Several free dashboards exist. A common one is **Kafka UI** (the *kafbat/kafka-ui* project, formerly Provectus); other popular options are **AKHQ**, **Redpanda Console**, and **Conduktor**. Image names and tags change often, so check the project's page for the current one.
+
+Deploy a simple dashboard. Save as `kafka-ui.yaml`:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-ui
+  namespace: kafka
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka-ui
+  template:
+    metadata:
+      labels:
+        app: kafka-ui
+    spec:
+      containers:
+        - name: kafka-ui
+          image: ghcr.io/kafbat/kafka-ui:latest   # check the project for the current image/tag
+          ports:
+            - containerPort: 8080
+          env:
+            - name: KAFKA_CLUSTERS_0_NAME
+              value: my-cluster
+            - name: KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS
+              value: my-cluster-kafka-bootstrap:9092
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-ui
+  namespace: kafka
+spec:
+  selector:
+    app: kafka-ui
+  ports:
+    - port: 8080
+      targetPort: 8080
+```
+
+Commands:
+
+- `kubectl apply -f kafka-ui.yaml`
+  Deploys the dashboard and a Service pointing at it.
+- `kubectl port-forward svc/kafka-ui 8080:8080 -n kafka`
+  The simplest way to open it. This builds a private tunnel from the in-cluster Service to your own computer. Then visit `http://localhost:8080` in your browser. Press Ctrl+C to close the tunnel. **`port-forward`** is perfect for quick, private access without exposing anything to the internet.
+- To share it with a team instead, put an **Ingress** in front of the `kafka-ui` Service (see [Networking](#9-networking-services-ingress-and-egress)).
+
+> ⚠️ **Security:** A Kafka UI can usually read *and write* everything in the cluster. Never expose it publicly without a login. Keep it behind `port-forward`, a VPN, or an authenticated Ingress. If your cluster uses TLS/auth (Section 12), the UI also needs matching security settings (truststore and SASL username/password) in its `env`.
+
+---
+
+## 11. Taints and Tolerations
+
+These control **which pods are allowed to run on which nodes** — useful for reserving powerful machines just for Kafka.
+
+- A **taint** is a "keep out" sign you put on a node.
+- A **toleration** is a special pass a pod carries that lets it ignore that sign.
+
+**Analogy:** a taint is a *"staff only"* sign on a door; a toleration is the *staff badge* that lets you through. A node can be tainted so that *only* Kafka brokers (which carry the matching badge) are allowed to run there, keeping noisy neighbors from stealing CPU and disk.
+
+Taints have three "effects":
+
+- **NoSchedule** — don't place *new* pods here unless they tolerate the taint.
+- **PreferNoSchedule** — try to avoid placing pods here, but it's allowed if there's no other room.
+- **NoExecute** — as above, *and* kick out existing pods that don't tolerate it.
+
+Commands:
+
+- `kubectl taint nodes <node-name> dedicated=kafka:NoSchedule`
+  Puts a "keep out" sign on a node. Now only pods that tolerate `dedicated=kafka` can be scheduled there.
+- `kubectl taint nodes <node-name> dedicated=kafka:NoSchedule-`
+  Removes the taint. The trailing `-` (minus) means "delete this taint."
+- `kubectl describe node <node-name>`
+  Shows that node's taints and labels, so you can confirm what's set.
+- `kubectl get nodes --show-labels`
+  Lists nodes with their labels — handy for finding the right AWS node group to target.
+
+To let Kafka brokers run on tainted nodes, give them a matching toleration — and usually steer them there with node affinity to a label. Add under `spec.kafka.template.pod`:
+
+```yaml
+    template:
+      pod:
+        tolerations:
+          - key: "dedicated"
+            operator: "Equal"
+            value: "kafka"
+            effect: "NoSchedule"
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: dedicated
+                      operator: In
+                      values: [kafka]
+```
+
+> **Key point:** A toleration only *lets* a pod onto a tainted node — it doesn't *force* it there. Pair it with **nodeAffinity** (above) to actually pull brokers onto the dedicated nodes. This works hand-in-hand with the broker anti-affinity in [Best Practices](#13-best-practices), which then spreads those brokers across different nodes and zones. On EKS, the usual pattern is a **dedicated node group** for Kafka that you taint, so only brokers land on it.
+
+---
+
+## 12. Security and Network Policies
+
+Securing Kafka has four layers: **encrypt** the traffic, prove **who you are**, control **what you can do**, and **firewall** the network. Strimzi makes all four configurable.
+
+### 1. Encryption (TLS) + Authentication
+
+Swap the plain listener for a secure one. Under `spec.kafka`:
+
+```yaml
+    listeners:
+      - name: secure
+        port: 9093
+        type: internal
+        tls: true                 # encrypt traffic on the wire
+        authentication:
+          type: scram-sha-512     # require a username + password login
+```
+
+- `tls: true` encrypts the data so no one can eavesdrop.
+- `authentication.type` sets how clients prove identity — commonly **scram-sha-512** (username/password) or **tls** (mutual TLS, where each client presents its own certificate).
+
+### 2. Authorization — who can do what
+
+Turn on access control, then grant each user only what they need. Under `spec.kafka`:
+
+```yaml
+    authorization:
+      type: simple
+```
+
+### 3. Create a user with permissions (KafkaUser)
+
+Save as `user.yaml`:
+
+```yaml
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaUser
+metadata:
+  name: my-app
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: my-cluster
+spec:
+  authentication:
+    type: scram-sha-512
+  authorization:
+    type: simple
+    acls:
+      - resource:
+          type: topic
+          name: my-topic
+        operations: [Read, Write]
+```
+
+This creates a login named `my-app` that may **only** Read and Write `my-topic` — nothing else. (ACL = Access Control List, the list of what's allowed.)
+
+Commands:
+
+- `kubectl apply -f user.yaml`
+  Creates the user. Strimzi generates its password and stores it in a Secret with the same name.
+- `kubectl get kafkauser -n kafka`
+  Lists users and whether they're ready.
+- `kubectl get secret my-app -n kafka -o jsonpath='{.data.password}' | base64 -d`
+  Retrieves the generated password so your app can log in. It's stored base64-encoded in the Secret; `base64 -d` decodes it back to plain text.
+- `kubectl get secret my-cluster-cluster-ca-cert -n kafka -o jsonpath='{.data.ca\.crt}' | base64 -d > ca.crt`
+  Exports the cluster's CA certificate, which clients use to trust the encrypted connection. (This is the same Secret whose expiry you watch in [Maintenance Activities](#15-maintenance-activities).)
+
+### 4. Network Policies — the pod firewall
+
+**Analogy:** a guest list for the door. By default, *any* pod can connect to Kafka. A **NetworkPolicy** says "only pods with this label may reach the brokers," and can also limit where Kafka itself is allowed to send traffic (egress).
+
+Strimzi already creates NetworkPolicies for its internal components, and you can restrict each listener to specific clients with `networkPolicyPeers`:
+
+```yaml
+    listeners:
+      - name: secure
+        port: 9093
+        type: internal
+        tls: true
+        authentication:
+          type: scram-sha-512
+        networkPolicyPeers:
+          - podSelector:
+              matchLabels:
+                app: my-app      # only pods labeled app=my-app may connect
+```
+
+A standalone NetworkPolicy looks like this. Save as `netpol.yaml`:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-only-my-app-to-kafka
+  namespace: kafka
+spec:
+  podSelector:
+    matchLabels:
+      strimzi.io/name: my-cluster-kafka   # this rule applies to the Kafka broker pods
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: my-app                 # allow connections only from these pods
+      ports:
+        - port: 9093
+```
+
+Commands:
+
+- `kubectl get networkpolicy -n kafka`
+  Lists network policies — you'll see some that Strimzi created automatically.
+- `kubectl describe networkpolicy <name> -n kafka`
+  Shows exactly who is allowed in and out.
+- `kubectl apply -f netpol.yaml`
+  Applies your custom firewall rule.
+
+> ⚠️ **Important:** NetworkPolicies only take effect if your cluster's networking plugin enforces them. On EKS, enable NetworkPolicy support in the Amazon VPC CNI add-on, or install **Calico**. Without an enforcing plugin, the rules are silently ignored. (Check current EKS docs, as add-on details change.)
+
+### Quick security checklist
+
+- Use **TLS** on every listener clients connect to.
+- Give each app its **own KafkaUser** with the narrowest ACLs that still work.
+- **Never** commit generated passwords or certificates to git — read them from Secrets at deploy time.
+- Lock down access with `networkPolicyPeers` and/or **NetworkPolicies**.
+- Watch the **CA certificate expiry** (see [Maintenance Activities](#15-maintenance-activities)).
+
+---
+
+## 13. Best Practices
 
 *Set these up once, early — they prevent the most common outages.*
 
@@ -299,7 +639,7 @@ A message isn't considered "saved" until at least 2 brokers have it — so you c
 
 ---
 
-## 9. Routine Health Checks
+## 14. Routine Health Checks
 
 *Run these regularly to catch trouble early.*
 
@@ -320,7 +660,7 @@ A message isn't considered "saved" until at least 2 brokers have it — so you c
 
 ---
 
-## 10. Maintenance Activities
+## 15. Maintenance Activities
 
 *Scheduled tasks to keep the cluster healthy over time.*
 
@@ -370,7 +710,7 @@ For example, after a config change that needs it:
 
 ---
 
-## 11. AMI Updates & Node Patching (AWS)
+## 16. AMI Updates & Node Patching (AWS)
 
 Your Kafka pods run on EC2 machines (**nodes**). Each machine runs an operating-system image called an **AMI**. AWS regularly publishes new AMIs with security patches, so you periodically replace your nodes with fresh ones. The trick is doing it **without taking Kafka down**.
 
@@ -404,7 +744,7 @@ Your Kafka pods run on EC2 machines (**nodes**). Each machine runs an operating-
 - `kubectl get pdb -n kafka`
   Shows the **PodDisruptionBudget** — Strimzi creates one that allows only **1** Kafka pod down at a time. This is what stops AWS from taking down too many brokers at once.
 
-Also re-confirm no under-replicated partitions (see [Health Checks](#9-routine-health-checks)) **before** you start.
+Also re-confirm no under-replicated partitions (see [Health Checks](#14-routine-health-checks)) **before** you start.
 
 ### Step 4 — Update the node group's AMI
 
@@ -439,7 +779,7 @@ For self-managed nodes, where the command above doesn't apply — do this **one 
 
 ---
 
-## 12. Patching the EKS Control Plane
+## 17. Patching the EKS Control Plane
 
 Separate from node AMIs, the **Kubernetes version** itself gets upgraded. Always upgrade the control plane **first**, then the nodes.
 
@@ -454,7 +794,7 @@ Separate from node AMIs, the **Kubernetes version** itself gets upgraded. Always
 
 ---
 
-## 13. Maintenance Cadence
+## 18. Maintenance Cadence
 
 A simple rhythm to keep things healthy:
 
@@ -465,7 +805,7 @@ A simple rhythm to keep things healthy:
 
 ---
 
-## 14. Quick Mental Model
+## 19. Quick Mental Model
 
 You write YAML describing what you want → `kubectl apply` sends it to the manager → Kubernetes (with Strimzi's help for Kafka) makes it real and keeps it healthy.
 
