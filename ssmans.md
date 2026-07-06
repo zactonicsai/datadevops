@@ -36,6 +36,49 @@ ansible_aws_ssm_bucket_name: my-ssm-transfer-bucket
 ansible_aws_ssm_region: us-east-1
 ```
 
+Two options depending on whether you want dynamic discovery or a fixed list.
+
+**Dynamic** (`inventory.aws_ssm.yml` — auto-discovers instances by tag):
+
+```yaml
+---
+plugin: amazon.aws.aws_ec2
+regions:
+  - us-east-1
+filters:
+  instance-state-name: running
+  "tag:AnsibleManaged": "true"
+hostnames:
+  - instance-id                    # SSM addresses by instance ID, not IP
+keyed_groups:
+  - key: tags.Role
+    prefix: role                   # tag Role=web → group "role_web"
+compose:
+  ansible_host: instance_id
+  ec2_name: tags.Name | default(instance_id)
+```
+
+**Static** (`inventory.yml` — hardcoded instance IDs):
+
+```yaml
+---
+all:
+  vars:
+    ansible_connection: aws_ssm
+    ansible_aws_ssm_region: us-east-1
+    ansible_aws_ssm_bucket_name: my-org-ssm-transfer-bucket
+  children:
+    webservers:
+      hosts:
+        i-0123456789abcdef0:
+        i-0abcdef1234567890:
+    databases:
+      hosts:
+        i-0fedcba9876543210:
+```
+
+Key detail for both: hosts are **instance IDs** (`i-xxxx`), never IPs or DNS names — that's what SSM connects on.
+
 Example playbook:
 
 ```yaml
