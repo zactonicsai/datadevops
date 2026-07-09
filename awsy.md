@@ -482,3 +482,366 @@ Check the big four: (1) SSM agent running (`systemctl status amazon-ssm-agent`),
 8. **CIDR plan owned by one spreadsheet/IPAM; TGW for multi-VPC; prod isolated.**
 9. **Runbooks for the top 10 tickets** — new teammates fix things on day one.
 10. **"Timeout = network, refused = app."** Teach it to everyone.
+
+---
+
+## Part 14: Testing with AWS CLI + Python + Lambda (Hands-On Lab)
+
+Three ways to test the same things:
+1. **AWS CLI** = quick questions from your terminal ("hey AWS, what's the setup?")
+2. **Python (boto3 + sockets)** = repeatable test scripts you can run anytime
+3. **Lambda** = a robot INSIDE the VPC that tests connectivity for you, on a schedule
+
+### 14.1 AWS CLI: Inspect the Network (read-only, always safe)
+
+```bash
+# Find your VPC and everything in it
+aws ec2 describe-vpcs --filters "Name=tag:Name,Values=data-prod" \
+  --query 'Vpcs[].{ID:VpcId,CIDR:CidrBlock}' --output table
+
+# List subnets with their type tags
+aws ec2 describe-subnets --filters "Name=vpc-id,Values=vpc-0abc123" \
+  --query 'Subnets[].{ID:SubnetId,CIDR:CidrBlock,AZ:AvailabilityZone,Name:Tags[?Key==`Name`]|[0].Value}' \
+  --output table
+
+# What rules does the Kafka SG really have right now?
+aws ec2 describe-security-groups --group-ids sg-0kafka111 \
+  --query 'SecurityGroups[].IpPermissions[].{Ports:join(`-`,[to_string(FromPort),to_string(ToPort)]),From:IpRanges[].CidrIp,FromSG:UserIdGroupPairs[].GroupId}' \
+  --output table
+
+# Which instances are wearing the app SG badge?
+aws ec2 describe-instances \
+  --filters "Name=instance.group-id,Values=sg-0app222" "Name=instance-state-name,Values=running" \
+  --query 'Reservations[].Instances[].{ID:InstanceId,IP:PrivateIpAddress,Name:Tags[?Key==`Name`]|[0].Value}' \
+  --output table
+
+# NACLs on the data subnet
+aws ec2 describe-network-acls \
+  --filters "Name=association.subnet-id,Values=subnet-0data111" \
+  --query 'NetworkAcls[].Entries[?Egress==`false`]' --output table
+```
+
+### 14.2 AWS CLI: Run a Test Command on a Server WITHOUT Logging In
+
+SSM `send-command` = "hey server, run this and tell me what happened."
+
+```bash
+# Test Kafka port from the app server, remotely:
+aws ssm send-command \
+  --instance-ids i-0app12345 \
+  --document-name "AWS-RunShellScript" \
+  --parameters 'commands=["nc -zv kafka-b1.internal 9092 2>&1","curl -sk https://opensearch.internal:9200/_cluster/health | head -c 300"]' \
+  --query 'Command.CommandId' --output text
+# Returns a CommandId, e.g. 1a2b3c4d-...
+
+# Get the answer:
+aws ssm get-command-invocation \
+  --command-id 1a2b3c4d-... \
+  --instance-id i-0app12345 \
+  --query '{Status:Status,Output:StandardOutputContent,Errors:StandardErrorContent}'
+```
+
+This is HUGE for a team lead: you can test connectivity from **any** instance's point of view without SSH keys or sessions.
+
+### 14.3 AWS CLI: Reachability Analyzer (AWS referees the argument)
+
+```bash
+# "Can the app instance reach the Kafka instance on 9092?"
+PATH_ID=$(aws ec2 create-network-insights-path \
+  --source i-0app12345 --destination i-0kafka678 \
+  --protocol tcp --destination-port 9092 \
+  --query 'NetworkInsightsPath.NetworkInsightsPathId' --output text)
+
+ANALYSIS_ID=$(aws ec2 start-network-insights-analysis \
+  --network-insights-path-id $PATH_ID \
+  --query 'NetworkInsightsAnalysis.NetworkInsightsAnalysisId' --output text)
+
+sleep 30   # give it a moment to think
+
+aws ec2 describe-network-insights-analyses \
+  --network-insights-analysis-ids $ANALYSIS_ID \
+  --query 'NetworkInsightsAnalyses[].{Reachable:NetworkPathFound,Blocker:Explanations[0].ExplanationCode}'
+# Reachable: false + Blocker: "ENI_SG_RULES_MISMATCH" -> it literally names the guilty SG!
+```
+
+### 14.4 Python: The Team's Connectivity Test Script
+
+Runs on the Command EC2 (or your laptop over VPN). Pure sockets + boto3. Save as `nettest.py`:
+
+```python
+#!/usr/bin/env python3
+"""Team connectivity smoke test. Usage: python3 nettest.py"""
+import socket, json, boto3
+
+TARGETS = [
+    ("kafka-b1.internal",     9092, "Kafka plaintext"),
+    ("kafka-b1.internal",     9093, "Kafka TLS"),
+    ("opensearch.internal",   9200, "OpenSearch API"),
+    ("opensearch.internal",   5601, "OS Dashboards"),
+    ("app1.internal",         8080, "App server"),
+]
+
+def check_port(host, port, timeout=3):
+    """Returns 'OPEN', 'REFUSED' (app down), or 'TIMEOUT' (network block)."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return "OPEN"
+    except ConnectionRefusedError:
+        return "REFUSED (network OK, app not listening!)"
+    except (socket.timeout, TimeoutError):
+        return "TIMEOUT (check SG / NACL / route)"
+    except socket.gaierror:
+        return "DNS FAIL (check Route 53 / resolver)"
+
+print(f"{'Service':<22}{'Target':<32}{'Result'}")
+print("-" * 75)
+ok = True
+for host, port, name in TARGETS:
+    result = check_port(host, port)
+    if result != "OPEN":
+        ok = False
+    print(f"{name:<22}{host+':'+str(port):<32}{result}")
+
+# Bonus: ask AWS if any SG is wide open to the world (bad!)
+ec2 = boto3.client("ec2")
+sgs = ec2.describe_security_groups()["SecurityGroups"]
+for sg in sgs:
+    for rule in sg["IpPermissions"]:
+        for r in rule.get("IpRanges", []):
+            if r.get("CidrIp") == "0.0.0.0/0" and rule.get("FromPort") not in (80, 443, None):
+                print(f"\nWARNING: {sg['GroupId']} ({sg['GroupName']}) "
+                      f"open to WORLD on port {rule.get('FromPort')}")
+
+exit(0 if ok else 1)   # exit code -> usable in CI pipelines!
+```
+
+Run it:
+
+```bash
+pip3 install boto3
+python3 nettest.py
+echo $?     # 0 = all green, 1 = something failed
+```
+
+### 14.5 Python: Real Kafka Produce/Consume Test
+
+```python
+#!/usr/bin/env python3
+"""End-to-end Kafka test: send a message, read it back. pip3 install kafka-python"""
+import time, uuid
+from kafka import KafkaProducer, KafkaConsumer
+
+BROKERS = ["kafka-b1.internal:9092"]
+TOPIC   = "team-smoketest"
+marker  = f"smoke-{uuid.uuid4()}"
+
+# 1. Send
+producer = KafkaProducer(bootstrap_servers=BROKERS)
+producer.send(TOPIC, marker.encode())
+producer.flush()
+print(f"Sent: {marker}")
+
+# 2. Read it back
+consumer = KafkaConsumer(
+    TOPIC, bootstrap_servers=BROKERS,
+    auto_offset_reset="latest", consumer_timeout_ms=10000,
+    group_id=f"smoketest-{uuid.uuid4()}",
+)
+found = any(msg.value.decode() == marker for msg in consumer)
+print("Kafka round-trip: PASS" if found else "Kafka round-trip: FAIL")
+```
+
+### 14.6 Python: OpenSearch Health Test
+
+```python
+#!/usr/bin/env python3
+"""OpenSearch health + write/read test. pip3 install requests"""
+import requests, uuid
+requests.packages.urllib3.disable_warnings()
+
+OS = "https://opensearch.internal:9200"
+AUTH = ("admin", "CHANGE_ME")          # better: pull from Secrets Manager (see 14.7)
+
+h = requests.get(f"{OS}/_cluster/health", auth=AUTH, verify=False).json()
+print(f"Cluster: {h['status'].upper()}  nodes={h['number_of_nodes']} "
+      f"unassigned_shards={h['unassigned_shards']}")
+
+# Write one doc, read it back, delete it:
+doc_id = str(uuid.uuid4())
+requests.put(f"{OS}/smoketest/_doc/{doc_id}?refresh=true",
+             json={"msg": "hello"}, auth=AUTH, verify=False)
+r = requests.get(f"{OS}/smoketest/_doc/{doc_id}", auth=AUTH, verify=False)
+print("Write/read: PASS" if r.json().get("found") else "Write/read: FAIL")
+requests.delete(f"{OS}/smoketest/_doc/{doc_id}", auth=AUTH, verify=False)
+```
+
+### 14.7 Python: Pull Passwords the Right Way (Secrets Manager)
+
+Never hard-code passwords. One tiny function fixes it:
+
+```python
+import boto3, json
+
+def get_secret(name, region="us-east-1"):
+    sm = boto3.client("secretsmanager", region_name=region)
+    return json.loads(sm.get_secret_value(SecretId=name)["SecretString"])
+
+creds = get_secret("prod/opensearch/admin")
+AUTH = (creds["username"], creds["password"])
+```
+
+The instance's **IAM role** grants access — no keys on disk, ever.
+
+### 14.8 Lambda: A Connectivity Robot That Lives Inside the VPC
+
+Why Lambda? It runs **inside your private subnets**, so it tests connectivity exactly like your apps experience it — and it can run **every 5 minutes forever** for pennies.
+
+**The function** (`lambda_function.py`, Python 3.12 runtime):
+
+```python
+import socket, json, os, boto3
+
+TARGETS = json.loads(os.environ.get("TARGETS", """
+[
+  {"host": "kafka-b1.internal",   "port": 9092, "name": "Kafka"},
+  {"host": "opensearch.internal", "port": 9200, "name": "OpenSearch"},
+  {"host": "app1.internal",       "port": 8080, "name": "App"}
+]"""))
+
+cloudwatch = boto3.client("cloudwatch")
+
+def check(host, port, timeout=3):
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return "OPEN"
+    except ConnectionRefusedError:
+        return "REFUSED"
+    except Exception:
+        return "TIMEOUT"
+
+def lambda_handler(event, context):
+    results, failures = [], []
+    for t in TARGETS:
+        status = check(t["host"], t["port"])
+        results.append({**t, "status": status})
+        # Publish 1 (up) or 0 (down) as a custom CloudWatch metric
+        cloudwatch.put_metric_data(
+            Namespace="Team/Connectivity",
+            MetricData=[{
+                "MetricName": "PortReachable",
+                "Dimensions": [{"Name": "Service", "Value": t["name"]}],
+                "Value": 1 if status == "OPEN" else 0,
+            }])
+        if status != "OPEN":
+            failures.append(f"{t['name']} {t['host']}:{t['port']} = {status}")
+
+    print(json.dumps(results))               # lands in CloudWatch Logs
+    if failures:
+        raise Exception("Connectivity failures: " + "; ".join(failures))
+    return {"statusCode": 200, "body": json.dumps(results)}
+```
+
+**Deploy it all with the CLI:**
+
+```bash
+# 1. Zip the code
+zip function.zip lambda_function.py
+
+# 2. Create an IAM role for it (trust policy file first)
+cat > trust.json << 'EOF'
+{"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+ "Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}
+EOF
+aws iam create-role --role-name lambda-nettest --assume-role-policy-document file://trust.json
+aws iam attach-role-policy --role-name lambda-nettest \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+aws iam attach-role-policy --role-name lambda-nettest \
+  --policy-arn arn:aws:iam::aws:policy/CloudWatchFullAccessV2   # tighten in prod
+
+# 3. Create the function INSIDE the VPC (this is the key part!)
+aws lambda create-function \
+  --function-name vpc-nettest \
+  --runtime python3.12 --handler lambda_function.lambda_handler \
+  --zip-file fileb://function.zip \
+  --role arn:aws:iam::111122223333:role/lambda-nettest \
+  --timeout 30 \
+  --vpc-config SubnetIds=subnet-0app111,subnet-0app222,SecurityGroupIds=sg-0admin333
+
+# NOTE: sg-0admin333 (the Lambda's SG) must be ALLOWED as a source
+# in sg-kafka (9092), sg-opensearch (9200), sg-app (8080). Same badge rules!
+
+# 4. Test it right now:
+aws lambda invoke --function-name vpc-nettest --log-type Tail out.json \
+  --query 'LogResult' --output text | base64 -d
+cat out.json
+
+# 5. Schedule it every 5 minutes (EventBridge):
+aws events put-rule --name nettest-5min --schedule-expression "rate(5 minutes)"
+aws lambda add-permission --function-name vpc-nettest \
+  --statement-id evb --action lambda:InvokeFunction \
+  --principal events.amazonaws.com \
+  --source-arn arn:aws:events:us-east-1:111122223333:rule/nettest-5min
+aws events put-targets --rule nettest-5min \
+  --targets "Id=1,Arn=arn:aws:lambda:us-east-1:111122223333:function:vpc-nettest"
+
+# 6. Alarm when anything goes down:
+aws cloudwatch put-metric-alarm \
+  --alarm-name kafka-unreachable \
+  --namespace Team/Connectivity --metric-name PortReachable \
+  --dimensions Name=Service,Value=Kafka \
+  --statistic Minimum --period 300 --evaluation-periods 2 \
+  --threshold 1 --comparison-operator LessThanThreshold \
+  --alarm-actions arn:aws:sns:us-east-1:111122223333:team-alerts
+```
+
+Now you have a **24/7 monitoring robot** built from ~50 lines of Python. If Kafka's port stops answering, the team gets paged within ~10 minutes — often before users notice.
+
+### 14.9 Lambda: Disk-Space Watchdog (ties into Part 12.2)
+
+CloudWatch agent on each instance publishes `disk_used_percent`. This Lambda checks it and warns the team:
+
+```python
+import boto3, datetime
+
+def lambda_handler(event, context):
+    cw, sns = boto3.client("cloudwatch"), boto3.client("sns")
+    now = datetime.datetime.utcnow()
+    resp = cw.get_metric_data(
+        StartTime=now - datetime.timedelta(minutes=15), EndTime=now,
+        MetricDataQueries=[{
+            "Id": "disk",
+            "Expression": 'SELECT MAX(disk_used_percent) FROM CWAgent GROUP BY InstanceId',
+            "Period": 300,
+        }])
+    warnings = []
+    for series in resp["MetricDataResults"]:
+        if series["Values"] and max(series["Values"]) > 85:
+            warnings.append(f"{series['Label']}: {max(series['Values']):.0f}% full")
+    if warnings:
+        sns.publish(
+            TopicArn="arn:aws:sns:us-east-1:111122223333:team-alerts",
+            Subject="DISK WARNING - over 85%",
+            Message="\n".join(warnings) + "\n\nRunbook: Part 12.2 (grow EBS, no downtime)")
+    return {"checked": len(resp["MetricDataResults"]), "warnings": warnings}
+```
+
+Schedule it hourly with the same EventBridge pattern as 14.8.
+
+### 14.10 CLI + Lambda Testing Cheat Sheet
+
+| I want to... | Use |
+|---|---|
+| Quickly see SG/subnet/route config | `aws ec2 describe-*` commands (14.1) |
+| Test a port from ANOTHER server's viewpoint | `aws ssm send-command` + `nc` (14.2) |
+| Get AWS to tell me exactly WHAT is blocking | Reachability Analyzer (14.3) |
+| Repeatable smoke test I can run anytime / in CI | `nettest.py` (14.4) |
+| Prove Kafka actually works end-to-end | produce/consume script (14.5) |
+| Prove OpenSearch works end-to-end | health + write/read script (14.6) |
+| Continuous 24/7 checks + paging | VPC Lambda + EventBridge + Alarm (14.8) |
+| Catch full disks before they hurt | disk watchdog Lambda (14.9) |
+
+**Lambda-in-VPC gotchas (learn them once):**
+- A VPC Lambda has **no internet** unless its subnet routes to a NAT — use **VPC endpoints** for AWS APIs (CloudWatch, SNS, Secrets Manager) instead.
+- The Lambda's **security group must be added as a source** in the target SGs (Kafka, OpenSearch, apps) — same badge rule as everything else.
+- Put it in **two subnets (two AZs)** just like real apps.
+- Keep timeout small (30s) — a hung connectivity test should fail fast.
