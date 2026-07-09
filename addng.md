@@ -2,7 +2,50 @@
 
 A minimal, working setup that adds a **managed node group** (plain EC2, vanilla EKS-optimized AMI, nothing extra installed) to an **existing EKS cluster**, then deploys a simple pod. Includes variables for subnets and other inputs, a GitLab pipeline, and a directory structure.
 
----
+Use data sources to reference them instead of creating new ones. Replace the IAM section in `main.tf` with:
+
+```hcl
+# Look up existing role
+data "aws_iam_role" "node" {
+  name = "noderolettt"
+}
+
+# Look up existing customer-managed policy
+data "aws_iam_policy" "my_policy" {
+  name = "my policy"
+}
+
+# Attach your policy to the role
+# (skip this if it's already attached)
+resource "aws_iam_role_policy_attachment" "custom" {
+  role       = data.aws_iam_role.node.name
+  policy_arn = data.aws_iam_policy.my_policy.arn
+}
+```
+
+Then point the node group at it:
+
+```hcl
+resource "aws_eks_node_group" "this" {
+  cluster_name    = var.cluster_name
+  node_group_name = var.node_group_name
+  node_role_arn   = data.aws_iam_role.node.arn  # <-- changed
+  subnet_ids      = var.subnet_ids
+  # ...rest stays the same
+
+  # Remove the old depends_on IAM attachments,
+  # or point it at the new attachment if you kept it
+}
+```
+
+Delete the `aws_iam_role` resource and the three `aws_iam_role_policy_attachment` blocks from the original example — otherwise Terraform will try to create duplicates.
+
+Two things to verify on `noderolettt`:
+
+1. **Trust policy** must allow `ec2.amazonaws.com` to assume it, or nodes can't launch.
+2. **Required policies** — it still needs `AmazonEKSWorkerNodePolicy`, `AmazonEKS_CNI_Policy`, and `AmazonEC2ContainerRegistryReadOnly` attached (either already on the role, or add attachment blocks like the one above). Your custom policy is in addition to those, not a replacement.
+
+If you'd rather have Terraform fully manage the existing role instead of just referencing it, you'd use `terraform import` — but the data-source approach above is simpler and safer for shared roles.
 
 ## 1. Directory Structure
 
