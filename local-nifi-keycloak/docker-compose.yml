@@ -1,0 +1,104 @@
+# Local NiFi 2.x + Keycloak 26 OIDC test stack
+#
+# ONE-TIME PREP: add this line to your hosts file so your BROWSER can
+# resolve the same hostname NiFi uses inside the Docker network:
+#
+#     127.0.0.1  keycloak
+#
+#   Linux/macOS: /etc/hosts        Windows: C:\Windows\System32\drivers\etc\hosts
+#
+# Then:  docker compose up -d
+#   NiFi:     https://localhost:8443/nifi      (accept the self-signed cert warning)
+#   Keycloak: http://keycloak:8080             (admin / admin)
+#   Log in to NiFi as:  alice / password
+#
+# FOR LOCAL TESTING ONLY: plain-HTTP Keycloak, hardcoded demo secrets,
+# self-signed certs. See the main tutorial for the production AWS setup.
+
+services:
+
+  # One-shot job: generate a self-signed keystore/truststore for NiFi.
+  # (The apache/nifi image requires these when AUTH=oidc; NiFi 2.x must serve HTTPS.)
+  cert-init:
+    image: eclipse-temurin:21-jre
+    command:
+      - sh
+      - -c
+      - |
+        if [ ! -f /certs/keystore.p12 ]; then
+          keytool -genkeypair -alias nifi -keyalg RSA -keysize 2048 -validity 365 \
+            -storetype PKCS12 -keystore /certs/keystore.p12 -storepass changeit123 \
+            -dname "CN=localhost" -ext "SAN=dns:localhost,dns:nifi"
+          keytool -exportcert -alias nifi -keystore /certs/keystore.p12 \
+            -storepass changeit123 -file /certs/nifi.crt
+          keytool -importcert -alias nifi -noprompt -storetype PKCS12 \
+            -keystore /certs/truststore.p12 -storepass changeit123 -file /certs/nifi.crt
+          echo "Generated keystore + truststore."
+        else
+          echo "Certs already exist, skipping."
+        fi
+    volumes:
+      - nifi-certs:/certs
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.6
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      # Fixed hostname => token issuer is ALWAYS http://keycloak:8080/realms/nifi,
+      # matching what NiFi sees via Docker DNS and what your browser sees via
+      # the hosts-file entry. Issuer mismatches are the #1 local-OIDC failure.
+      KC_HOSTNAME: http://keycloak:8080
+    ports:
+      - "8080:8080"
+    volumes:
+      # Imports the realm, the 'nifi' client, and the demo user on first boot
+      - ./keycloak:/opt/keycloak/data/import:ro
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080 && echo -e 'GET /realms/nifi HTTP/1.0\\r\\n\\r\\n' >&3 && cat <&3 | grep -q '200'"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  nifi:
+    image: apache/nifi:2.10.0
+    ports:
+      - "8443:8443"
+    environment:
+      # --- switch the image's entrypoint into OIDC mode ---
+      AUTH: oidc
+
+      # --- TLS for NiFi's own listener (from the cert-init job) ---
+      KEYSTORE_PATH: /opt/certs/keystore.p12
+      KEYSTORE_TYPE: PKCS12
+      KEYSTORE_PASSWORD: changeit123
+      TRUSTSTORE_PATH: /opt/certs/truststore.p12
+      TRUSTSTORE_TYPE: PKCS12
+      TRUSTSTORE_PASSWORD: changeit123
+
+      # --- how the browser reaches NiFi (host-header allow-list) ---
+      NIFI_WEB_PROXY_HOST: localhost:8443
+
+      # --- OIDC → Keycloak (matches keycloak/realm-nifi.json) ---
+      NIFI_SECURITY_USER_OIDC_DISCOVERY_URL: http://keycloak:8080/realms/nifi/.well-known/openid-configuration
+      NIFI_SECURITY_USER_OIDC_CLIENT_ID: nifi
+      NIFI_SECURITY_USER_OIDC_CLIENT_SECRET: nifi-local-secret
+      NIFI_SECURITY_USER_OIDC_CLAIM_IDENTIFYING_USER: email
+      NIFI_SECURITY_USER_OIDC_ADDITIONAL_SCOPES: email,profile
+      NIFI_SECURITY_USER_OIDC_CONNECT_TIMEOUT: 5 secs
+      NIFI_SECURITY_USER_OIDC_READ_TIMEOUT: 5 secs
+      NIFI_SECURITY_USER_OIDC_TRUSTSTORE_STRATEGY: JDK
+
+      # --- authorization: first admin = the demo user's email claim ---
+      INITIAL_ADMIN_IDENTITY: alice@example.com
+    volumes:
+      - nifi-certs:/opt/certs:ro
+    depends_on:
+      cert-init:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_healthy
+
+volumes:
+  nifi-certs:
