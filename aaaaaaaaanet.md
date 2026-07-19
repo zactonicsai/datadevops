@@ -2,7 +2,327 @@
 
 **A hands-on tutorial using only the AWS Console and Session Manager (SSM) — no SSH keys, no bastion hosts, no public IPs.**
 
+---# Cost Breakdown — AWS EC2-to-EC2 Networking Lab
+
+**Region:** us-east-1 (N. Virginia) — the cheapest AWS region for everything in this lab
+**Prices verified:** July 2026 list pricing
+**Currency:** USD
+
+> ⚠️ Always cross-check against the [AWS Pricing Calculator](https://calculator.aws) before committing to an architecture. AWS adjusts rates without much announcement.
+
 ---
+
+## 1. The Short Answer
+
+| Scenario | Cost |
+|----------|------|
+| **2-hour lab, cleaned up properly** | **≈ $0.13** |
+| 2-hour lab + 5 Reachability Analyzer runs | ≈ $0.63 |
+| Left running 24 hours (oops) | ≈ $1.53 |
+| **Left running 30 days (the real danger)** | **≈ $37.87** |
+| Same lab with NAT gateway instead of endpoints | ≈ $33 for 30 days (but less secure) |
+| Same lab, brand-new AWS account on Free Tier | **≈ $22 for 30 days** (EC2 is free, endpoints are not) |
+
+**The one number to remember:** three VPC interface endpoints across two AZs cost **$0.06/hour** whether you use them or not. That's **$43.80/month** for something sitting completely idle. This is the dominant cost in the lab and the thing that bites people.
+
+---
+
+## 2. Per-Component Rates
+
+### 2.1 Free components (no charge, ever)
+
+These make up most of what you build:
+
+| Component | Cost | Notes |
+|-----------|------|-------|
+| VPC | **$0.00** | The VPC itself is always free |
+| Subnets | **$0.00** | Any number, any size |
+| Route tables | **$0.00** | |
+| Internet Gateway | **$0.00** | Free to have (data transfer still applies) |
+| Security groups | **$0.00** | Unlimited rules within quota |
+| Network ACLs | **$0.00** | |
+| IAM roles & policies | **$0.00** | |
+| SSM Session Manager | **$0.00** | The *service* is free — endpoints are not |
+| VPC Peering connection | **$0.00** | Hourly is free; you pay for data transfer |
+| Gateway VPC endpoints (S3/DynamoDB) | **$0.00** | <cite index="19-1">Gateway Endpoints for S3 and DynamoDB are free</cite> |
+
+> **Why this matters:** the entire "networking" part of your lab — VPC, subnets, routing, both firewalls — is genuinely free. Everything you pay for is either compute or PrivateLink.
+
+### 2.2 Paid components
+
+| Component | Rate | Monthly (730 hrs) | Used in this lab? |
+|-----------|------|-------------------|-------------------|
+| **VPC Interface Endpoint** | <cite index="2-1">$0.01 per hour per Availability Zone</cite> | $7.30 per AZ | ✅ 3 endpoints × 2 AZs |
+| **Interface Endpoint data processing** | <cite index="4-1">$0.01/GB for the first 1 PB</cite> | usage-based | ✅ negligible |
+| **EC2 t3.micro (Linux)** | <cite index="12-1">$0.0104/hr in us-east-1</cite> | <cite index="8-1">$7.59/month</cite> | ✅ 2 instances |
+| **EBS gp3 root volume** | $0.08/GB-month | $0.64 for 8 GB | ✅ 2 volumes |
+| **Cross-AZ data transfer** | <cite index="6-1">Same-AZ is free; cross-AZ adds $0.01/GB each way</cite> | usage-based | ✅ negligible |
+| **Reachability Analyzer** | $0.10 per analysis | per-run | ⚠️ optional |
+| **VPC Flow Logs → CloudWatch** | $0.50/GB ingest + $0.03/GB storage | usage-based | ⚠️ optional |
+| **Public IPv4 address** | <cite index="4-1">$0.005 per hour, whether in-use or idle — about $3.65/month per IP</cite> | $3.65 | ❌ we use none |
+| **NAT Gateway** | <cite index="19-1">$0.045 per hour + $0.045 per GB</cite> | <cite index="19-1">$32.85/month</cite> | ❌ we avoid this |
+| **EC2 Instance Connect Endpoint** | ~$0.005/hr | ~$3.60 | ⚠️ Lab 11 optional |
+
+---
+
+## 3. The Actual Lab Bill, Line by Line
+
+### 3.1 A focused 2-hour session (build + Part B + a few labs)
+
+| Line item | Qty | Rate | Hours | Cost |
+|-----------|-----|------|-------|------|
+| Interface endpoint: `ssm` | 2 AZs | $0.01/hr | 2 | $0.04 |
+| Interface endpoint: `ssmmessages` | 2 AZs | $0.01/hr | 2 | $0.04 |
+| Interface endpoint: `ec2messages` | 2 AZs | $0.01/hr | 2 | $0.04 |
+| EC2 `instance-a` (t3.micro) | 1 | $0.0104/hr | 2 | $0.02 |
+| EC2 `instance-b` (t3.micro) | 1 | $0.0104/hr | 2 | $0.02 |
+| EBS gp3 8 GB × 2 | 16 GB | $0.08/GB-mo | 2 | $0.004 |
+| Endpoint data processing | <0.1 GB | $0.01/GB | — | ~$0.00 |
+| Cross-AZ transfer (ping/nc) | <0.01 GB | $0.01/GB | — | ~$0.00 |
+| **TOTAL** | | | | **$0.16** |
+
+### 3.2 The full tutorial, all 11 labs (≈ 4 hours)
+
+| Line item | Cost |
+|-----------|------|
+| 3 endpoints × 2 AZs × 4 hrs | $0.24 |
+| 2 × t3.micro × 4 hrs | $0.08 |
+| `instance-c` (Lab 6) × 1 hr | $0.01 |
+| EBS (3 volumes × 4 hrs) | $0.01 |
+| Reachability Analyzer × 6 runs | $0.60 |
+| VPC Flow Logs (Lab 5, ~50 MB) | $0.03 |
+| EC2 Instance Connect Endpoint (Lab 11, 1 hr) | $0.01 |
+| Data transfer | ~$0.00 |
+| **TOTAL** | **$0.98** |
+
+**Under a dollar for the entire tutorial.** That's the good news.
+
+### 3.3 The bad news: what "forgetting to clean up" costs
+
+| Line item | Rate | 30 days (730 hrs) |
+|-----------|------|-------------------|
+| 3 endpoints × 2 AZs | $0.06/hr | **$43.80** |
+| 2 × t3.micro | $0.0208/hr | $15.18 |
+| EBS 16 GB gp3 | — | $1.28 |
+| **TOTAL** | | **$60.26/month** |
+
+**And if you only deployed endpoints in one AZ** (which the tutorial doesn't, but many people do to save money):
+
+| Line item | 30 days |
+|-----------|---------|
+| 3 endpoints × 1 AZ | $21.90 |
+| 2 × t3.micro | $15.18 |
+| EBS | $1.28 |
+| **TOTAL** | **$38.36/month** |
+
+> 💡 **The single-AZ tradeoff:** deploying endpoints in one AZ halves the endpoint cost but creates a hard dependency — if that AZ has problems, SSM stops working for *every* instance in the VPC, including ones in the healthy AZ. For a lab, single-AZ is a reasonable money saver. For production, two AZs is correct.
+
+---
+
+## 4. Cost per Failure Lab
+
+Most labs are free — you're editing config, not provisioning resources.
+
+| Lab | What it provisions | Extra cost |
+|-----|-------------------|------------|
+| 1 — Missing IAM profile | Nothing | **$0.00** |
+| 2 — Missing SG rule | Nothing | **$0.00** |
+| 3 — Wrong port | Nothing | **$0.00** |
+| 4 — Wrong SG source | Nothing | **$0.00** |
+| 5 — NACL stateless trap | Optional: Flow Logs | $0.00–0.05 |
+| 6 — Wrong VPC | `instance-c` + optional peering | ~$0.01/hr |
+| 7 — Broken route table | Nothing | **$0.00** |
+| 8 — Deleted endpoint | Nothing (saves money briefly!) | **$0.00** |
+| 9 — Endpoint SG blocks 443 | Nothing | **$0.00** |
+| 10 — Localhost binding | Nothing | **$0.00** |
+| 11 — Agent stopped | Optional: EICE | $0.00–0.01/hr |
+| *Any lab* | Reachability Analyzer | $0.10 per run |
+
+**8 of 11 labs are completely free.** The tutorial is deliberately built this way — breaking security group rules, route tables, and NACLs costs nothing because those components cost nothing.
+
+---
+
+## 5. Free Tier Considerations
+
+If your AWS account is under 12 months old:
+
+| Resource | Free Tier allowance | Covers this lab? |
+|----------|--------------------|--------------------|
+| EC2 t3.micro | <cite index="14-1">750 hours/month of t2.micro or t3.micro (enough to run one instance 24/7) plus 30GB of EBS storage</cite> | ✅ Yes — 2 instances × 4 hrs = 8 hrs, well under 750 |
+| EBS | 30 GB | ✅ Yes — we use 16 GB |
+| VPC endpoints | **None** | ❌ **No — full price** |
+| Data transfer out | 100 GB/month | ✅ Yes |
+
+**Bottom line on Free Tier:** your compute is free, but the $0.06/hour endpoint charge applies from minute one. Free Tier does **not** protect you from the main cost in this lab.
+
+> ⚠️ **Note:** <cite index="14-1">There is no permanent free tier for EC2 — production workloads always cost money.</cite> The 12-month clock starts at account creation, not at first use.
+
+---
+
+## 6. Architecture Cost Comparison
+
+The tutorial deliberately picks the cheaper-and-more-secure option. Here's the math behind that choice.
+
+### 6.1 Private SSM access: Endpoints vs NAT Gateway
+
+Both give private instances a path to the SSM service. Here's what each costs at rest:
+
+| | 3 Interface Endpoints (2 AZ) | 1 NAT Gateway |
+|---|---|---|
+| Hourly | $0.06 | <cite index="19-1">$0.045</cite> |
+| Monthly base | $43.80 | <cite index="19-1">$32.85</cite> |
+| Per GB | $0.01 | <cite index="19-1">$0.045</cite> |
+| Also needs | — | Elastic IP ($3.65/mo) |
+| Realistic monthly total | **$43.80** | **$36.50+** |
+
+**So NAT is cheaper for this specific lab?** Yes — for three endpoints at rest, marginally. But the picture flips fast:
+
+| Monthly data volume | 3 Endpoints (2 AZ) | NAT Gateway + EIP |
+|---------------------|--------------------|--------------------|
+| 0 GB | $43.80 | $36.50 |
+| 100 GB | $44.80 | $41.00 |
+| 500 GB | $48.80 | $59.00 |
+| 1 TB | $53.80 | $82.55 |
+| 5 TB | $93.80 | $266.00 |
+
+**Crossover point: roughly 250 GB/month.** Beyond that, endpoints win and keep winning.
+
+**And cost isn't the only axis:**
+
+| | Endpoints | NAT Gateway |
+|---|---|---|
+| Traffic leaves AWS network | **No** | Yes (to public AWS endpoints) |
+| Per-service firewall control | **Yes** (SG per endpoint) | No |
+| Instance can reach arbitrary internet | No — **this is a feature** | Yes — this is a risk |
+| Compliance story | Strong | Weaker |
+
+<cite index="5-1">Traffic to AWS services that exits the VPC and re-enters via public endpoints is harder to constrain, harder to audit, and harder to defend in a compliance review than traffic that never leaves the AWS network at all.</cite>
+
+<cite index="6-1">Interface endpoints can reduce costs by 78%+ compared to routing AWS service traffic through NAT Gateways</cite> for high-traffic AWS-service workloads.
+
+**Real-world answer:** production VPCs often run both — endpoints for chatty AWS services (S3, ECR, SSM, CloudWatch), NAT for genuine general internet access like OS package updates.
+
+### 6.2 Single-AZ vs Multi-AZ endpoints
+
+| Setup | Monthly | Failure mode |
+|-------|---------|--------------|
+| 3 endpoints, 1 AZ | $21.90 | AZ outage kills SSM VPC-wide |
+| 3 endpoints, 2 AZ | $43.80 | Survives one AZ failure |
+| 3 endpoints, 3 AZ | $65.70 | Survives two AZ failures |
+
+### 6.3 Access method cost comparison
+
+| Method | Monthly cost | Notes |
+|--------|--------------|-------|
+| SSH with public IP | $3.65 | Cheapest, worst security — port 22 exposed |
+| SSH via bastion host (t3.micro + EIP) | $11.24 | Extra box to patch and secure |
+| **SSM via VPC endpoints** | **$43.80** | Most secure, fully audited, no open ports |
+| SSM via NAT Gateway | $36.50 | Cheaper but instances get general internet |
+| EC2 Instance Connect Endpoint | $3.65 | Real SSH into private subnets, no public IP |
+
+> 💡 **The cheapest secure option people miss:** if you only need occasional shell access and don't need SSM's Run Command / patch management / session logging, an **EC2 Instance Connect Endpoint at ~$3.65/month** gives you keyless SSH into private subnets for 1/12th the cost of the three SSM endpoints. It's a genuinely good option for dev environments.
+
+---
+
+## 7. Where Costs Hide
+
+The things that surprise people on the bill:
+
+| Hidden cost | Rate | How it sneaks up |
+|-------------|------|------------------|
+| **Unattached Elastic IPs** | <cite index="4-1">$0.005/hour, whether in-use or idle</cite> ≈ $3.65/mo | Terminate an instance, forget the EIP |
+| **Orphaned EBS volumes** | $0.08/GB-mo | Volume set to *not* delete on termination |
+| **Endpoints in extra AZs** | $7.30/AZ/mo | Wizard defaults to selecting all AZs |
+| **Cross-AZ chatter** | <cite index="6-1">$0.01/GB each way</cite> | Our lab is cross-AZ by design; at scale this adds up |
+| **Flow Logs to CloudWatch** | $0.50/GB ingest | A busy VPC generates GBs of logs daily |
+| **Reachability Analyzer** | $0.10/run | Easy to run 20 times while debugging = $2 |
+| **NAT data processing** | $0.045/GB | <cite index="20-1">The data processing charge applies even when the destination is another AWS service in the same region</cite> |
+| **EBS snapshots** | $0.05/GB-mo | Auto-created by backup policies you forgot about |
+
+> **The cross-AZ note is worth internalizing.** <cite index="6-1">Same-AZ data transfer is free; cross-AZ adds $0.01/GB each way. Keep chatty services in the same AZ.</cite> Our lab puts instances in different AZs *specifically to teach that they can still talk* — but a production database replicating 500 GB/day across AZs would cost ~$300/month in transfer alone.
+
+---
+
+## 8. Cost Guardrails — Set These Up Now
+
+### 8.1 A billing alert (5 minutes, prevents most horror stories)
+
+1. **Billing and Cost Management → Budgets → Create budget**
+2. Choose **Zero spend budget** (alerts at any charge) or **Monthly cost budget**
+3. Set threshold: **$5**
+4. Add your email → **Create budget**
+
+You'll get an email the moment anything unexpected accrues. This has saved more people from four-figure surprise bills than any other single AWS feature.
+
+### 8.2 Verify you're clean after the lab
+
+| Check | Where | Looking for |
+|-------|-------|-------------|
+| Endpoints deleted | VPC → Endpoints | Empty list |
+| Instances terminated | EC2 → Instances | State = Terminated |
+| No stray EIPs | EC2 → Elastic IPs | Nothing unassociated |
+| No orphan volumes | EC2 → Volumes | Nothing in `available` state |
+| No orphan ENIs | EC2 → Network Interfaces | Nothing in `available` state |
+| Nothing accruing | Cost Explorer → filter to today | $0.00 trending |
+
+> **Cost Explorer lags 24 hours.** Check it the day *after* cleanup, not immediately. Immediately after cleanup it'll still show yesterday's charges and you'll think something is wrong.
+
+### 8.3 Set a phone alarm
+
+Genuinely. Set a timer for 3 hours when you start. The #1 cause of surprise AWS bills isn't misconfiguration — it's getting distracted mid-lab and never coming back.
+
+---
+
+## 9. Cheapest Possible Version of This Lab
+
+If you want to run the tutorial for the absolute minimum:
+
+| Change | Saves | Tradeoff |
+|--------|-------|----------|
+| Endpoints in 1 AZ instead of 2 | $0.03/hr | Both instances still work; less resilient |
+| Use `t4g.nano` instead of `t3.micro` | $0.012/hr | ARM Graviton; <cite index="14-1">~$3/month, 2 vCPU / 0.5 GiB RAM</cite>; AL2023 ARM AMI has SSM agent |
+| Skip Reachability Analyzer | $0.10/run | Manual diagnosis (arguably better learning) |
+| Skip Flow Logs | ~$0.05 | Lab 5 is less vivid without the ACCEPT/REJECT proof |
+| Skip Lab 6 (`instance-c` + peering) | ~$0.01/hr | Miss the cross-VPC lesson |
+| Do it all in one AZ | ~$0 | Miss the cross-AZ latency observation |
+
+**Minimum viable lab (1 AZ endpoints, 2× t4g.nano, 2 hrs):**
+
+| Item | Cost |
+|------|------|
+| 3 endpoints × 1 AZ × 2 hrs | $0.06 |
+| 2 × t4g.nano × 2 hrs | $0.017 |
+| EBS | $0.004 |
+| **TOTAL** | **$0.08** |
+
+**Free Tier account, minimum config:** ≈ **$0.06** (endpoints only).
+
+---
+
+## 10. Quick Reference
+
+```
+FREE:      VPC, subnets, route tables, security groups, NACLs,
+           IAM roles, IGW, peering (hourly), S3/DynamoDB gateway endpoints,
+           SSM service itself
+
+$0.01/hr:  each interface endpoint, PER AZ         ← the lab's main cost
+$0.0104/hr: t3.micro Linux
+$0.005/hr: public IPv4 address (even unused)
+$0.045/hr: NAT gateway (+ $0.045/GB)
+$0.10:     each Reachability Analyzer run
+$0.01/GB:  cross-AZ data transfer, each way
+$0.01/GB:  interface endpoint data processing
+```
+
+**The three numbers that matter for this lab:**
+
+1. **$0.06/hour** — three endpoints, two AZs, running idle
+2. **$43.80/month** — the same thing if you forget to delete it
+3. **$0.16** — what the lab actually costs if you clean up
+
+**Delete the VPC endpoints first during cleanup.** They're the expensive part, they bill by the hour regardless of use, and <cite index="7-1">hourly billing for your VPC endpoint will stop when you delete it. Each partial VPC endpoint-hour consumed is billed as a full hour.</cite>
+
 
 ## Table of Contents
 
