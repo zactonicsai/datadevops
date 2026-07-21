@@ -1,84 +1,119 @@
-# Local NiFi + Keycloak OIDC test (Docker Compose)
+# Local NiFi + Keycloak + simulated Active Directory (Docker Compose)
 
-A two-container sandbox that reproduces the tutorial's login flow on your laptop:
-**NiFi 2.10.0** (HTTPS, self-signed cert) logging in through **Keycloak 26.6** (OIDC).
-No AWS, no domain, no cost.
+A three-tier sandbox that reproduces the full enterprise login chain on your laptop:
+**NiFi 2.10.0** → OIDC → **Keycloak 26.6** → LDAP federation → **Active Directory**
+(simulated by a **Samba AD Domain Controller**). No AWS, no Windows Server, no cost.
 
 ```
 Browser ──https──▶ NiFi  https://localhost:8443/nifi
    │                 │
-   │  redirect       │  discovery + token exchange (Docker network)
+   │  redirect       │  OIDC discovery + token exchange
    ▼                 ▼
-Keycloak  http://keycloak:8080   (realm "nifi" auto-imported on first boot)
+Keycloak  http://keycloak:8080     realm "nifi" (imported on first boot)
+                     │
+                     │  LDAP bind & search (federation, port 389)
+                     ▼
+Samba AD DC   domain CORP.EXAMPLE.COM     users: bob, carol · group: nifi-admins
 ```
+
+**Why Samba?** Samba's AD DC mode is a genuine open-source reimplementation of
+Microsoft Active Directory — same LDAP schema (`sAMAccountName`, `objectGUID`,
+`mail`, `userAccountControl`), same account-disable semantics. Keycloak is
+configured with **Vendor = Active Directory**, exactly as it would be against
+real Windows DCs, so everything you test here transfers 1:1.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `docker-compose.yml` | The whole stack: cert generator + Keycloak + NiFi |
-| `keycloak/realm-nifi.json` | Auto-imported realm: OIDC client `nifi` + demo user |
+| `docker-compose.yml` | The stack: AD DC + cert generator + Keycloak + NiFi |
+| `ad/Dockerfile` | Ubuntu + Samba image for the domain controller |
+| `ad/entrypoint.sh` | First-boot provisioning: domain, users bob/carol, group `nifi-admins` |
+| `keycloak/realm-nifi.json` | Realm import: OIDC client, local user alice, **and the AD LDAP federation provider with all mappers** |
 
 ## One-time prep: hosts entry
-
-Your **browser** and the **NiFi container** must reach Keycloak at the *same hostname*,
-or the token issuer won't match and login fails. Inside Docker that name is `keycloak`,
-so teach your laptop the same name:
 
 ```
 127.0.0.1  keycloak
 ```
-
-- Linux/macOS: add the line to `/etc/hosts` (needs sudo)
-- Windows: `C:\Windows\System32\drivers\etc\hosts` (edit as Administrator)
+(`/etc/hosts` on Linux/macOS, `C:\Windows\System32\drivers\etc\hosts` as Administrator on Windows.)
 
 ## Run it
 
 ```bash
-docker compose up -d
-docker compose logs -f nifi     # wait for "Started Application" (~1–2 min)
+docker compose up -d --build
+docker compose logs -f ad        # first boot: watch the domain provision (~30-60s)
+docker compose logs -f nifi      # wait for "Started Application" (~1-2 min)
 ```
 
-1. Open **https://localhost:8443/nifi** → accept the self-signed-certificate warning
-   (click *Advanced → Proceed*; expected — it's a locally generated cert).
-2. You're redirected to the Keycloak login page at `http://keycloak:8080`.
-3. Log in as **alice / password** → back to NiFi, canvas loads, top-right shows
-   `alice@example.com` (she's the initial admin via `INITIAL_ADMIN_IDENTITY`).
+### Test 1 — local Keycloak user (the admin)
+Open **https://localhost:8443/nifi** → accept the cert warning → log in **alice / password**.
+Alice lives *inside Keycloak* and is NiFi's initial admin.
 
-Keycloak admin console: **http://keycloak:8080** → **admin / admin**
-(switch to the `nifi` realm to see the imported client and user).
+### Test 2 — Active Directory user (the federation payoff)
+Log out, log in as **bob / Password1!**.
+Bob does **not exist in Keycloak** — Keycloak finds him via LDAP in the Samba DC and
+verifies the password with a live bind against AD. He lands in NiFi as
+`bob@corp.example.com` (his AD `mail` attribute → the `email` claim).
+
+Bob will see *"No applicable policies"* — that's authentication vs. authorization,
+live: AD/Keycloak proved who he is; NiFi hasn't granted him anything. Fix it as alice:
+NiFi menu → **Policies** → *view the user interface* → Add user `bob@corp.example.com`.
+
+### Test 3 — the AD kill switch
+```bash
+docker compose exec ad samba-tool user disable bob
+```
+Bob's next login fails instantly (the MSAD account-controls mapper honors AD's
+disabled flag) — the "one kill switch" property of federation. Re-enable:
+```bash
+docker compose exec ad samba-tool user enable bob
+```
+
+### Poke at the directory
+```bash
+# List users straight from the DC
+docker compose exec ad samba-tool user list
+# Search over LDAP like Keycloak does
+docker compose exec ad ldbsearch -H /var/lib/samba/private/sam.ldb \
+  '(sAMAccountName=bob)' mail memberOf
+# Add a brand-new employee — she can log in to NiFi seconds later
+docker compose exec ad samba-tool user create dave 'Password1!' \
+  --given-name=Dave --surname=Doe --mail-address=dave@corp.example.com
+```
+
+Keycloak admin console: **http://keycloak:8080** (admin/admin) → realm `nifi` →
+**User federation → active-directory** to see the provider, its mappers, and the
+*Sync all users* action. Federated users appear under *Users* after first login or sync.
+
+## What the federation config in `realm-nifi.json` does
+
+The `components` block is the same LDAP provider you'd click together in the console
+(see the AD federation tutorial), captured as code:
+
+- **`vendor: ad`**, `usernameLDAPAttribute: sAMAccountName`, `uuidLDAPAttribute: objectGUID` — AD dialect.
+- **`bindDn` = Administrator** — sandbox shortcut; production uses a read-only service account.
+- **`customUserSearchFilter: (&(mail=*)(!(sAMAccountName=krbtgt)))`** — import only
+  real users that have an email (NiFi identifies by the `email` claim), and skip
+  AD's internal `krbtgt` account.
+- **`editMode: READ_ONLY`**, `trustEmail: true`, hourly changed-user sync, daily full sync.
+- **Mappers**: username/email/first/last attribute mappers, the **MSAD account controls**
+  mapper (AD disable ⇒ login blocked), and a **group mapper** that mirrors any AD group
+  named `nifi-*` (bob is in `nifi-admins`) into Keycloak groups.
 
 ## Reset / tear down
 
 ```bash
-docker compose down          # stop (realm + certs kept in volumes)
-docker compose down -v       # stop AND wipe everything for a fresh start
+docker compose down          # stop (AD domain, realm, certs kept in volumes)
+docker compose down -v       # wipe everything, re-provision from scratch next up
 ```
 
-## How the pieces map to the AWS tutorial
+## Sandbox vs. production differences
 
-| Local piece | AWS equivalent |
+| Here (local) | Production (see the AD federation tutorial) |
 |---|---|
-| `cert-init` self-signed keystore | NiFi's auto-generated cert behind the ALB |
-| Browser cert warning | ACM certificate on the ALB (no warning) |
-| hosts-file entry `keycloak` | Route 53 record `auth.example.com` |
-| `KC_HOSTNAME=http://keycloak:8080` | `hostname=https://auth.example.com` + proxy headers |
-| Realm JSON `--import-realm` | Ansible `keycloak_realm` / `keycloak_client` modules |
-| Env vars on the `nifi` service | `nifi.properties` templated by Ansible |
-| `nifi-local-secret` in the compose file | Secret generated by Keycloak, stored in SSM |
-
-## Common local hiccups
-
-- **"Invalid parameter: redirect_uri"** — you opened NiFi at a different address
-  (e.g. `127.0.0.1:8443` instead of `localhost:8443`). The redirect URI in the realm
-  JSON is exact-match: use `https://localhost:8443/nifi`.
-- **Login works but NiFi shows "No applicable policies"** — the identity must equal
-  `alice@example.com` exactly. If you edited the user's email after first NiFi start,
-  run `docker compose down -v` and start fresh (NiFi persisted the old `users.xml`).
-- **Browser can't reach the Keycloak login page** — the hosts entry is missing;
-  `ping keycloak` on your laptop should answer from 127.0.0.1.
-- **NiFi exits early complaining about the discovery URL** — Keycloak wasn't healthy
-  yet; the compose healthcheck normally prevents this, just `docker compose up -d` again.
-
-> ⚠️ Everything here (plain-HTTP Keycloak, `admin/admin`, hardcoded client secret,
-> self-signed certs) is for local testing only — the production path is the AWS tutorial.
+| Plain LDAP on 389 inside Docker | **LDAPS 636** + AD CA cert via `truststore-paths` |
+| Bind as `Administrator` | Dedicated **read-only service account**, secret in Secrets Manager |
+| Samba AD DC container | Real Windows DCs (via VPN/Direct Connect) or AWS Managed Microsoft AD |
+| Passwords `Password1!` etc. | Real AD password policy, MFA, lockout |
+| Federation config baked in realm JSON | Ansible `keycloak_*` modules / console, per environment |

@@ -41,5 +41,109 @@
         }
       ]
     }
-  ]
+  ],
+  "components": {
+    "org.keycloak.storage.UserStorageProvider": [
+      {
+        "name": "active-directory",
+        "providerId": "ldap",
+        "subComponents": {
+          "org.keycloak.storage.ldap.mappers.LDAPStorageMapper": [
+            {
+              "name": "username",
+              "providerId": "user-attribute-ldap-mapper",
+              "config": {
+                "ldap.attribute": ["sAMAccountName"],
+                "user.model.attribute": ["username"],
+                "read.only": ["true"],
+                "always.read.value.from.ldap": ["false"],
+                "is.mandatory.in.ldap": ["true"]
+              }
+            },
+            {
+              "name": "email",
+              "providerId": "user-attribute-ldap-mapper",
+              "config": {
+                "ldap.attribute": ["mail"],
+                "user.model.attribute": ["email"],
+                "read.only": ["true"],
+                "always.read.value.from.ldap": ["false"],
+                "is.mandatory.in.ldap": ["false"]
+              }
+            },
+            {
+              "name": "first name",
+              "providerId": "user-attribute-ldap-mapper",
+              "config": {
+                "ldap.attribute": ["givenName"],
+                "user.model.attribute": ["firstName"],
+                "read.only": ["true"],
+                "always.read.value.from.ldap": ["true"],
+                "is.mandatory.in.ldap": ["false"]
+              }
+            },
+            {
+              "name": "last name",
+              "providerId": "user-attribute-ldap-mapper",
+              "config": {
+                "ldap.attribute": ["sn"],
+                "user.model.attribute": ["lastName"],
+                "read.only": ["true"],
+                "always.read.value.from.ldap": ["true"],
+                "is.mandatory.in.ldap": ["false"]
+              }
+            },
+            {
+              "name": "MSAD account controls",
+              "providerId": "msad-user-account-control-mapper",
+              "config": {}
+            },
+            {
+              "name": "nifi-groups",
+              "providerId": "group-ldap-mapper",
+              "config": {
+                "groups.dn": ["CN=Users,DC=corp,DC=example,DC=com"],
+                "group.name.ldap.attribute": ["cn"],
+                "group.object.classes": ["group"],
+                "membership.ldap.attribute": ["member"],
+                "membership.attribute.type": ["DN"],
+                "membership.user.ldap.attribute": ["sAMAccountName"],
+                "groups.ldap.filter": ["(cn=nifi-*)"],
+                "mode": ["READ_ONLY"],
+                "user.roles.retrieve.strategy": ["LOAD_GROUPS_BY_MEMBER_ATTRIBUTE"],
+                "drop.non.existing.groups.during.sync": ["false"]
+              }
+            }
+          ]
+        },
+        "config": {
+          "enabled": ["true"],
+          "priority": ["1"],
+          "vendor": ["ad"],
+          "connectionUrl": ["ldap://ad:389"],
+          "startTls": ["false"],
+          "authType": ["simple"],
+          "bindDn": ["CN=Administrator,CN=Users,DC=corp,DC=example,DC=com"],
+          "bindCredential": ["Adm1nP@ssw0rd!"],
+          "usersDn": ["CN=Users,DC=corp,DC=example,DC=com"],
+          "usernameLDAPAttribute": ["sAMAccountName"],
+          "rdnLDAPAttribute": ["cn"],
+          "uuidLDAPAttribute": ["objectGUID"],
+          "userObjectClasses": ["person, organizationalPerson, user"],
+          "customUserSearchFilter": ["(&(mail=*)(!(sAMAccountName=krbtgt)))"],
+          "searchScope": ["2"],
+          "editMode": ["READ_ONLY"],
+          "importEnabled": ["true"],
+          "syncRegistrations": ["false"],
+          "trustEmail": ["true"],
+          "pagination": ["true"],
+          "batchSizeForSync": ["1000"],
+          "fullSyncPeriod": ["86400"],
+          "changedSyncPeriod": ["3600"],
+          "useTruststoreSpi": ["never"],
+          "connectionPooling": ["true"]
+        }
+      }
+    ]
+  }
 }

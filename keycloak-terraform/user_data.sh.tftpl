@@ -1,0 +1,121 @@
+#!/bin/bash
+###############################################################################
+# user_data.sh.tftpl — runs ONCE, as root, the first time the instance boots.
+#
+# Terraform fills in the $${...} placeholders before sending this to AWS.
+# Logs land in /var/log/cloud-init-output.log — check there if boot fails.
+###############################################################################
+set -euxo pipefail
+
+# --- 1. Base packages -------------------------------------------------------
+dnf update -y
+dnf install -y java-21-amazon-corretto-headless jq awscli tar
+
+# --- 2. Dedicated unprivileged user ----------------------------------------
+# Keycloak must never run as root.
+useradd --system --shell /sbin/nologin --home-dir /opt/keycloak keycloak || true
+
+# --- 3. Download and unpack Keycloak ---------------------------------------
+KC_VERSION="${keycloak_version}"
+cd /opt
+curl -fsSL -o keycloak.tar.gz \
+  "https://github.com/keycloak/keycloak/releases/download/$${KC_VERSION}/keycloak-$${KC_VERSION}.tar.gz"
+tar -xzf keycloak.tar.gz
+rm -f keycloak.tar.gz
+rm -rf /opt/keycloak-dist
+mv "keycloak-$${KC_VERSION}" /opt/keycloak-dist
+chown -R keycloak:keycloak /opt/keycloak-dist
+
+# --- 4. Fetch the DB password from Secrets Manager --------------------------
+# The instance profile grants secretsmanager:GetSecretValue. The password
+# is never written into Terraform state files on disk here.
+SECRET_JSON=$(aws secretsmanager get-secret-value \
+  --secret-id "${secret_arn}" \
+  --region "${aws_region}" \
+  --query SecretString --output text)
+
+DB_USER=$(echo "$SECRET_JSON" | jq -r .username)
+DB_PASS=$(echo "$SECRET_JSON" | jq -r .password)
+
+# --- 5. Write the Keycloak configuration ------------------------------------
+mkdir -p /etc/keycloak
+cat > /etc/keycloak/keycloak.conf <<EOF
+# Database
+db=postgres
+db-url=jdbc:postgresql://${db_host}:${db_port}/${db_name}
+db-username=$DB_USER
+db-password=$DB_PASS
+db-pool-initial-size=5
+db-pool-min-size=5
+db-pool-max-size=20
+
+# HTTP: TLS terminates at the load balancer, so plain HTTP inside the VPC.
+http-enabled=true
+http-port=8080
+hostname=https://${keycloak_hostname}
+hostname-strict=true
+
+# Trust the X-Forwarded-* headers the ALB sets. Without this Keycloak
+# generates links with the wrong scheme and redirects break.
+proxy-headers=xforwarded
+
+# Health and metrics endpoints for ALB health checks and monitoring.
+health-enabled=true
+metrics-enabled=true
+EOF
+
+chmod 600 /etc/keycloak/keycloak.conf
+chown keycloak:keycloak /etc/keycloak/keycloak.conf
+
+# --- 6. Build the optimized server image ------------------------------------
+# 'kc.sh build' pre-compiles config so startup is fast and predictable.
+sudo -u keycloak /opt/keycloak-dist/bin/kc.sh build --db=postgres
+
+# --- 7. systemd unit --------------------------------------------------------
+cat > /etc/systemd/system/keycloak.service <<'EOF'
+[Unit]
+Description=Keycloak Identity and Access Management
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=keycloak
+Group=keycloak
+EnvironmentFile=-/etc/keycloak/bootstrap.env
+ExecStart=/opt/keycloak-dist/bin/kc.sh start --optimized
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=102400
+SuccessExitStatus=0 143
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# --- 8. First-boot admin bootstrap ------------------------------------------
+# These two variables create the temporary admin account ONLY on an empty
+# database. Log in, create a real admin, then delete this file and restart.
+BOOTSTRAP_PASS=$(openssl rand -base64 24)
+cat > /etc/keycloak/bootstrap.env <<EOF
+KC_BOOTSTRAP_ADMIN_USERNAME=${admin_username}
+KC_BOOTSTRAP_ADMIN_PASSWORD=$BOOTSTRAP_PASS
+KC_CONFIG_FILE=/etc/keycloak/keycloak.conf
+EOF
+chmod 600 /etc/keycloak/bootstrap.env
+
+# Stash the temp password where only root can read it.
+echo "$BOOTSTRAP_PASS" > /root/keycloak-bootstrap-password.txt
+chmod 600 /root/keycloak-bootstrap-password.txt
+
+# --- 9. Start ---------------------------------------------------------------
+systemctl daemon-reload
+systemctl enable --now keycloak
+
+echo "Keycloak bootstrap complete. Temp admin password in /root/keycloak-bootstrap-password.txt"

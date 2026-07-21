@@ -1,0 +1,107 @@
+###############################################################################
+# terraform.tfvars.example
+#
+# HOW TO USE:
+#   cp terraform.tfvars.example prod.tfvars
+#   Then replace EVERY <ANGLE-BRACKET> placeholder with a real value.
+#   Run with:  terraform apply -var-file=prod.tfvars
+#
+# NEVER commit a real .tfvars file to git. Add "*.tfvars" to .gitignore
+# and commit only this .example file.
+###############################################################################
+
+# ---------------------------------------------------------------------------
+# General
+# ---------------------------------------------------------------------------
+aws_region  = "us-east-1"
+name_prefix = "keycloak-prod"
+
+common_tags = {
+  Environment = "production"
+  Application = "keycloak"
+  Owner       = "platform-team"
+  ManagedBy   = "terraform"
+  CostCenter  = "<YOUR-COST-CENTER>"
+}
+
+# ---------------------------------------------------------------------------
+# Pre-existing networking — get these from the AWS console or your network team
+# ---------------------------------------------------------------------------
+
+# aws ec2 describe-vpcs --query 'Vpcs[].[VpcId,Tags]'
+vpc_id = "vpc-<REPLACE-ME>"
+
+# The PRIVATE subnet holding the Keycloak server.
+# aws ec2 describe-subnets --filters Name=vpc-id,Values=vpc-xxxx
+instance_subnet_id = "subnet-<REPLACE-ME-PRIVATE-A>"
+
+# Two or more PRIVATE subnets in DIFFERENT availability zones for RDS.
+db_subnet_ids = [
+  "subnet-<REPLACE-ME-PRIVATE-A>",
+  "subnet-<REPLACE-ME-PRIVATE-B>",
+]
+
+# SG on the EC2 box. Inbound 8080 from the ALB SG, outbound 5432 to the DB SG.
+instance_security_group_ids = ["sg-<REPLACE-ME-APP-SG>"]
+
+# SG on RDS. Inbound 5432 from the EC2 SG ONLY. No 0.0.0.0/0. Ever.
+db_security_group_ids = ["sg-<REPLACE-ME-DB-SG>"]
+
+# Target group behind your existing ALB. Health check path should be
+# /health/ready on port 8080. Set to null to skip ALB registration.
+target_group_arn = "arn:aws:elasticloadbalancing:us-east-1:<ACCOUNT-ID>:targetgroup/<TG-NAME>/<TG-ID>"
+
+# ---------------------------------------------------------------------------
+# Pre-existing IAM and keys
+# ---------------------------------------------------------------------------
+
+# Instance profile needs: AmazonSSMManagedInstanceCore (managed policy)
+#                       + secretsmanager:GetSecretValue on the Keycloak secret
+iam_instance_profile_name = "<REPLACE-ME-instance-profile-name>"
+
+# Set to null if you rely on SSM Session Manager only (recommended).
+key_pair_name = null
+
+# Customer-managed KMS keys. Leave null to use AWS-managed keys.
+ebs_kms_key_arn        = null
+db_kms_key_arn         = null
+db_monitoring_role_arn = null
+
+# ---------------------------------------------------------------------------
+# EC2 instance
+# ---------------------------------------------------------------------------
+instance_type    = "t3.medium"
+root_volume_size = 30
+
+# Check https://github.com/keycloak/keycloak/releases for the current release.
+keycloak_version = "26.4.0"
+
+# Must match the certificate on your load balancer listener.
+keycloak_hostname       = "auth.<YOUR-DOMAIN>.com"
+keycloak_admin_username = "admin"
+
+# ---------------------------------------------------------------------------
+# RDS PostgreSQL
+# ---------------------------------------------------------------------------
+db_engine_version        = "17"
+db_instance_class        = "db.t4g.medium"
+db_allocated_storage     = 20
+db_max_allocated_storage = 100
+db_name                  = "keycloak"
+db_username              = "kcadmin"
+
+db_multi_az              = true
+db_backup_retention_days = 7
+db_backup_window         = "03:00-04:00"
+db_maintenance_window    = "sun:04:30-sun:05:30"
+
+db_performance_insights = true
+db_monitoring_interval  = 0
+
+db_deletion_protection = true
+db_skip_final_snapshot = false
+
+# ---------------------------------------------------------------------------
+# Secrets Manager
+# ---------------------------------------------------------------------------
+secret_recovery_window_days = 7

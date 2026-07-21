@@ -1,0 +1,50 @@
+###############################################################################
+# dev.tfvars.example — cheap, disposable environment.
+#
+# Differences from production: single-AZ database, no deletion protection,
+# no final snapshot, shorter backups, smaller instances.
+# Roughly one third the monthly cost of the production settings.
+###############################################################################
+
+aws_region  = "us-east-1"
+name_prefix = "keycloak-dev"
+
+common_tags = {
+  Environment = "development"
+  Application = "keycloak"
+  ManagedBy   = "terraform"
+}
+
+vpc_id             = "vpc-<REPLACE-ME>"
+instance_subnet_id = "subnet-<REPLACE-ME-PRIVATE-A>"
+
+db_subnet_ids = [
+  "subnet-<REPLACE-ME-PRIVATE-A>",
+  "subnet-<REPLACE-ME-PRIVATE-B>",
+]
+
+instance_security_group_ids = ["sg-<REPLACE-ME-APP-SG>"]
+db_security_group_ids       = ["sg-<REPLACE-ME-DB-SG>"]
+target_group_arn            = "arn:aws:elasticloadbalancing:us-east-1:<ACCOUNT-ID>:targetgroup/<TG-NAME>/<TG-ID>"
+
+iam_instance_profile_name = "<REPLACE-ME-instance-profile-name>"
+key_pair_name             = null
+
+instance_type     = "t3.small"
+root_volume_size  = 20
+keycloak_version  = "26.4.0"
+keycloak_hostname = "auth-dev.<YOUR-DOMAIN>.com"
+
+db_engine_version        = "17"
+db_instance_class        = "db.t4g.micro"
+db_allocated_storage     = 20
+db_max_allocated_storage = 20
+
+db_multi_az              = false   # single AZ: half the cost, brief outage on failure
+db_backup_retention_days = 1
+db_performance_insights  = false
+
+db_deletion_protection = false   # so you can tear it down easily
+db_skip_final_snapshot = true    # no snapshot on destroy
+
+secret_recovery_window_days = 0  # lets you recreate the secret immediately

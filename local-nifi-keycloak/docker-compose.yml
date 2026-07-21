@@ -1,4 +1,4 @@
-# Local NiFi 2.x + Keycloak 26 OIDC test stack
+# Local NiFi 2.x + Keycloak 26 + simulated Active Directory (Samba AD DC)
 #
 # ONE-TIME PREP: add this line to your hosts file so your BROWSER can
 # resolve the same hostname NiFi uses inside the Docker network:
@@ -7,15 +7,43 @@
 #
 #   Linux/macOS: /etc/hosts        Windows: C:\Windows\System32\drivers\etc\hosts
 #
-# Then:  docker compose up -d
-#   NiFi:     https://localhost:8443/nifi      (accept the self-signed cert warning)
-#   Keycloak: http://keycloak:8080             (admin / admin)
-#   Log in to NiFi as:  alice / password
+# Then:  docker compose up -d --build     (AD provisions itself on first boot, ~30-60s)
+#   NiFi:     https://localhost:8443/nifi   (accept the self-signed cert warning)
+#   Keycloak: http://keycloak:8080          (admin / admin)
+#   Log in to NiFi as:
+#     alice / password       <- local Keycloak user (initial NiFi admin)
+#     bob   / Password1!     <- ACTIVE DIRECTORY user, verified live against the DC
 #
-# FOR LOCAL TESTING ONLY: plain-HTTP Keycloak, hardcoded demo secrets,
-# self-signed certs. See the main tutorial for the production AWS setup.
+# FOR LOCAL TESTING ONLY: plain-LDAP federation (prod = LDAPS 636 + truststore),
+# plain-HTTP Keycloak, hardcoded demo secrets, self-signed certs.
 
 services:
+
+  # ------------------------------------------------------------------
+  # Simulated Active Directory: a Samba AD Domain Controller.
+  # Samba AD is a real reimplementation of Microsoft AD — same LDAP
+  # schema (sAMAccountName, objectGUID, userAccountControl), so
+  # Keycloak's "Active Directory" vendor mode behaves as against real AD.
+  # Domain: CORP.EXAMPLE.COM  |  Users: bob, carol  |  Group: nifi-admins
+  # ------------------------------------------------------------------
+  ad:
+    build: ./ad
+    hostname: ad
+    environment:
+      AD_ADMIN_PASSWORD: "Adm1nP@ssw0rd!"
+    volumes:
+      - ad-data:/var/lib/samba          # domain database persists across restarts
+    healthcheck:
+      # healthy once the LDAP port answers (provisioning takes a while on first boot)
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/389'"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+    # No published ports needed: only Keycloak talks to AD, over the Docker network.
+    # (Uncomment to poke at it from your laptop with an LDAP browser:)
+    # ports:
+    #   - "10389:389"
 
   # One-shot job: generate a self-signed keystore/truststore for NiFi.
   # (The apache/nifi image requires these when AUTH=oidc; NiFi 2.x must serve HTTPS.)
@@ -53,13 +81,17 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      # Imports the realm, the 'nifi' client, and the demo user on first boot
+      # Imports the realm, the 'nifi' client, the demo user AND the
+      # Active Directory LDAP federation provider on first boot
       - ./keycloak:/opt/keycloak/data/import:ro
     healthcheck:
       test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080 && echo -e 'GET /realms/nifi HTTP/1.0\\r\\n\\r\\n' >&3 && cat <&3 | grep -q '200'"]
       interval: 5s
       timeout: 3s
       retries: 30
+    depends_on:
+      ad:
+        condition: service_healthy    # federation config points at AD; be sure it's up
 
   nifi:
     image: apache/nifi:2.10.0
@@ -90,7 +122,9 @@ services:
       NIFI_SECURITY_USER_OIDC_READ_TIMEOUT: 5 secs
       NIFI_SECURITY_USER_OIDC_TRUSTSTORE_STRATEGY: JDK
 
-      # --- authorization: first admin = the demo user's email claim ---
+      # --- authorization: first admin = the LOCAL demo user's email claim.
+      #     AD users (bob, carol) authenticate fine but have no policies until
+      #     alice grants them access in the NiFi UI — AuthN vs AuthZ, live demo.
       INITIAL_ADMIN_IDENTITY: alice@example.com
     volumes:
       - nifi-certs:/opt/certs:ro
@@ -102,3 +136,4 @@ services:
 
 volumes:
   nifi-certs:
+  ad-data:
