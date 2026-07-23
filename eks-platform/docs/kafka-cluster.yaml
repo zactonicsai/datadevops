@@ -1,0 +1,173 @@
+# =============================================================================
+# docs/kafka-cluster.yaml
+# =============================================================================
+# The plain-YAML equivalent of 06-kafka-cluster/main.tf.
+#
+# Apply with:
+#     kubectl apply -f docs/kafka-cluster.yaml
+#
+# CRITICAL: note "apiVersion: kafka.strimzi.io/v1".
+# Strimzi 1.0.0 REMOVED v1beta2. Nearly every Kafka-on-Kubernetes tutorial
+# online still shows v1beta2 and will be rejected with "no matches for kind".
+# =============================================================================
+---
+# ---- CONTROLLERS: three, for Raft quorum ----
+# Three is the smallest useful number. One tolerates zero failures; TWO also
+# tolerates zero (a majority of 2 is still 2), so it costs more for nothing.
+# Three tolerates one failure. Controller counts are always odd.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaNodePool
+metadata:
+  name: controller
+  namespace: kafka
+  labels:
+    # MANDATORY. Without it the pool is silently ignored and the Kafka
+    # resource waits forever for nodes that never arrive.
+    strimzi.io/cluster: demo-kafka
+spec:
+  replicas: 3
+  roles:
+    - controller
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      memory: 1536Mi
+  storage:
+    # JBOD even for one volume: it is the only type that lets you ADD disks
+    # later without recreating the cluster.
+    type: jbod
+    volumes:
+      - id: 0
+        type: persistent-claim
+        size: 10Gi
+        deleteClaim: true
+        class: gp3
+  template:
+    pod:
+      affinity:
+        podAntiAffinity:
+          # REQUIRED, not preferred. Two controllers on one node means losing
+          # that node loses quorum -- exactly what the third was meant to stop.
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  strimzi.io/cluster: demo-kafka
+                  strimzi.io/pool-name: controller
+              topologyKey: kubernetes.io/hostname
+---
+# ---- BROKERS: two ----
+# NOTE: 3 brokers with replication.factor=3 and min.insync.replicas=2 is the
+# production standard. Two is used here as requested; the trade-off is that
+# min.insync must drop to 1, which risks losing acknowledged writes.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaNodePool
+metadata:
+  name: broker
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: demo-kafka
+spec:
+  replicas: 2
+  roles:
+    - broker
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      memory: 3Gi
+  storage:
+    type: jbod
+    volumes:
+      - id: 0
+        type: persistent-claim
+        size: 20Gi
+        deleteClaim: true
+        class: gp3
+  template:
+    pod:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  strimzi.io/cluster: demo-kafka
+                  strimzi.io/pool-name: broker
+              topologyKey: kubernetes.io/hostname
+    kafkaContainer:
+      env:
+        # Heap at ~50% of the container limit. Kafka depends on OS page cache
+        # for read performance; a heap that fills the container destroys it.
+        - name: KAFKA_HEAP_OPTS
+          value: "-Xms1536m -Xmx1536m"
+---
+# ---- THE CLUSTER ----
+apiVersion: kafka.strimzi.io/v1
+kind: Kafka
+metadata:
+  name: demo-kafka
+  namespace: kafka
+  annotations:
+    # Both still REQUIRED in Strimzi 1.0 even though KRaft and node pools are
+    # the only supported mode. Omitting them gives a cluster that never
+    # becomes Ready, with an unhelpful error.
+    strimzi.io/kraft: enabled
+    strimzi.io/node-pools: enabled
+spec:
+  kafka:
+    version: 4.2.0
+    listeners:
+      # Plaintext, internal only. Demo choice: no certificate wrangling for
+      # command-line testing. For production set tls: true and add auth.
+      - name: plain
+        port: 9092
+        type: internal
+        tls: false
+      - name: tls
+        port: 9093
+        type: internal
+        tls: true
+    config:
+      # With only 2 brokers these are the maximum available.
+      offsets.topic.replication.factor: 2
+      transaction.state.log.replication.factor: 2
+      default.replication.factor: 2
+      # min.insync=1 keeps writes flowing during a broker restart, at the cost
+      # of a small window where an acknowledged write could be lost. With 3
+      # brokers you would set this to 2 and get both safety and availability.
+      transaction.state.log.min.isr: 1
+      min.insync.replicas: 1
+      log.retention.hours: 168
+      log.segment.bytes: 1073741824
+      # false so a typo'd topic name fails loudly instead of silently creating
+      # a junk topic nobody dares delete.
+      auto.create.topics.enable: false
+  entityOperator:
+    topicOperator:
+      resources:
+        requests: { cpu: 100m, memory: 256Mi }
+        limits: { memory: 512Mi }
+    userOperator:
+      resources:
+        requests: { cpu: 100m, memory: 256Mi }
+        limits: { memory: 512Mi }
+---
+# ---- A TEST TOPIC ----
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: demo-topic
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: demo-kafka
+spec:
+  # Partitions are the unit of parallelism and cap how many consumers in one
+  # group can work at once. You can increase this later but never decrease it,
+  # and increasing changes key-to-partition mapping (breaking per-key order).
+  partitions: 3
+  replicas: 2
+  config:
+    retention.ms: "3600000"
+    cleanup.policy: delete

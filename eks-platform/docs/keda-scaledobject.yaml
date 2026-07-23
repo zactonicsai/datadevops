@@ -1,0 +1,71 @@
+# =============================================================================
+# docs/keda-scaledobject.yaml
+# =============================================================================
+# The plain-YAML equivalent of 04-webapp/scaling.tf.
+#
+# Apply it with:
+#     kubectl apply -f docs/keda-scaledobject.yaml
+#
+# This exists so you can see the same object in both forms. The Terraform
+# version and this file produce an identical result; Terraform simply also
+# tracks it in state and can delete it again cleanly.
+# =============================================================================
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: hello-web-scaler
+  namespace: hello-web
+spec:
+  # The Deployment to resize. Must be in the same namespace.
+  scaleTargetRef:
+    name: hello-web
+    kind: Deployment
+
+  # Floor and ceiling. minReplicaCount could be 0 (KEDA's scale-to-zero
+  # feature) but a web server at 0 means a cold start for the first visitor.
+  minReplicaCount: 2
+  maxReplicaCount: 10
+
+  # How often KEDA checks the metric, in seconds.
+  pollingInterval: 15
+
+  # Wait this long after scaling down before scaling down again. Prevents
+  # thrashing when load fluctuates.
+  cooldownPeriod: 300
+
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        # Scale UP fast: users are already waiting.
+        scaleUp:
+          stabilizationWindowSeconds: 30
+          policies:
+            - type: Percent
+              value: 100
+              periodSeconds: 30
+            - type: Pods
+              value: 2
+              periodSeconds: 30
+          selectPolicy: Max
+        # Scale DOWN slowly: removing capacity too eagerly turns a dip into
+        # an outage when traffic returns.
+        scaleDown:
+          stabilizationWindowSeconds: 300
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 60
+          selectPolicy: Min
+
+  triggers:
+    # "50" means 50% of the CPU REQUEST (100m), i.e. 50m of actual usage.
+    # NOT 50% of a core and NOT 50% of the limit. This is the single most
+    # misunderstood number in Kubernetes autoscaling.
+    - type: cpu
+      metricType: Utilization
+      metadata:
+        value: "50"
+    - type: memory
+      metricType: Utilization
+      metadata:
+        value: "80"

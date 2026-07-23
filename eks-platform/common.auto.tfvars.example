@@ -1,0 +1,132 @@
+# =============================================================================
+# common.auto.tfvars.example
+# =============================================================================
+# WHAT THIS FILE IS
+#   A "tfvars" file holds the answers to the questions that the Terraform code
+#   asks. The Terraform code says "I need a region"; this file says "the region
+#   is us-east-1". Keeping answers here means you never have to edit the code.
+#
+# WHY THE NAME MATTERS
+#   Terraform automatically loads ANY file ending in ".auto.tfvars". You do not
+#   have to pass it on the command line. That is why the real file must be
+#   named "common.auto.tfvars" (no ".example" on the end).
+#
+# HOW TO USE IT
+#   1. Copy this file:   cp common.auto.tfvars.example common.auto.tfvars
+#   2. Edit the values below to match what you want.
+#   3. The setup script symlinks it into every layer directory for you.
+#
+# NOTE: "common.auto.tfvars" is listed in .gitignore because it can contain
+# account-specific details. This ".example" file is safe to commit.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# project_name
+# -----------------------------------------------------------------------------
+# A short nickname stuck on the front of every resource name we create.
+# It keeps our things easy to find in the AWS console and stops us from
+# colliding with somebody else's resources in a shared account.
+# Rules: lowercase letters, numbers and dashes only. Keep it under 20 chars,
+# because AWS glues extra text onto the end and some names have length limits.
+project_name = "eksdemo"
+
+# -----------------------------------------------------------------------------
+# aws_region
+# -----------------------------------------------------------------------------
+# The AWS region (a geographic cluster of data centers) where everything is
+# built. Pick one close to you to reduce latency, but note that prices differ
+# between regions. us-east-1 (N. Virginia) is usually the cheapest.
+aws_region = "us-east-1"
+
+# -----------------------------------------------------------------------------
+# kubernetes_version
+# -----------------------------------------------------------------------------
+# Which version of Kubernetes the EKS control plane runs.
+# We pin an exact minor version instead of saying "latest" so that a rerun of
+# terraform apply months from now produces the same cluster and does not
+# silently upgrade you. 1.34 is in AWS standard support as of July 2026.
+kubernetes_version = "1.34"
+
+# -----------------------------------------------------------------------------
+# vpc_cidr
+# -----------------------------------------------------------------------------
+# The private IP address range for our virtual network. "10.42.0.0/16" gives us
+# 65,536 addresses from 10.42.0.0 to 10.42.255.255.
+# The "/16" means "the first 16 bits (10.42) are fixed, the rest are ours".
+# Pick a range that does NOT overlap with any other network you might one day
+# want to connect to, or routing will break.
+vpc_cidr = "10.42.0.0/16"
+
+# -----------------------------------------------------------------------------
+# availability_zone_count
+# -----------------------------------------------------------------------------
+# How many separate data centers ("Availability Zones") to spread across.
+# 2 is the minimum EKS accepts. 3 is better for production because you can lose
+# a whole data center and still have a majority of Kafka controllers alive.
+# More zones = more NAT gateway cost if single_nat_gateway is false.
+availability_zone_count = 3
+
+# -----------------------------------------------------------------------------
+# single_nat_gateway
+# -----------------------------------------------------------------------------
+# A NAT gateway lets private nodes reach the internet (to pull container
+# images) without being reachable FROM the internet.
+#   true  = one shared NAT gateway     (~$32/month, but a single point of failure)
+#   false = one NAT gateway per zone   (~$32/month EACH, survives a zone outage)
+# We default to true because this is a learning/demo stack.
+single_nat_gateway = true
+
+# -----------------------------------------------------------------------------
+# node_instance_types
+# -----------------------------------------------------------------------------
+# The EC2 machine sizes allowed in our worker node group. Giving AWS a LIST
+# rather than one type is a best practice: if m6i.large is sold out in a zone,
+# AWS can fall back to m5.large instead of failing.
+# m6i.large = 2 vCPU / 8 GiB RAM. We need the RAM headroom for Kafka + NiFi.
+node_instance_types = ["m6i.large", "m5.large", "m6a.large"]
+
+# -----------------------------------------------------------------------------
+# node_group_min_size / desired_size / max_size
+# -----------------------------------------------------------------------------
+# The autoscaling boundaries for worker nodes.
+#   min     = never scale below this
+#   desired = how many to start with
+#   max     = never scale above this (your cost safety net)
+# We start at 3 so Kafka's 3 controllers can each land on a different node.
+node_group_min_size     = 3
+node_group_desired_size = 3
+node_group_max_size     = 6
+
+# -----------------------------------------------------------------------------
+# node_disk_size_gb
+# -----------------------------------------------------------------------------
+# Size of the root disk on each worker node, in gigabytes. This holds the
+# operating system, the container runtime, and every container image pulled
+# onto that node. NiFi and Kafka images are large; 50 GB is a safe floor.
+node_disk_size_gb = 50
+
+# -----------------------------------------------------------------------------
+# allowed_admin_cidrs
+# -----------------------------------------------------------------------------
+# Which source IP ranges may reach the Kubernetes API server from the internet.
+# "0.0.0.0/0" means "anywhere on earth". That is convenient for a demo but is
+# NOT a best practice.
+#
+# STRONGLY RECOMMENDED: replace this with your own public IP, like so:
+#   allowed_admin_cidrs = ["203.0.113.45/32"]
+# Find your public IP with:  curl -s https://checkip.amazonaws.com
+# The "/32" suffix means "exactly this one address and nothing else".
+allowed_admin_cidrs = ["0.0.0.0/0"]
+
+# -----------------------------------------------------------------------------
+# tags
+# -----------------------------------------------------------------------------
+# Key/value labels applied to every AWS resource. Tags are how you answer
+# questions like "what is this thing?" and "who do I bill for it?" months later.
+# Many companies enforce required tags with policy; ours are just good hygiene.
+tags = {
+  Project     = "eks-platform-tutorial"
+  Environment = "demo"
+  ManagedBy   = "terraform"
+  Owner       = "change-me"
+}

@@ -1,0 +1,52 @@
+# =============================================================================
+# .gitignore — what must never reach version control
+# =============================================================================
+
+# ---- STATE FILES: the most important entries here ----
+# State contains resource IDs AND secrets in plain text (certificate data,
+# tokens, any password Terraform touched). Committing it is a real breach.
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Terraform's crash log can also contain state fragments.
+crash.log
+crash.*.log
+
+# ---- Provider plugins and modules ----
+# Hundreds of MB of downloaded binaries. `terraform init` recreates them.
+.terraform/
+.terraform.lock.hcl.bak
+
+# NOTE: .terraform.lock.hcl itself SHOULD be committed. It pins exact provider
+# versions and checksums, which is how you get reproducible builds across a
+# team. Do not add it here.
+
+# ---- Variable files with real values ----
+# The .example file is safe and committed; the real one may hold account IDs,
+# your home IP, or other details you would rather not publish.
+common.auto.tfvars
+*.auto.tfvars
+!*.auto.tfvars.example
+*.tfvars
+!*.tfvars.example
+
+# ---- Plan output ----
+# A saved plan can contain secrets from state.
+*.tfplan
+plan.out
+
+# ---- Logs produced by the wrapper scripts ----
+logs/
+*.log
+
+# ---- Local kubeconfig ----
+kubeconfig
+kubeconfig-*
+.kube/
+
+# ---- Editor and OS noise ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
