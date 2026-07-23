@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+exec > >(tee /var/log/eks-test-runner-bootstrap.log | logger -t user-data -s 2>/dev/console) 2>&1
+
+dnf install -y jq tar gzip unzip
+
+KUBECTL_VERSION="v1.35.0"
+curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/$${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+chmod 0755 /usr/local/bin/kubectl
+
+HELM_VERSION="v3.20.2"
+curl -fsSLo /tmp/helm.tar.gz "https://get.helm.sh/helm-$${HELM_VERSION}-linux-amd64.tar.gz"
+tar -xzf /tmp/helm.tar.gz -C /tmp
+install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+
+cat > /usr/local/bin/eks-tutorial-test.sh <<'TEST'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+REGION="${aws_region}"
+CLUSTER_NAME="${cluster_name}"
+export KUBECONFIG=/root/.kube/config
+
+aws eks update-kubeconfig --region "$${REGION}" --name "$${CLUSTER_NAME}" --alias "$${CLUSTER_NAME}"
+
+kubectl get nodes -o wide
+kubectl get pods -A
+kubectl get pvc -A
+kubectl get scaledobject,hpa -n web
+kubectl get kafka,kafkanodepool,kafkatopic -n kafka
+kubectl get statefulset,pods,lease -n nifi
+
+# Test direct VPC-CNI pod-IP access from this EC2 instance.
+HELLO_POD_IP="$(kubectl get pod -n web -l app=hello-web -o jsonpath='{.items[0].status.podIP}')"
+curl -fsS --max-time 10 "http://$${HELLO_POD_IP}:8080" >/dev/null
+
+NIFI_POD_IP="$(kubectl get pod -n nifi -l app=nifi -o jsonpath='{.items[0].status.podIP}')"
+curl -fsS --max-time 20 "http://$${NIFI_POD_IP}:8080/nifi/" >/dev/null
+
+WEB_RESULTS="$(
+  for _ in $(seq 1 20); do
+    kubectl exec -n test-tools deployment/toolbox -- \
+      curl -fsS --max-time 10 http://hello-web.web.svc.cluster.local
+  done
+)"
+grep -F "Hello from server A" <<<"$${WEB_RESULTS}" >/dev/null
+grep -F "Hello from server B" <<<"$${WEB_RESULTS}" >/dev/null
+
+kubectl exec -n test-tools deployment/toolbox -- \
+  curl -fsS --max-time 15 http://nifi.nifi.svc.cluster.local:8080/nifi/ >/dev/null
+
+NIFI_CLUSTER_JSON="$(kubectl exec -n test-tools deployment/toolbox -- \
+  curl -fsS --max-time 20 http://nifi.nifi.svc.cluster.local:8080/nifi-api/controller/cluster)"
+[[ "$(jq -r '.cluster.nodes | length' <<<"$${NIFI_CLUSTER_JSON}")" -eq 2 ]]
+
+BROKER="$(kubectl get pods -n kafka -l strimzi.io/name=tutorial-kafka-kafka -o jsonpath='{.items[0].metadata.name}')"
+TEST_MESSAGE="ssm-runner-$(date +%s)"
+
+printf '%s\n' "$${TEST_MESSAGE}" | kubectl exec -i -n kafka "$${BROKER}" -- \
+  /opt/kafka/bin/kafka-console-producer.sh \
+  --bootstrap-server tutorial-kafka-kafka-bootstrap:9092 \
+  --topic tutorial-topic >/dev/null
+
+kubectl exec -n kafka "$${BROKER}" -- timeout 20 \
+  /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server tutorial-kafka-kafka-bootstrap:9092 \
+  --topic tutorial-topic \
+  --from-beginning \
+  --max-messages 20 | grep -F "$${TEST_MESSAGE}"
+
+echo "All SSM test-runner checks passed."
+TEST
+
+chmod 0755 /usr/local/bin/eks-tutorial-test.sh
+systemctl enable --now amazon-ssm-agent

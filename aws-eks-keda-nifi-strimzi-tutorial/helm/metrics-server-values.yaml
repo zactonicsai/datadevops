@@ -1,0 +1,25 @@
+# Keep two replicas so metrics remain available during one pod restart.
+replicas: 2
+
+# Spread replicas when possible.
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: metrics-server
+          topologyKey: kubernetes.io/hostname
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 200Mi
+  limits:
+    cpu: 300m
+    memory: 400Mi
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

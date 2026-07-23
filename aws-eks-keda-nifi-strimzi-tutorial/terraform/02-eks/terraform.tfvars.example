@@ -1,0 +1,10 @@
+aws_region         = "us-east-1"
+project_name       = "eks-keda-lab"
+environment        = "dev"
+kubernetes_version = "1.35"
+public_access_cidrs = ["203.0.113.10/32"]
+node_instance_types = ["m6i.large"]
+node_desired_size   = 4
+node_min_size       = 3
+node_max_size       = 6
+node_disk_size_gb   = 50

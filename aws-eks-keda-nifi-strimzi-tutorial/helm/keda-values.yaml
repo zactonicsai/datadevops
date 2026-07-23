@@ -1,0 +1,32 @@
+# Two operator replicas improve availability for this multi-node lab.
+operator:
+  replicaCount: 2
+
+metricsServer:
+  replicaCount: 2
+
+webhooks:
+  replicaCount: 2
+
+resources:
+  operator:
+    requests:
+      cpu: 100m
+      memory: 150Mi
+    limits:
+      cpu: 500m
+      memory: 500Mi
+  metricServer:
+    requests:
+      cpu: 100m
+      memory: 150Mi
+    limits:
+      cpu: 500m
+      memory: 500Mi
+  webhooks:
+    requests:
+      cpu: 50m
+      memory: 100Mi
+    limits:
+      cpu: 300m
+      memory: 300Mi

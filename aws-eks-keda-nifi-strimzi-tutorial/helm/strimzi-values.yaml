@@ -1,0 +1,15 @@
+# Watch only the kafka namespace to keep the operator's permissions focused.
+watchNamespaces:
+  - kafka
+
+replicas: 1
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 384Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+logLevel: INFO

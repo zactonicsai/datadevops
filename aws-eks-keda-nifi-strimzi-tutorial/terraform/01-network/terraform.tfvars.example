@@ -1,0 +1,4 @@
+aws_region   = "us-east-1"
+project_name = "eks-keda-lab"
+environment  = "dev"
+vpc_cidr     = "10.40.0.0/16"

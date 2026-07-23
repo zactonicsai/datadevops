@@ -1,0 +1,146 @@
+aws-eks-keda-nifi-strimzi-tutorial/
+├── config/
+│   └── project.env.example
+├── docs/
+│   ├── COMMAND-CHEATSHEET.md
+│   ├── COST-NOTES.md
+│   └── TROUBLESHOOTING.md
+├── helm/
+│   ├── keda-values.yaml
+│   ├── metrics-server-values.yaml
+│   └── strimzi-values.yaml
+├── kubectl/
+│   ├── http/
+│   │   └── load-generator.yaml
+│   └── kafka/
+│       └── manual-test-pod.yaml
+├── scripts/
+│   ├── apply-all.sh
+│   ├── check-prerequisites.sh
+│   ├── common.sh
+│   ├── destroy-all.sh
+│   ├── load-test.sh
+│   ├── plan-all.sh
+│   ├── run-tests-local.sh
+│   ├── run-tests-ssm.sh
+│   ├── update-kubeconfig.sh
+│   └── validate-all.sh
+├── terraform/
+│   ├── 01-network/
+│   │   ├── internet_gateway.tf
+│   │   ├── locals.tf
+│   │   ├── nat_gateway.tf
+│   │   ├── outputs.tf
+│   │   ├── providers.tf
+│   │   ├── README.md
+│   │   ├── routes.tf
+│   │   ├── subnets.tf
+│   │   ├── terraform.tfvars.example
+│   │   ├── variables.tf
+│   │   ├── versions.tf
+│   │   └── vpc.tf
+│   ├── 02-eks/
+│   │   ├── addons.tf
+│   │   ├── data.tf
+│   │   ├── ebs-csi-iam.tf
+│   │   ├── eks-cluster.tf
+│   │   ├── iam-cluster.tf
+│   │   ├── iam-nodes.tf
+│   │   ├── kms.tf
+│   │   ├── locals.tf
+│   │   ├── node-group.tf
+│   │   ├── oidc.tf
+│   │   ├── outputs.tf
+│   │   ├── providers.tf
+│   │   ├── README.md
+│   │   ├── terraform.tfvars.example
+│   │   ├── variables.tf
+│   │   └── versions.tf
+│   ├── 03-metrics-server/
+│   │   ├── outputs.tf
+│   │   ├── providers.tf
+│   │   ├── README.md
+│   │   ├── release.tf
+│   │   ├── variables.tf
+│   │   └── versions.tf
+│   ├── 04-keda/
+│   │   ├── outputs.tf
+│   │   ├── providers.tf
+│   │   ├── README.md
+│   │   ├── release.tf
+│   │   ├── variables.tf
+│   │   └── versions.tf
+│   ├── 05-http-app/
+│   │   ├── configmaps.tf
+│   │   ├── deployments.tf
+│   │   ├── keda.tf
+│   │   ├── locals.tf
+│   │   ├── namespace.tf
+│   │   ├── outputs.tf
+│   │   ├── pdb.tf
+│   │   ├── providers.tf
+│   │   ├── README.md
+│   │   ├── services.tf
+│   │   ├── variables.tf
+│   │   └── versions.tf
+│   ├── 06-strimzi-operator/
+│   │   ├── namespaces.tf
+│   │   ├── outputs.tf
+│   │   ├── providers.tf
+│   │   ├── README.md
+│   │   ├── release.tf
+│   │   ├── variables.tf
+│   │   └── versions.tf
+│   ├── 07-kafka-cluster/
+│   │   ├── kafka-node-pool.tf
+│   │   ├── kafka.tf
+│   │   ├── outputs.tf
+│   │   ├── providers.tf
+│   │   ├── README.md
+│   │   ├── storageclass.tf
+│   │   ├── topic.tf
+│   │   ├── variables.tf
+│   │   └── versions.tf
+│   ├── 08-nifi-cluster/
+│   │   ├── configmap.tf
+│   │   ├── namespace.tf
+│   │   ├── outputs.tf
+│   │   ├── pdb.tf
+│   │   ├── providers.tf
+│   │   ├── rbac.tf
+│   │   ├── README.md
+│   │   ├── secret.tf
+│   │   ├── services.tf
+│   │   ├── statefulset.tf
+│   │   ├── storageclass.tf
+│   │   ├── variables.tf
+│   │   └── versions.tf
+│   ├── 09-test-runner/
+│   │   ├── access-entry.tf
+│   │   ├── data.tf
+│   │   ├── iam.tf
+│   │   ├── instance.tf
+│   │   ├── locals.tf
+│   │   ├── outputs.tf
+│   │   ├── providers.tf
+│   │   ├── README.md
+│   │   ├── security-group.tf
+│   │   ├── user-data.sh.tftpl
+│   │   ├── variables.tf
+│   │   └── versions.tf
+│   └── 10-test-tools/
+│       ├── namespace.tf
+│       ├── outputs.tf
+│       ├── providers.tf
+│       ├── rbac.tf
+│       ├── README.md
+│       ├── toolbox.tf
+│       ├── variables.tf
+│       └── versions.tf
+├── .gitignore
+├── ARCHITECTURE.md
+├── DIRECTORY-STRUCTURE.txt
+├── Makefile
+├── README.md
+├── VALIDATION-NOTES.md
+└── VERSION-NOTES.md

@@ -1,0 +1,20 @@
+# Terraform working folders contain downloaded providers and can be rebuilt.
+**/.terraform/*
+
+# Local Terraform state is intentionally used by this tutorial.
+# Never commit state because it can contain IDs and secrets.
+**/*.tfstate
+**/*.tfstate.*
+**/.terraform.lock.hcl
+
+# Local environment settings and kubeconfig can contain sensitive details.
+config/project.env
+.kube/
+
+# Script logs are useful locally but should not be committed.
+logs/
+
+# Common editor and operating-system files.
+.DS_Store
+.vscode/
+.idea/

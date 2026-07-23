@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kafka-manual-client
+  namespace: kafka
+spec:
+  restartPolicy: Never
+  containers:
+    - name: kafka-client
+      image: quay.io/strimzi/kafka:1.1.0-kafka-4.3.0
+      command: ["sleep", "3600"]
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          cpu: 250m
+          memory: 256Mi
