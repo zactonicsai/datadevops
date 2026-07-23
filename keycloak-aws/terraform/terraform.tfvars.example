@@ -1,0 +1,25 @@
+# Copy this file to terraform.tfvars and edit it.
+#   cp terraform.tfvars.example terraform.tfvars
+
+aws_region   = "us-east-1"
+project_name = "keycloak-demo"
+environment  = "dev"
+
+# Your public IP. Find it with:  curl -s https://checkip.amazonaws.com
+my_ip_cidr = "68.32.112.68/32"
+
+# --- Database ---
+db_engine_version        = "18.3"
+db_instance_class        = "db.t4g.micro"
+db_allocated_storage     = 20
+db_multi_az              = false
+db_backup_retention_days = 7
+db_deletion_protection   = false
+
+# --- Keycloak ---
+keycloak_version    = "26.7.0"
+instance_type       = "t4g.small"
+keycloak_admin_user = "kcadmin"
+
+# Leave empty to use SSM Session Manager instead of SSH (recommended)
+ssh_key_name = ""
