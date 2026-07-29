@@ -3180,17 +3180,39 @@ const S3_IP     = '52.216.10.4';
 
 const dstSgs    = r => refsOf(r, 'sgs').map(byName).filter(Boolean);
 const dstListen = r => r.type === 'alb' ? +r.props.listenPort : +r.props.port;
-function dstSubnet(r){
-  if(r.type === 'alb'){
-    const subs = refsOf(r, 'subnets').map(byName).filter(Boolean);
-    return subs[0] || null;
-  }
-  return byName(r.parent);
+
+/* A load balancer sits in several subnets and has no subnet parent, so
+   "which subnet is this in" is a list, not a lookup on parent. */
+function subnetsFor(r){
+  if(!r) return [];
+  if(r.type === 'alb') return refsOf(r, 'subnets').map(byName).filter(Boolean);
+  const p = r.parent ? byName(r.parent) : null;
+  return (p && p.type === 'subnet') ? [p] : [];
+}
+function subnetFor(r){ return subnetsFor(r)[0] || null; }
+
+/* Of the subnets a resource occupies, the one whose route table actually
+   reaches the address — so a load balancer with one public and one private
+   subnet is judged on the public one, the way AWS would. */
+function routableSubnet(r, ipNum, wantType){
+  const list = subnetsFor(r);
+  const hit = list.filter(s => {
+    const rt = routeFor(s, ipNum);
+    return rt && !rt.local && rt.target && isOn(rt.target) && (!wantType || rt.target.type === wantType);
+  })[0];
+  return hit || list[0] || null;
+}
+/* An internet gateway needs something public to translate to. */
+function hasPublicIp(r){
+  if(!r) return false;
+  if(r.type === 'alb') return r.props.scheme === 'internet-facing';
+  const s = subnetFor(r);
+  return !!r.props.publicIp || !!(s && s.props.mapPublicIp);
 }
 function ipOfRes(r){
   if(!r) return null;
   if(r.type === 'alb'){
-    const s = dstSubnet(r), c = s ? pc(s.props.cidr) : null;
+    const s = subnetFor(r), c = s ? pc(s.props.cidr) : null;
     return c ? toIp(c.net + 5) : null;
   }
   return ipOf(r);
@@ -3212,18 +3234,23 @@ function simulate(srcKey, dstKey, proto, port){
   const srcR = (srcKey === 'internet' || srcKey === 's3') ? null : byId(srcKey);
   const dstR = (dstKey === 'internet' || dstKey === 's3') ? null : byId(dstKey);
 
+  if(!srcKey || !dstKey)
+    return stop(null, 'Nothing selected', 'A simulation needs both ends.', 'Choose where the packet starts and where it is going.', 'Pick a source and a destination above.');
   if(srcKey === dstKey)
-    return stop(null, 'Nothing to send', 'Source and destination are the same.', 'Pick two different endpoints.', 'Choose a source and a destination.');
-  if(!srcR && !dstR)
-    return stop(null, 'No resource involved', 'Both ends are outside your design.', 'A simulation has to start or finish somewhere inside the VPC.', 'Pick at least one of your own resources.');
+    return stop(null, 'Nothing to send', 'Source and destination are the same.', 'A packet has to go somewhere else.', 'Pick two different endpoints.');
+  if(srcKey === 's3')
+    return stop(null, 'S3 cannot open a connection', 'Traffic to S3 starts inside your VPC.', 'S3 answers requests; it does not make them.', 'Use an instance or a load balancer as the source.');
+  if(srcKey !== 'internet' && !srcR)
+    return stop(null, 'Source no longer exists', 'The selected source is not in this design any more.', 'It was probably renamed or deleted after the list was built.', 'Pick the source again.');
+  if(dstKey !== 'internet' && dstKey !== 's3' && !dstR)
+    return stop(null, 'Destination no longer exists', 'The selected destination is not in this design any more.', 'It was probably renamed or deleted after the list was built.', 'Pick the destination again.');
   if(srcR && !isOn(srcR))
     return stop(srcR.name, 'Source is switched off', srcR.name + ' is disabled, or something above it is.', 'A disabled resource takes no part in the simulation.', 'Switch it on in the resource table.');
   if(dstR && !isOn(dstR))
     return stop(dstR.name, 'Destination is switched off', dstR.name + ' is disabled, or something above it is.', 'A disabled resource cannot answer anything.', 'Switch it on in the resource table.');
 
   if(srcKey === 'internet') return inbound(dstR, proto, port, H, ok, stop);
-  if(!srcR) return stop(null, 'Unsupported source', 'Traffic cannot originate at S3.', 'S3 answers requests, it does not open them.', 'Use an instance as the source.');
-  if(!dstR)  return outbound(srcR, dstKey, proto, port, H, ok, stop);
+  if(!dstR) return outbound(srcR, dstKey, proto, port, H, ok, stop);
   return eastWest(srcR, dstR, proto, port, H, ok, stop);
 }
 
@@ -3249,11 +3276,11 @@ function inbound(target, proto, port, H, ok, stop){
       'An internal scheme load balancer is only resolvable and reachable from inside the VPC.',
       'Change the scheme to internet-facing, or send from an instance instead.');
 
-  const sub = dstSubnet(target);
+  const sub = routableSubnet(target, pip(CLIENT_IP), 'igw');
   if(!sub) return stop(target.name, 'No subnet', target.name + ' is not placed in a subnet.',
     'A load balancer needs subnets attached; an instance needs a subnet parent.', 'Assign one.');
 
-  if(target.type === 'instance' && !target.props.publicIp && !sub.props.mapPublicIp)
+  if(target.type === 'instance' && !hasPublicIp(target))
     return stop(target.name, 'No public address',
       target.name + ' only has the private address ' + (ipOf(target) || '—') + '.',
       'A private address is not routable from the internet. The packet has nowhere to be delivered.',
@@ -3337,10 +3364,14 @@ function albToTargets(alb, proto, H, ok, stop){
 
 /* ---------- inside the VPC → out ---------- */
 function outbound(src, dstKey, proto, port, H, ok, stop){
-  const sub = subnetOf(src), vpc = vpcOf(src);
-  if(!sub) return stop(src.name, 'Not in a subnet', src.name + ' has no subnet parent.', 'Traffic needs a subnet to leave from.', 'Set its parent to a subnet.');
+  const vpc = vpcOf(src);
   const destIp = dstKey === 's3' ? S3_IP : NET_IP;
-  const myIp   = ipOf(src) || '(no address)';
+  const sub = routableSubnet(src, pip(destIp));
+  if(!sub) return stop(src.name, 'Not in a subnet',
+    src.name + ' is not placed in any subnet.',
+    'Traffic needs a subnet to leave from — that is where the route table lives.',
+    src.type === 'alb' ? 'Attach subnets to ' + src.name + '.' : 'Set its parent to a subnet.');
+  const myIp   = ipOfRes(src) || '(no address)';
 
   ok(src.name, src.name + ' opens ' + proto + '/' + port, myIp + ' → ' + (dstKey === 's3' ? 'S3 ' + S3_IP : destIp));
 
@@ -3361,21 +3392,30 @@ function outbound(src, dstKey, proto, port, H, ok, stop){
       const tables = refsOf(ep, 'routeTables');
       const rt = rtOf(sub);
       const wired = tables.length === 0 ? null : (rt && tables.indexOf(rt.name) >= 0);
-      if(wired === false)
-        return stop(ep.name, 'Endpoint not associated with this route table',
-          ep.name + ' exists but is not attached to ' + (rt ? rt.name : 'this subnet\'s table') + '.',
-          'A gateway endpoint works purely by injecting a prefix-list route into the tables you associate. Miss the association and traffic silently falls back to the NAT gateway.',
-          'Associate ' + ep.name + ' with ' + (rt ? rt.name : 'the private route table') + '.');
-      ok(ep.name, 'Gateway endpoint ' + ep.name,
-         'Prefix list for S3 matches before 0.0.0.0/0 · traffic never leaves the AWS network' + (wired === null ? ' (no explicit association set)' : ''),
-         wired === null);
-      ok('__s3', 'Reached S3', 'No NAT processing charge, no egress charge, no public address involved');
-      return H;
+      if(wired === false){
+        /* Not an error — the endpoint is simply not in the path. AWS falls
+           through to the default route, so the simulation does too. */
+        ok(ep.name, 'Gateway endpoint ' + ep.name + ' is not in this path',
+           ep.name + ' is not associated with ' + (rt ? rt.name : 'this subnet\'s route table') +
+           ', so no prefix-list route is injected here and traffic falls back to 0.0.0.0/0', true);
+      } else {
+        ok(ep.name, 'Gateway endpoint ' + ep.name,
+           'Prefix list for S3 matches before 0.0.0.0/0 · traffic never leaves the AWS network' +
+           (wired === null ? ' (no route tables listed on the endpoint)' : ''),
+           wired === null);
+        ok('__s3', 'Reached S3', 'No NAT processing charge, no egress charge, no public address involved');
+        return H;
+      }
     }
   }
 
   const r = routeFor(sub, pip(destIp));
-  if(!r || r.local)
+  if(r && r.local)
+    return stop(vpc ? vpc.name : sub.name, destIp + ' is inside this VPC',
+      'The VPC covers ' + blockStr(vpc) + ', which contains ' + destIp + '.',
+      'The local route always wins, so the packet is delivered inside the VPC and never reaches the real host at that address. This is what a publicly routable VPC CIDR costs you.',
+      'Re-address the VPC to a private range so public addresses stay reachable.');
+  if(!r)
     return stop(sub.name, 'No route to ' + destIp,
       (rtOf(sub) ? rtOf(sub).name + ' has no 0.0.0.0/0 entry.' : sub.name + ' has no route table associated, so only the local route exists.'),
       'Without a default route the packet is dropped at the VPC router. Nothing is logged on the instance beyond a timeout.',
@@ -3415,7 +3455,7 @@ function outbound(src, dstKey, proto, port, H, ok, stop){
       ok(t.name, 'Paying to reach S3', 'Roughly $0.045 per GB of NAT processing for traffic that a free gateway endpoint would carry', true);
     ok(natOut.target.name, 'Internet gateway ' + natOut.target.name, 'Packet leaves ' + vpc.name);
   } else if(t.type === 'igw'){
-    if(!src.props.publicIp)
+    if(!hasPublicIp(src))
       return stop(t.name, 'No public address to leave with',
         src.name + ' has only ' + myIp + ', and the route points straight at the internet gateway.',
         'An internet gateway performs one-to-one NAT between a private address and a public one. With no public address associated there is nothing to translate to, so the packet is dropped.',
@@ -3444,7 +3484,7 @@ function outbound(src, dstKey, proto, port, H, ok, stop){
 
 /* ---------- resource → resource ---------- */
 function eastWest(src, dst, proto, port, H, ok, stop){
-  const sSub = subnetOf(src), dSub = dstSubnet(dst);
+  const sSub = subnetFor(src), dSub = subnetFor(dst);
   const sVpc = vpcOf(src),    dVpc = vpcOf(dst);
   const sIp  = ipOfRes(src),  dIp  = ipOfRes(dst);
   ok(src.name, src.name + ' opens ' + proto + '/' + port, (sIp || '?') + ' → ' + (dIp || '?') + ' (' + dst.name + ')');
@@ -3721,7 +3761,8 @@ function renderTree(){
 }
 function markNode(name, cls){
   if(!name) return;
-  document.querySelectorAll('#bTree [data-node="' + CSS.escape(name) + '"]').forEach(el => {
+  document.querySelectorAll('#bTree .b-node').forEach(el => {
+    if(el.getAttribute('data-node') !== name) return;
     el.classList.remove('hit','stop','done');
     if(cls) el.classList.add(cls);
   });
@@ -3767,8 +3808,9 @@ function renderFlow(){
   const list = ends.map(r => opt(r.id, r.name + ' — ' + TYPES[r.type].label.toLowerCase(), null)).join('');
   q('bSrc').innerHTML = opt('internet', 'The internet', null) + list;
   q('bDst').innerHTML = list + opt('internet', 'The internet', null) + opt('s3', 'Amazon S3', null);
-  if(keepS && q('bSrc').querySelector('option[value="' + CSS.escape(keepS) + '"]')) q('bSrc').value = keepS;
-  if(keepD && q('bDst').querySelector('option[value="' + CSS.escape(keepD) + '"]')) q('bDst').value = keepD;
+  const has = (sel, v) => Array.from(q(sel).options).some(o => o.value === v);
+  if(keepS && has('bSrc', keepS)) q('bSrc').value = keepS;
+  if(keepD && has('bDst', keepD)) q('bDst').value = keepD;
 }
 function logLine(cls, html){
   const d = document.createElement('div');
@@ -3785,7 +3827,16 @@ function run(){
   q('bRun').disabled = true;
 
   const port = Math.max(1, Math.min(65535, parseInt(q('bPort').value, 10) || 443));
-  const hops = simulate(q('bSrc').value, q('bDst').value, q('bProto').value, port);
+  let hops;
+  try{
+    hops = simulate(q('bSrc').value, q('bDst').value, q('bProto').value, port);
+  }catch(e){
+    hops = [{ node:null, label:'The simulator could not finish', detail:e.message, pass:false,
+              why:'Something in this design put the walk into a state it does not handle.',
+              fix:'Check the issues panel — a malformed rule or a reference loop is the usual cause. If the design looks right, the thumbs-down button reports it.' }];
+  }
+  if(!hops || !hops.length) hops = [{ node:null, label:'Nothing to simulate', detail:'No hops were produced.',
+    pass:false, why:'The source and destination did not describe a path.', fix:'Pick a source and a destination, then send again.' }];
   let i = 0;
 
   /* Kept whole, before the animation starts, so the export is available
@@ -4351,6 +4402,9 @@ const api = {
     setTimeout(run, 250);
   },
   run,
+  /* The raw simulator, no animation. Handy for scripting and for tests:
+     B.__sim(sourceId, destId, 'tcp', 443) returns the hop list. */
+  __sim: simulate,
   print(){
     if(!lastRun) return status('Send a packet first — there is nothing to print yet.', true);
     printFlow(lastRun);
