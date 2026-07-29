@@ -2717,3 +2717,1154 @@ T+5:51  https://<EIP>:8443/admin is live
 | **Total** | **≈ $14.10** |
 
 [← Previous: the database](02-database-line-by-line.md) | [Next: verify & destroy →](04-verify-and-destroy.md)
+# Making It Configurable — and the Three Big Swaps
+
+[← Previous: GitLab pipeline](05-gitlab-pipeline.md) | [Next: known bugs →](07-known-bugs-and-fixes.md)
+
+Part 1 covers general techniques for turning hard-coded values into knobs.
+Parts 2–4 are the three changes you're most likely to actually need:
+
+- **Swap 1** — change how Keycloak connects to its database
+- **Swap 2** — change who can reach Keycloak over the network
+- **Swap 3** — replace the self-signed certificate with a trusted one
+
+---
+
+# PART 1 — General configurability techniques
+
+## 1.1 Move variables into their own file
+
+Right now variables are scattered across three files. Terraform doesn't care, but humans do. Create `variables.tf` and cut every `variable` block into it.
+
+```
+.
+├── versions.tf      # terraform{} and provider{} blocks
+├── variables.tf     # every variable
+├── locals.tf        # computed values
+├── main.tf          # or keep 01/02/03 split
+├── outputs.tf       # every output
+├── backend.tf       # state configuration
+└── terraform.tfvars # your values (gitignored)
+```
+
+> Terraform reads *all* `.tf` files in the folder regardless of name. Filenames are purely for humans. This layout is the community convention and it makes an unfamiliar repo instantly navigable.
+
+## 1.2 Use `locals` for computed values
+
+```hcl
+locals {
+  # One place to change the naming scheme
+  name_prefix = "${var.project_name}-${var.environment}"
+
+  # Environment-driven behaviour: no more forgetting to set five booleans
+  is_production = var.environment == "prod"
+
+  # Derived settings
+  db_deletion_protection  = local.is_production
+  db_skip_final_snapshot  = !local.is_production
+  db_backup_retention     = local.is_production ? 30 : 7
+  db_multi_az             = local.is_production
+  enable_detailed_monitor = local.is_production
+
+  # Tags in one place
+  common_tags = {
+    Project     = var.project_name
+    Environment = var.environment
+    ManagedBy   = "terraform"
+    Owner       = var.owner_email
+    CostCenter  = var.cost_center
+  }
+}
+```
+
+Then `environment = "prod"` in a tfvars file flips five safety settings at once. Fewer chances to forget one.
+
+## 1.3 Use maps for per-environment sizing
+
+```hcl
+variable "sizing" {
+  description = "Instance sizes per environment."
+  type = map(object({
+    db_instance_class = string
+    db_storage_gb     = number
+    ec2_instance_type = string
+    ec2_root_gb       = number
+  }))
+  default = {
+    dev = {
+      db_instance_class = "db.t4g.micro"
+      db_storage_gb     = 20
+      ec2_instance_type = "t4g.small"
+      ec2_root_gb       = 20
+    }
+    staging = {
+      db_instance_class = "db.t4g.small"
+      db_storage_gb     = 50
+      ec2_instance_type = "t4g.medium"
+      ec2_root_gb       = 30
+    }
+    prod = {
+      db_instance_class = "db.t4g.medium"
+      db_storage_gb     = 100
+      ec2_instance_type = "t4g.large"
+      ec2_root_gb       = 50
+    }
+  }
+}
+
+locals {
+  size = var.sizing[var.environment]
+}
+
+resource "aws_db_instance" "keycloak" {
+  instance_class    = local.size.db_instance_class
+  allocated_storage = local.size.db_storage_gb
+}
+```
+
+One variable now controls eight settings correctly.
+
+## 1.4 Feature flags with `count`
+
+```hcl
+variable "enable_alb" {
+  description = "Put an Application Load Balancer in front of Keycloak."
+  type        = bool
+  default     = false
+}
+
+resource "aws_lb" "keycloak" {
+  count = var.enable_alb ? 1 : 0     # 1 = create it, 0 = don't
+  # ...
+}
+
+# Referencing a counted resource needs an index
+output "url" {
+  value = var.enable_alb ? "https://${aws_lb.keycloak[0].dns_name}" : "https://${aws_eip.keycloak.public_ip}:8443"
+}
+```
+
+`count = 0` is Terraform's "if" statement. The resource simply doesn't exist.
+
+> **Gotcha:** switching a resource between `count` and `for_each` — or adding `count` to an existing resource — changes its address from `aws_lb.keycloak` to `aws_lb.keycloak[0]`. Terraform sees that as *destroy and recreate*. Fix it with `terraform state mv` or an `moved {}` block:
+> ```hcl
+> moved {
+>   from = aws_lb.keycloak
+>   to   = aws_lb.keycloak[0]
+> }
+> ```
+
+## 1.5 `for_each` for repeated resources
+
+Right now three subnets are three nearly identical blocks. Collapse them:
+
+```hcl
+variable "private_subnets" {
+  type = map(object({
+    cidr_index = number
+    az_index   = number
+  }))
+  default = {
+    a = { cidr_index = 11, az_index = 0 }
+    b = { cidr_index = 12, az_index = 1 }
+    c = { cidr_index = 13, az_index = 2 }
+  }
+}
+
+resource "aws_subnet" "private" {
+  for_each = var.private_subnets
+
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = cidrsubnet(var.vpc_cidr, 8, each.value.cidr_index)
+  availability_zone       = data.aws_availability_zones.available.names[each.value.az_index]
+  map_public_ip_on_launch = false
+
+  tags = { Name = "${local.name_prefix}-private-${each.key}" }
+}
+
+# Reference them:
+resource "aws_db_subnet_group" "main" {
+  subnet_ids = [for s in aws_subnet.private : s.id]
+}
+```
+
+Adding a third AZ is now one line in the map.
+
+**`for_each` vs `count`:**
+
+| | `count` | `for_each` ⭐ |
+|---|---|---|
+| Addressed by | number: `[0]`, `[1]` | key: `["a"]`, `["b"]` |
+| Delete the middle item | **everything after it shifts and gets recreated** 💀 | only that one is deleted |
+| Best for | on/off toggles | collections of things |
+
+That "everything shifts" behaviour with `count` has destroyed real production databases. Use `for_each` for anything that's a set of similar-but-distinct things.
+
+## 1.6 Validation that catches mistakes early
+
+```hcl
+variable "environment" {
+  type = string
+  validation {
+    condition     = contains(["dev", "staging", "prod"], var.environment)
+    error_message = "environment must be dev, staging, or prod."
+  }
+}
+
+variable "allowed_cidrs" {
+  type = list(string)
+  validation {
+    condition     = !contains(var.allowed_cidrs, "0.0.0.0/0")
+    error_message = "0.0.0.0/0 is not allowed — that opens Keycloak to the entire internet."
+  }
+  validation {
+    condition     = length(var.allowed_cidrs) > 0
+    error_message = "You must allow at least one source CIDR."
+  }
+}
+
+variable "db_instance_class" {
+  type = string
+  validation {
+    condition     = can(regex("^db\\.(t4g|t3|m7g|m6g|r7g|r6g)\\.", var.db_instance_class))
+    error_message = "Use a current-generation instance class (t4g, m7g, r7g...)."
+  }
+}
+```
+
+A validation block takes two minutes to write and saves someone an hour of confusion.
+
+---
+
+# PART 2 — Swap 1: Changing the database connection
+
+The connection is defined in exactly two places:
+
+1. **`02-database.tf`** — creates the database and writes the secret
+2. **`03-keycloak.tf` bootstrap script, step 6** — writes `db-url`, `db-username`, `db-password` into `keycloak.conf`
+
+Everything below changes one or both of those.
+
+## Option A — What it does today (password from Secrets Manager)
+
+```
+Terraform generates password
+   -> stores it in Secrets Manager
+   -> creates RDS with it
+   -> EC2 reads it at boot using its IAM role
+   -> writes it into keycloak.conf
+```
+
+| Pro | Con |
+|---|---|
+| No secret in code or Git | The password sits in plaintext in `keycloak.conf` on disk |
+| Rotatable | Rotation requires a Keycloak restart |
+| Simple to understand | The password is also in the Terraform state file |
+
+## Option B — Connect to a database that already exists
+
+Very common: your company already runs an RDS or Aurora cluster and you must use it.
+
+**Step 1 — new variables:**
+
+```hcl
+variable "create_database" {
+  description = "false = use an existing database instead of creating one."
+  type        = bool
+  default     = true
+}
+
+variable "existing_db_host"      { type = string, default = "" }
+variable "existing_db_port"      { type = number, default = 5432 }
+variable "existing_db_name"      { type = string, default = "keycloak" }
+variable "existing_db_secret_arn" {
+  description = "ARN of an existing Secrets Manager secret with {username,password}."
+  type        = string
+  default     = ""
+}
+```
+
+**Step 2 — make the database creation conditional:**
+
+```hcl
+resource "aws_db_instance" "keycloak" {
+  count = var.create_database ? 1 : 0
+  # ...unchanged...
+}
+
+data "aws_secretsmanager_secret" "existing" {
+  count = var.create_database ? 0 : 1
+  arn   = var.existing_db_secret_arn
+}
+
+locals {
+  db_host   = var.create_database ? aws_db_instance.keycloak[0].address : var.existing_db_host
+  db_port   = var.create_database ? aws_db_instance.keycloak[0].port    : var.existing_db_port
+  db_name   = var.create_database ? var.db_name                          : var.existing_db_name
+  db_secret = var.create_database ? aws_secretsmanager_secret.db[0].name : data.aws_secretsmanager_secret.existing[0].name
+}
+```
+
+**Step 3 — use the locals everywhere in the bootstrap script:**
+
+```bash
+DB_SECRET=$(aws secretsmanager get-secret-value \
+  --secret-id "${local.db_secret}" --query SecretString --output text)
+...
+db-url=jdbc:postgresql://${local.db_host}:${local.db_port}/${local.db_name}?sslmode=verify-full&sslrootcert=/opt/keycloak/conf/rds-ca.pem
+```
+
+**Step 4 — update the IAM policy** to include the existing secret's ARN, and **add a security group rule** on the existing database allowing your Keycloak SG:
+
+```hcl
+resource "aws_vpc_security_group_ingress_rule" "existing_db" {
+  count                        = var.create_database ? 0 : 1
+  security_group_id            = var.existing_db_security_group_id
+  referenced_security_group_id = aws_security_group.keycloak.id
+  from_port                    = var.existing_db_port
+  to_port                      = var.existing_db_port
+  ip_protocol                  = "tcp"
+}
+```
+
+> **The most common failure here is network, not credentials.** If the existing database is in a *different VPC*, no security group rule can help — you need VPC peering or Transit Gateway first. Check `aws ec2 describe-db-instances --query 'DBInstances[0].DBSubnetGroup.VpcId'` before you start debugging passwords.
+
+## Option C — Let AWS manage the master password entirely
+
+```hcl
+resource "aws_db_instance" "keycloak" {
+  # remove: password = random_password.db.result
+  manage_master_user_password   = true
+  master_user_secret_kms_key_id = aws_kms_key.db.id   # optional
+}
+
+output "aws_managed_secret_arn" {
+  value = aws_db_instance.keycloak.master_user_secret[0].secret_arn
+}
+```
+
+AWS creates the secret, sets the password, and rotates it automatically every 7 days.
+
+| Pro | Con |
+|---|---|
+| **The password never enters Terraform state** | Secret name is AWS-chosen, so IAM policies need updating |
+| Rotation is built in, no Lambda to maintain | Keycloak must re-read the secret after each rotation |
+| Fewer moving parts | Less control over the format |
+
+That "password never enters state" point is significant — it removes the single biggest weakness of Option A.
+
+The bootstrap script changes to use the AWS-generated ARN:
+
+```bash
+DB_SECRET=$(aws secretsmanager get-secret-value \
+  --secret-id "${aws_db_instance.keycloak.master_user_secret[0].secret_arn}" \
+  --query SecretString --output text)
+```
+
+And the IAM policy resource becomes that ARN instead of your name pattern.
+
+## Option D — RDS IAM authentication (no password at all)
+
+The most secure option: Keycloak asks AWS for a **15-minute token** and uses that as the password.
+
+**Step 1 — turn it on:**
+
+```hcl
+resource "aws_db_instance" "keycloak" {
+  iam_database_authentication_enabled = true
+}
+```
+
+**Step 2 — create a database user that authenticates via IAM** (a one-time SQL step, not Terraform):
+
+```sql
+CREATE USER keycloak_iam;
+GRANT rds_iam TO keycloak_iam;
+GRANT ALL PRIVILEGES ON DATABASE keycloak TO keycloak_iam;
+```
+
+**Step 3 — allow the EC2 role to generate tokens:**
+
+```hcl
+data "aws_iam_policy_document" "rds_connect" {
+  statement {
+    actions   = ["rds-db:connect"]
+    resources = ["arn:aws:rds-db:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:dbuser:${aws_db_instance.keycloak.resource_id}/keycloak_iam"]
+  }
+}
+```
+
+> Note `resource_id`, not `identifier`. It looks like `db-ABCDEFGHIJKLMNOP` and is the only thing that works here. Using `identifier` produces a policy that silently never matches.
+
+**Step 4 — the hard part.** Tokens expire after 15 minutes, so a long-lived connection pool needs to refresh them. Options:
+
+- Use the **AWS Advanced JDBC Wrapper** (`software.amazon.jdbc.Driver`), which handles token generation and refresh natively. This means adding a JAR to the Keycloak image and changing `db-driver` and `db-url`.
+- Or run a sidecar that regenerates the token and restarts the pool. Fragile; not recommended.
+
+| Pro | Con |
+|---|---|
+| **No password exists anywhere** | Significant added complexity |
+| Credentials expire in 15 minutes | Needs a custom JDBC driver in the image |
+| Access is centrally revocable via IAM | Limits on connections/second for IAM auth |
+| Every connection is logged in CloudTrail | ⚠️ **IMDS hop limit must be raised to 2** so the containerised app can fetch a token |
+
+That last point matters: `metadata_options.http_put_response_hop_limit = 1` in `03-keycloak.tf` blocks containers on the Docker bridge from reaching the metadata service. IAM auth cannot work until you change it to `2`.
+
+**Verdict:** the right answer for a mature production platform team. Overkill for a first deployment.
+
+## Option E — Add RDS Proxy
+
+```hcl
+resource "aws_db_proxy" "keycloak" {
+  name                   = "${local.name_prefix}-proxy"
+  engine_family          = "POSTGRESQL"
+  role_arn               = aws_iam_role.proxy.arn
+  vpc_subnet_ids         = [aws_subnet.private_a.id, aws_subnet.private_b.id]
+  vpc_security_group_ids = [aws_security_group.database.id]
+  require_tls            = true
+
+  auth {
+    auth_scheme = "SECRETS"
+    secret_arn  = aws_secretsmanager_secret.db.arn
+    iam_auth    = "DISABLED"
+  }
+}
+```
+
+Then point Keycloak at `aws_db_proxy.keycloak.endpoint` instead of the database.
+
+| Pro | Con |
+|---|---|
+| Pools and multiplexes connections | ~$15/month per vCPU of the database |
+| **Failover in seconds instead of minutes** | One more thing that can break |
+| Enforces TLS | Adds ~1ms latency |
+
+Worth it when you have many Keycloak nodes or a small database being connection-starved. Not worth it for one node.
+
+## Comparison
+
+| | A: Secret at boot | B: Existing DB | C: AWS-managed | D: IAM auth | E: + Proxy |
+|---|---|---|---|---|---|
+| Password in state | ⚠️ yes | no | ✅ no | ✅ none exists | depends |
+| Password on disk | ⚠️ yes | yes | yes | ✅ no | yes |
+| Auto-rotation | manual | depends | ✅ built in | ✅ 15 min | ✅ |
+| Complexity | low | medium | low | **high** | medium |
+| Extra cost | $0 | $0 | $0 | $0 | ~$15/mo |
+| Good for | learning | corporate | **most production** | regulated | scale |
+
+**Recommended progression:** start with A, move to C when you go to production, consider D if you're in a regulated environment.
+
+## Changing other connection settings
+
+**Connection pool tuning** (in `keycloak.conf`):
+
+```properties
+db-pool-initial-size=10     # connections opened at startup
+db-pool-min-size=10         # floor
+db-pool-max-size=50         # ceiling
+```
+
+> **The formula that keeps you out of trouble:**
+> `db-pool-max-size × number_of_keycloak_nodes < max_connections − 10`
+> With `max_connections = 150` and 2 nodes: max pool size 50 → 100 used, 50 spare. Fine.
+> With 3 nodes at 50 → 150 used, 0 spare, and your own `psql` session is refused. Not fine.
+
+**Switching database engine:**
+
+```hcl
+# MySQL instead of PostgreSQL
+engine         = "mysql"
+engine_version = "8.4"
+port           = 3306
+```
+```properties
+db=mysql
+db-url=jdbc:mysql://host:3306/keycloak?sslMode=VERIFY_IDENTITY
+```
+
+Also change the security group rule from 5432 to 3306 and the parameter group family to `mysql8.4`.
+
+**Aurora Serverless v2** (scales to near-zero when idle):
+
+```hcl
+resource "aws_rds_cluster" "keycloak" {
+  cluster_identifier = "${local.name_prefix}-aurora"
+  engine             = "aurora-postgresql"
+  engine_mode        = "provisioned"
+  engine_version     = "16.6"
+  database_name      = var.db_name
+
+  serverlessv2_scaling_configuration {
+    min_capacity = 0.5    # 0 is supported in newer versions — check current docs
+    max_capacity = 4.0
+  }
+}
+```
+
+Cheaper for spiky traffic, more expensive for steady traffic. Do the arithmetic for your pattern.
+
+---
+
+# PART 3 — Swap 2: Changing network access
+
+Today: **public subnet + Elastic IP + one allowed IP address.**
+
+## Option A — Allow several IPs instead of one
+
+The quickest useful improvement. Change the variable to a list:
+
+```hcl
+variable "allowed_cidrs" {
+  description = "Every network allowed to reach Keycloak."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = !contains(var.allowed_cidrs, "0.0.0.0/0")
+    error_message = "0.0.0.0/0 is not allowed."
+  }
+}
+```
+
+```hcl
+resource "aws_vpc_security_group_ingress_rule" "keycloak_https" {
+  for_each = toset(var.allowed_cidrs)
+
+  security_group_id = aws_security_group.keycloak.id
+  description       = "Keycloak HTTPS from ${each.value}"
+  cidr_ipv4         = each.value
+  from_port         = 8443
+  to_port           = 8443
+  ip_protocol       = "tcp"
+}
+```
+
+```hcl
+# terraform.tfvars
+allowed_cidrs = [
+  "73.15.204.88/32",    # my house
+  "198.51.100.0/24",    # office
+  "203.0.113.45/32",    # colleague
+]
+```
+
+**Even better — use a managed prefix list** so you edit the IP list without touching Terraform:
+
+```hcl
+resource "aws_ec2_managed_prefix_list" "trusted" {
+  name           = "${local.name_prefix}-trusted-networks"
+  address_family = "IPv4"
+  max_entries    = 20
+
+  entry {
+    cidr        = "73.15.204.88/32"
+    description = "home"
+  }
+  entry {
+    cidr        = "198.51.100.0/24"
+    description = "office"
+  }
+}
+
+resource "aws_vpc_security_group_ingress_rule" "keycloak_https" {
+  security_group_id = aws_security_group.keycloak.id
+  prefix_list_id    = aws_ec2_managed_prefix_list.trusted.id
+  from_port         = 8443
+  to_port           = 8443
+  ip_protocol       = "tcp"
+}
+```
+
+One prefix list can be referenced by dozens of security groups. Update it once and everything follows.
+
+## Option B — Load balancer in front, server moved to a private subnet ⭐
+
+**This is the standard production architecture.** The instance gets no public IP at all; a load balancer handles the internet.
+
+```
+Internet -> ALB (public subnets, ACM cert, port 443)
+              |
+              v
+        EC2 (private subnet, no public IP, port 8443)
+              |
+              v
+        RDS (private subnet)
+```
+
+**Step 1 — you need a second public subnet.** ALBs require two AZs, exactly like RDS.
+
+```hcl
+resource "aws_subnet" "public_b" {
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = cidrsubnet(var.vpc_cidr, 8, 2)
+  availability_zone       = data.aws_availability_zones.available.names[1]
+  map_public_ip_on_launch = true
+  tags                    = { Name = "${local.name_prefix}-public-b" }
+}
+
+resource "aws_route_table_association" "public_b" {
+  subnet_id      = aws_subnet.public_b.id
+  route_table_id = aws_route_table.public.id
+}
+```
+
+**Step 2 — a security group for the ALB:**
+
+```hcl
+resource "aws_security_group" "alb" {
+  name_prefix = "${local.name_prefix}-alb-"
+  vpc_id      = aws_vpc.main.id
+  lifecycle { create_before_destroy = true }
+}
+
+resource "aws_vpc_security_group_ingress_rule" "alb_https" {
+  security_group_id = aws_security_group.alb.id
+  cidr_ipv4         = "0.0.0.0/0"    # public login page — this one is correct
+  from_port         = 443
+  to_port           = 443
+  ip_protocol       = "tcp"
+}
+
+resource "aws_vpc_security_group_egress_rule" "alb_to_keycloak" {
+  security_group_id            = aws_security_group.alb.id
+  referenced_security_group_id = aws_security_group.keycloak.id
+  from_port                    = 8443
+  to_port                      = 8443
+  ip_protocol                  = "tcp"
+}
+```
+
+**Step 3 — replace the Keycloak ingress rules.** Only the ALB may reach it now:
+
+```hcl
+resource "aws_vpc_security_group_ingress_rule" "keycloak_from_alb" {
+  security_group_id            = aws_security_group.keycloak.id
+  referenced_security_group_id = aws_security_group.alb.id
+  from_port                    = 8443
+  to_port                      = 8443
+  ip_protocol                  = "tcp"
+}
+```
+
+Delete the rules that allowed your home IP directly. The instance is now unreachable except through the load balancer.
+
+**Step 4 — the ALB, target group, and listeners:**
+
+```hcl
+resource "aws_lb" "keycloak" {
+  name               = "${local.name_prefix}-alb"
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb.id]
+  subnets            = [aws_subnet.public.id, aws_subnet.public_b.id]
+
+  enable_deletion_protection = local.is_production
+  drop_invalid_header_fields = true
+  idle_timeout               = 300   # Keycloak logins can be slow
+}
+
+resource "aws_lb_target_group" "keycloak" {
+  name        = "${local.name_prefix}-tg"
+  port        = 8443
+  protocol    = "HTTPS"
+  vpc_id      = aws_vpc.main.id
+  target_type = "instance"
+
+  health_check {
+    enabled             = true
+    path                = "/health/ready"   # from health-enabled=true
+    protocol            = "HTTPS"
+    matcher             = "200"
+    interval            = 30
+    timeout             = 5
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+  }
+
+  stickiness {
+    type            = "lb_cookie"
+    cookie_duration = 3600
+    enabled         = true      # Keycloak login flows are stateful
+  }
+}
+
+resource "aws_lb_target_group_attachment" "keycloak" {
+  target_group_arn = aws_lb_target_group.keycloak.arn
+  target_id        = aws_instance.keycloak.id
+  port             = 8443
+}
+
+resource "aws_lb_listener" "https" {
+  load_balancer_arn = aws_lb.keycloak.arn
+  port              = 443
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+  certificate_arn   = aws_acm_certificate_validation.main.certificate_arn
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.keycloak.arn
+  }
+}
+
+# Redirect plain HTTP to HTTPS
+resource "aws_lb_listener" "http_redirect" {
+  load_balancer_arn = aws_lb.keycloak.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type = "redirect"
+    redirect {
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_301"
+    }
+  }
+}
+```
+
+**Step 5 — ⚠️ Keycloak MUST be told it's behind a proxy.** Skip this and you get infinite redirect loops.
+
+```properties
+# in keycloak.conf
+hostname=https://login.example.com
+hostname-strict=true
+proxy-headers=xforwarded
+http-enabled=true
+```
+
+`proxy-headers=xforwarded` tells Keycloak to trust `X-Forwarded-Proto` and `X-Forwarded-For`. Without it, Keycloak sees an internal HTTP request from the ALB, decides it's running on plain HTTP, and generates `http://` redirect URLs that the browser then refuses.
+
+> **Only set `proxy-headers` when a proxy is genuinely in front.** If Keycloak trusts those headers while directly exposed, a client can forge `X-Forwarded-For` and spoof its source address.
+
+**Step 6 — move the instance to a private subnet.**
+
+```hcl
+subnet_id = aws_subnet.private_a.id
+```
+
+But now it can't download Docker images at boot. Two choices:
+
+| Approach | Cost | Notes |
+|---|---|---|
+| Add a NAT Gateway | ~$32/mo | Simple, works for everything |
+| Bake a custom AMI with everything pre-installed | $0 ongoing | Use Packer; boot is also much faster |
+
+Also delete the Elastic IP and its association — the instance has no public address any more.
+
+| Pro | Con |
+|---|---|
+| Instance is genuinely unreachable from the internet | ~$16/month for the ALB |
+| Real certificate via ACM, free and auto-renewing | More moving parts |
+| Health checks and auto-replacement become possible | Needs NAT (~$32) or a custom AMI |
+| Ready for multiple Keycloak nodes | |
+
+## Option C — Fully private, reached over VPN or SSM
+
+For an internal-only identity provider.
+
+**Cheapest: SSM port forwarding.** No VPN, no load balancer, no public anything.
+
+```bash
+aws ssm start-session \
+  --target i-0abc123 \
+  --document-name AWS-StartPortForwardingSession \
+  --parameters '{"portNumber":["8443"],"localPortNumber":["8443"]}'
+```
+
+Then open `https://localhost:8443` in your browser. Traffic tunnels through AWS's SSM service. The instance can live in a private subnet with **zero inbound rules**.
+
+| Pro | Con |
+|---|---|
+| Free | One user at a time per session |
+| No inbound ports at all | Not usable by an app's end users |
+| Every session is auditable | Requires AWS credentials |
+
+**For teams: AWS Client VPN** (~$0.10/hour per endpoint plus $0.05/hour per connection) or Site-to-Site VPN to your office.
+
+## Option D — CloudFront + WAF in front of the ALB
+
+For a public login page facing the internet.
+
+```hcl
+resource "aws_cloudfront_distribution" "keycloak" {
+  enabled = true
+  aliases = ["login.example.com"]
+
+  origin {
+    domain_name = aws_lb.keycloak.dns_name
+    origin_id   = "alb"
+    custom_origin_config {
+      http_port              = 80
+      https_port             = 443
+      origin_protocol_policy = "https-only"
+      origin_ssl_protocols   = ["TLSv1.2"]
+    }
+  }
+
+  default_cache_behavior {
+    target_origin_id       = "alb"
+    viewer_protocol_policy = "redirect-to-https"
+    allowed_methods        = ["GET","HEAD","OPTIONS","PUT","POST","PATCH","DELETE"]
+    cached_methods         = ["GET","HEAD"]
+    cache_policy_id        = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"  # CachingDisabled
+    origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3" # AllViewer
+  }
+
+  web_acl_id = aws_wafv2_web_acl.keycloak.arn
+
+  viewer_certificate {
+    acm_certificate_arn = aws_acm_certificate.cloudfront.arn  # must be in us-east-1
+    ssl_support_method  = "sni-only"
+    minimum_protocol_version = "TLSv1.2_2021"
+  }
+
+  restrictions {
+    geo_restriction {
+      restriction_type = "whitelist"
+      locations        = ["US", "CA", "GB"]
+    }
+  }
+}
+```
+
+Add a WAF rate-limit rule to blunt credential-stuffing attacks:
+
+```hcl
+resource "aws_wafv2_web_acl" "keycloak" {
+  name  = "${local.name_prefix}-waf"
+  scope = "CLOUDFRONT"
+  default_action { allow {} }
+
+  rule {
+    name     = "RateLimitLogin"
+    priority = 1
+    action { block {} }
+    statement {
+      rate_based_statement {
+        limit              = 100     # requests per 5 minutes per IP
+        aggregate_key_type = "IP"
+      }
+    }
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "RateLimitLogin"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  visibility_config {
+    cloudwatch_metrics_enabled = true
+    metric_name                = "keycloak-waf"
+    sampled_requests_enabled   = true
+  }
+}
+```
+
+> **Two CloudFront gotchas:** (1) the ACM certificate for CloudFront **must** be issued in `us-east-1` no matter where everything else lives; (2) caching must be disabled for Keycloak — it's entirely dynamic, and a cached login page is a security incident.
+
+| Pro | Con |
+|---|---|
+| DDoS protection via AWS Shield Standard | ~$5–20/month plus request charges |
+| WAF rate limiting stops brute force | More layers to debug |
+| Global edge locations | Certificate must live in us-east-1 |
+| Hides the ALB's real address | |
+
+## Network options compared
+
+| | A: IP allowlist | B: ALB | C: Private/VPN | D: CloudFront+WAF |
+|---|---|---|---|---|
+| Extra cost/month | $0 | ~$16 (+$32 NAT) | $0–70 | ~$20 |
+| Public users can log in | ❌ | ✅ | ❌ | ✅ |
+| Real certificate | ❌ | ✅ ACM | ❌ | ✅ ACM |
+| Instance exposed | ⚠️ yes | ✅ no | ✅ no | ✅ no |
+| DDoS protection | ❌ | basic | n/a | ✅ |
+| Complexity | ⭐ | ⭐⭐⭐ | ⭐⭐ | ⭐⭐⭐⭐ |
+| Good for | learning | **most production** | internal-only | public SaaS |
+
+---
+
+# PART 4 — Swap 3: A trusted certificate
+
+Today the server makes its own certificate and browsers show a warning.
+
+**Why this actually matters, beyond the ugly warning:** a self-signed certificate proves nothing about *who* you're talking to. It's encryption without identity. Mobile apps and API clients typically refuse to connect at all. And training your users to click through certificate warnings destroys the habit that protects them everywhere else.
+
+**You need a domain name.** No certificate authority will vouch for a bare IP address. Register one (~$12/year from Route 53, Namecheap, Cloudflare — anywhere).
+
+## Option A — ACM + ALB ⭐ (the AWS-native answer)
+
+**Free, auto-renewing, zero maintenance.** The catch: an ACM public certificate can only be attached to AWS services (ALB, CloudFront, API Gateway) — you cannot download the private key and install it on your EC2. So this requires the ALB from Swap 2 Option B.
+
+**Step 1 — a hosted zone (skip if your DNS is elsewhere):**
+
+```hcl
+resource "aws_route53_zone" "main" {
+  name = "example.com"
+}
+```
+
+**Step 2 — request the certificate:**
+
+```hcl
+resource "aws_acm_certificate" "main" {
+  domain_name               = "login.example.com"
+  subject_alternative_names = ["*.login.example.com"]
+  validation_method         = "DNS"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+
+  tags = local.common_tags
+}
+```
+
+**Step 3 — prove you own the domain, automatically:**
+
+```hcl
+resource "aws_route53_record" "cert_validation" {
+  for_each = {
+    for d in aws_acm_certificate.main.domain_validation_options : d.domain_name => {
+      name   = d.resource_record_name
+      record = d.resource_record_value
+      type   = d.resource_record_type
+    }
+  }
+
+  zone_id         = aws_route53_zone.main.zone_id
+  name            = each.value.name
+  type            = each.value.type
+  records         = [each.value.record]
+  ttl             = 60
+  allow_overwrite = true
+}
+
+resource "aws_acm_certificate_validation" "main" {
+  certificate_arn         = aws_acm_certificate.main.arn
+  validation_record_fqdns = [for r in aws_route53_record.cert_validation : r.fqdn]
+}
+```
+
+This is the elegant part: ACM says "put this TXT record in your DNS to prove ownership," Terraform creates it, and `aws_acm_certificate_validation` waits until AWS confirms. Fully automatic, usually under two minutes.
+
+**Step 4 — point your domain at the load balancer:**
+
+```hcl
+resource "aws_route53_record" "keycloak" {
+  zone_id = aws_route53_zone.main.zone_id
+  name    = "login.example.com"
+  type    = "A"
+
+  alias {
+    name                   = aws_lb.keycloak.dns_name
+    zone_id                = aws_lb.keycloak.zone_id
+    evaluate_target_health = true
+  }
+}
+```
+
+> An **alias record** is a Route 53 special: it points at an AWS resource rather than an IP, follows the ALB's changing addresses automatically, and alias queries are free.
+
+**Step 5 — update Keycloak's hostname:**
+
+```properties
+hostname=https://login.example.com
+hostname-strict=true
+proxy-headers=xforwarded
+```
+
+**Result:** `https://login.example.com` with a green padlock. ACM renews it automatically forever, as long as the DNS validation record stays in place.
+
+| Pro | Con |
+|---|---|
+| Free | Requires an ALB (~$16/month) |
+| Auto-renews forever | Private key cannot be exported |
+| Zero maintenance | AWS-only |
+| Trusted by every browser | |
+
+## Option B — Let's Encrypt directly on the instance
+
+No load balancer needed. The certificate lives on the EC2 itself.
+
+Add to the bootstrap script:
+
+```bash
+echo "=== Getting a Let's Encrypt certificate ==="
+dnf install -y certbot python3-certbot-dns-route53
+
+# DNS-01 challenge: no need to open port 80
+certbot certonly \
+  --dns-route53 \
+  --non-interactive \
+  --agree-tos \
+  --email "${var.admin_email}" \
+  -d "${var.keycloak_domain}"
+
+cp /etc/letsencrypt/live/${var.keycloak_domain}/fullchain.pem /opt/keycloak/conf/server.crt.pem
+cp /etc/letsencrypt/live/${var.keycloak_domain}/privkey.pem   /opt/keycloak/conf/server.key.pem
+chown 1000:1000 /opt/keycloak/conf/server.*.pem
+chmod 600 /opt/keycloak/conf/server.key.pem
+
+# Renewal: certificates last 90 days. Automate it or you WILL forget.
+cat > /etc/cron.d/certbot-renew <<'CRON'
+0 3 * * * root certbot renew --quiet --deploy-hook "cp /etc/letsencrypt/live/*/fullchain.pem /opt/keycloak/conf/server.crt.pem && cp /etc/letsencrypt/live/*/privkey.pem /opt/keycloak/conf/server.key.pem && chown 1000:1000 /opt/keycloak/conf/server.*.pem && systemctl restart keycloak"
+CRON
+```
+
+The DNS-01 challenge requires the instance role to edit Route 53:
+
+```hcl
+data "aws_iam_policy_document" "route53_certbot" {
+  statement {
+    actions   = ["route53:ListHostedZones", "route53:GetChange"]
+    resources = ["*"]
+  }
+  statement {
+    actions   = ["route53:ChangeResourceRecordSets"]
+    resources = ["arn:aws:route53:::hostedzone/${aws_route53_zone.main.zone_id}"]
+  }
+}
+```
+
+> **Why DNS-01 instead of HTTP-01?** HTTP-01 requires port 80 open to the entire internet, which contradicts the IP-allowlist design. DNS-01 proves ownership through a TXT record instead — no inbound port needed. It also supports wildcards.
+
+| Pro | Con |
+|---|---|
+| No ALB needed — saves ~$16/month | You own the renewal cron job |
+| Certificate lives on the instance | 90-day lifetime; a failed renewal = outage |
+| Wildcards supported | Adds Route 53 write permissions to the instance role |
+| Free | Every instance replacement re-requests a certificate — watch the rate limits (50/week per domain) |
+
+**That last point is a real trap.** With `user_data_replace_on_change = true`, every script edit rebuilds the instance and requests a new certificate. Let's Encrypt rate-limits you, and hitting it locks you out for a week. Use their **staging** endpoint (`--test-cert`) while developing.
+
+## Option C — A certificate from your company's CA
+
+Common in enterprises with an internal PKI. Store the certificate in Secrets Manager and fetch it at boot:
+
+```hcl
+resource "aws_secretsmanager_secret" "tls" {
+  name = "${var.project_name}/db-tls-cert"   # note: db- prefix for the IAM policy
+}
+
+resource "aws_secretsmanager_secret_version" "tls" {
+  secret_id = aws_secretsmanager_secret.tls.id
+  secret_string = jsonencode({
+    certificate = file("${path.module}/certs/server.crt")
+    private_key = file("${path.module}/certs/server.key")
+    chain       = file("${path.module}/certs/chain.crt")
+  })
+}
+```
+
+```bash
+# in the bootstrap script, replacing the openssl step
+TLS=$(aws secretsmanager get-secret-value --secret-id "${aws_secretsmanager_secret.tls.name}" --query SecretString --output text)
+echo "$TLS" | jq -r .certificate  > /opt/keycloak/conf/server.crt.pem
+echo "$TLS" | jq -r .chain       >> /opt/keycloak/conf/server.crt.pem   # full chain
+echo "$TLS" | jq -r .private_key  > /opt/keycloak/conf/server.key.pem
+chown 1000:1000 /opt/keycloak/conf/server.*.pem
+chmod 600 /opt/keycloak/conf/server.key.pem
+```
+
+> **⚠️ Never commit private keys to Git**, even in a private repo. Use `terraform import` for a pre-existing secret, or upload it with the CLI and read it with a `data` source instead of `file()`.
+
+**Certificate order matters.** The file must be: your certificate first, then intermediates, then (optionally) the root. Wrong order gives you "unable to verify the first certificate" in some clients and works fine in others — the worst kind of bug.
+
+## Option D — Better self-signed, for a lab you can't give a domain
+
+If you must stay self-signed, at least make it usable:
+
+```bash
+# Create your own tiny certificate authority
+openssl req -x509 -newkey rsa:4096 -nodes -sha256 -days 3650 \
+  -keyout /opt/keycloak/conf/ca.key.pem \
+  -out /opt/keycloak/conf/ca.crt.pem \
+  -subj "/CN=MyLab Root CA/O=MyLab"
+
+# Issue a server certificate signed by it
+openssl req -newkey rsa:2048 -nodes -sha256 \
+  -keyout /opt/keycloak/conf/server.key.pem \
+  -out /tmp/server.csr \
+  -subj "/CN=$PUBLIC_IP"
+
+openssl x509 -req -in /tmp/server.csr -sha256 -days 825 \
+  -CA /opt/keycloak/conf/ca.crt.pem -CAkey /opt/keycloak/conf/ca.key.pem -CAcreateserial \
+  -out /opt/keycloak/conf/server.crt.pem \
+  -extfile <(printf "subjectAltName=IP:$PUBLIC_IP\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth")
+```
+
+Install `ca.crt.pem` once in your OS trust store and every certificate it signs is trusted — including future rebuilds.
+
+> `-days 825` for the server certificate is deliberate: Apple and Chrome reject leaf certificates valid for more than 825 days. The original code's `-days 3650` violates this, which is another reason browsers may be extra unhappy.
+
+## Certificate options compared
+
+| | A: ACM+ALB | B: Let's Encrypt | C: Corporate CA | D: Self-signed |
+|---|---|---|---|---|
+| Cost | free (+ALB ~$16) | free | varies | free |
+| Domain required | ✅ | ✅ | ✅ | ❌ |
+| Auto-renewal | ✅ perfect | ⚠️ your cron job | ❌ manual | ❌ |
+| Browser trust | ✅ | ✅ | ✅ internal only | ❌ |
+| Lifetime | auto | 90 days | 1–2 years | you choose |
+| Complexity | ⭐⭐ | ⭐⭐⭐ | ⭐⭐ | ⭐ |
+| Best for | **AWS production** | small public | enterprise | labs |
+
+## After the swap: verify it
+
+```bash
+DOMAIN="login.example.com"
+
+# Full handshake and chain
+echo | openssl s_client -connect $DOMAIN:443 -servername $DOMAIN 2>/dev/null \
+  | openssl x509 -noout -subject -issuer -dates
+
+# Should return 0 (success) with no -k flag needed
+curl -sSf https://$DOMAIN/health/ready && echo "TLS OK"
+
+# Verify the chain is complete
+echo | openssl s_client -connect $DOMAIN:443 -servername $DOMAIN -verify_return_error 2>&1 | grep "Verify return code"
+# want: Verify return code: 0 (ok)
+
+# Check ACM's renewal status
+aws acm describe-certificate --certificate-arn <arn> \
+  --query 'Certificate.{Status:Status,Expiry:NotAfter,Renewal:RenewalEligibility}' --output table
+```
+
+For an outside opinion, run the domain through SSL Labs' server test.
+
+---
+
+# The recommended production target
+
+Putting all three swaps together:
+
+```
+                    Route 53: login.example.com
+                              |
+                     CloudFront + WAF (optional)
+                              |
+                  ALB (public subnets, ACM cert, 443)
+                              |
+              +---------------+---------------+
+              |                               |
+    EC2 Keycloak (private AZ-a)     EC2 Keycloak (private AZ-b)
+              |                               |
+              +---------------+---------------+
+                              |
+                   RDS Multi-AZ PostgreSQL 18
+                   (private subnets, encrypted,
+                    force_ssl, AWS-managed password)
+```
+
+| Element | Choice | Why |
+|---|---|---|
+| Database connection | Swap 1 Option C (AWS-managed password) | No password in state, automatic rotation |
+| Network access | Swap 2 Option B (ALB + private instances) | Instances unreachable from the internet |
+| Certificate | Swap 3 Option A (ACM) | Free, auto-renewing, zero maintenance |
+| State | S3 + `use_lockfile` + versioning | Locked, encrypted, recoverable |
+| Deployment | GitLab pipeline with OIDC | No stored credentials, reviewed changes |
+
+Estimated cost: ~$120/month for a genuinely production-shaped deployment. Compare that to your first outage.
+
+[← Previous: GitLab pipeline](05-gitlab-pipeline.md) | [Next: known bugs →](07-known-bugs-and-fixes.md)
