@@ -3236,6 +3236,16 @@ function simulate(srcKey, dstKey, proto, port){
 
   if(!srcKey || !dstKey)
     return stop(null, 'Nothing selected', 'A simulation needs both ends.', 'Choose where the packet starts and where it is going.', 'Pick a source and a destination above.');
+  if(!ofType(['instance','alb']).length)
+    return stop(null, 'Nothing to send traffic to',
+      'This design has no instances and no load balancers.',
+      'Subnets and route tables describe where traffic could go; an instance or a load balancer is what actually sends and answers.',
+      'Add an instance — give it a subnet, a listening port and a security group — then send again.');
+  if(srcKey === 'internet' && dstKey === 's3')
+    return stop(null, 'Not a path this models',
+      'A client on the internet talking to S3 never touches your VPC.',
+      'The interesting question is how something inside your network reaches S3 — over a gateway endpoint, or the long way through a NAT gateway.',
+      'Pick one of your own resources as the source.');
   if(srcKey === dstKey)
     return stop(null, 'Nothing to send', 'Source and destination are the same.', 'A packet has to go somewhere else.', 'Pick two different endpoints.');
   if(srcKey === 's3')
@@ -3801,16 +3811,47 @@ function renderIssues(){
 /* ------------------------------------------------------------
    FLOW CONTROLS + RUNNER
    ------------------------------------------------------------ */
-function renderFlow(){
+/* A pair has to describe a path this simulator models. Two identical ends
+   do not, and neither does the internet talking to S3. */
+function pairOk(s, dd){
+  return !!s && !!dd && s !== dd && !(s === 'internet' && dd === 's3');
+}
+/* Prefer something the person actually built: a resource first, then the
+   internet, then S3. */
+function bestDst(srcVal){
+  const opts = Array.from(q('bDst').options).map(o => o.value);
+  const real = opts.filter(v => v !== 'internet' && v !== 's3' && v !== srcVal);
+  if(real.length) return real[0];
+  if(srcVal !== 'internet' && opts.indexOf('internet') >= 0) return 'internet';
+  return opts[0];
+}
+let lastDst = null;
+/* `reset` is passed when the whole design is replaced — otherwise the
+   selection is kept so a small edit does not move what you were testing. */
+function renderFlow(reset){
   const ends = R().filter(r => (r.type === 'instance' || r.type === 'alb'));
-  const opt = (v, l, sel) => '<option value="' + esc(v) + '"' + (sel === v ? ' selected' : '') + '>' + esc(l) + '</option>';
-  const keepS = q('bSrc').value, keepD = q('bDst').value;
-  const list = ends.map(r => opt(r.id, r.name + ' — ' + TYPES[r.type].label.toLowerCase(), null)).join('');
-  q('bSrc').innerHTML = opt('internet', 'The internet', null) + list;
-  q('bDst').innerHTML = list + opt('internet', 'The internet', null) + opt('s3', 'Amazon S3', null);
+  const opt = (v, l) => '<option value="' + esc(v) + '">' + esc(l) + '</option>';
+  const keepS = reset ? '' : q('bSrc').value, keepD = reset ? '' : q('bDst').value;
+  const list = ends.map(r => opt(r.id, r.name + ' — ' + TYPES[r.type].label.toLowerCase())).join('');
+  q('bSrc').innerHTML = opt('internet', 'The internet') + list;
+  q('bDst').innerHTML = list + opt('internet', 'The internet') + opt('s3', 'Amazon S3');
   const has = (sel, v) => Array.from(q(sel).options).some(o => o.value === v);
   if(keepS && has('bSrc', keepS)) q('bSrc').value = keepS;
   if(keepD && has('bDst', keepD)) q('bDst').value = keepD;
+  /* The destination can be left pointing at nothing useful — a design that
+     has just gained its first instance while the selection still sits on
+     the internet from before, for instance. Move it to something real. */
+  if(!pairOk(q('bSrc').value, q('bDst').value)){
+    const v = bestDst(q('bSrc').value);
+    if(v) q('bDst').value = v;
+  }
+  if(reset) lastDst = null;
+  if(q('bDst').value !== lastDst){ lastDst = q('bDst').value; syncPortToDst(); }
+}
+function syncPortToDst(){
+  const r = byId(q('bDst').value);
+  if(r) q('bPort').value = dstListen(r) || q('bPort').value;
+  else if(q('bDst').value === 's3') q('bPort').value = 443;
 }
 function logLine(cls, html){
   const d = document.createElement('div');
@@ -3819,7 +3860,50 @@ function logLine(cls, html){
   q('bLog').appendChild(d);
   q('bLog').scrollTop = q('bLog').scrollHeight;
 }
-function run(){
+function paintHop(h, i){
+  const n = '<span style="color:var(--text-4)">' + String(i + 1).padStart(2, '0') + '</span> ';
+  if(h.pass)
+    logLine(h.warn ? 'log-warn' : 'log-ok',
+      n + '<strong>' + (h.warn ? '⚠ ' : '') + esc(h.label) + '</strong><br><span style="color:var(--text-2)">' + esc(h.detail) + '</span>');
+  else
+    logLine('log-block',
+      n + '<strong>✕ ' + esc(h.label) + '</strong><br><span style="color:var(--text-2)">' + esc(h.detail) + '</span>');
+}
+function paintVerdict(hops){
+  const v = q('bVerdict');
+  const last = hops[hops.length - 1];
+  v.classList.remove('hidden');
+  if(last && last.pass){
+    v.style.borderLeftColor = 'var(--ok-line)';
+    v.style.background = 'var(--ok-bg)';
+    v.innerHTML = '<strong>Packet delivered.</strong> Every hop allowed it through — ' + hops.length +
+                  ' checks, from ' + esc(label(q('bSrc').value)) + ' to ' + esc(label(q('bDst').value)) + '.';
+  } else {
+    v.style.borderLeftColor = 'var(--bad)';
+    v.style.background = 'var(--bad-bg)';
+    v.innerHTML = '<div class="font-semibold mb-1.5" style="color:var(--bad)">Traffic stopped at ' + esc(last.label) + '</div>' +
+      '<div class="mb-2" style="color:var(--text-2)"><strong>What happened:</strong> ' + esc(last.why || last.detail) + '</div>' +
+      '<div style="color:var(--text-2)"><strong>Fix:</strong> ' + esc(last.fix || '') + '</div>';
+  }
+}
+
+/* Nothing has been sent yet, or the design moved on and the old result no
+   longer describes anything. Either way, leave no stale picture behind —
+   the export buttons would otherwise hand over a run for a design that is
+   no longer on screen. */
+function clearRun(){
+  clearTimeout(simTimer);
+  clearNodes();
+  lastRun = null;
+  q('bLog').innerHTML = '<div style="color:var(--text-3)">Press “Create simulation” to send a packet through this design.</div>';
+  q('bVerdict').classList.add('hidden');
+  q('bRun').disabled = false;
+  ['bPrint','bPng','bSvg'].forEach(id => { const el = q(id); if(el) el.disabled = true; });
+  const hint = q('bExportHint');
+  if(hint) hint.textContent = 'available once a packet has been sent';
+}
+
+function execute(animate, note){
   clearTimeout(simTimer);
   clearNodes();
   q('bLog').innerHTML = '';
@@ -3837,9 +3921,8 @@ function run(){
   }
   if(!hops || !hops.length) hops = [{ node:null, label:'Nothing to simulate', detail:'No hops were produced.',
     pass:false, why:'The source and destination did not describe a path.', fix:'Pick a source and a destination, then send again.' }];
-  let i = 0;
 
-  /* Kept whole, before the animation starts, so the export is available
+  /* Captured whole, before any animation, so the export is available
      immediately and does not depend on the walk finishing. */
   lastRun = {
     hops: hops,
@@ -3853,39 +3936,33 @@ function run(){
   ['bPrint','bPng','bSvg'].forEach(id => { const el = q(id); if(el) el.disabled = false; });
   const hint = q('bExportHint');
   if(hint) hint.textContent = 'of this run · ' + hops.length + ' hop' + (hops.length === 1 ? '' : 's');
+  if(note) logLine('log-info', note);
 
+  /* Repainting after an edit is instant — replaying the walk every time
+     somebody flips a switch would be noise. */
+  if(!animate){
+    hops.forEach(paintHop);
+    const last = hops[hops.length - 1];
+    markNode(last.node, last.pass ? 'done' : 'stop');
+    paintVerdict(hops);
+    q('bRun').disabled = false;
+    return;
+  }
+
+  let i = 0;
   (function step(){
     if(i >= hops.length){
       q('bRun').disabled = false;
       const last = hops[hops.length - 1];
-      if(last && last.pass){
-        const v = q('bVerdict');
-        v.classList.remove('hidden');
-        v.style.borderLeftColor = 'var(--ok-line)';
-        v.style.background = 'var(--ok-bg)';
-        v.innerHTML = '<strong>Packet delivered.</strong> Every hop allowed it through — ' + hops.length +
-                      ' checks, from ' + esc(label(q('bSrc').value)) + ' to ' + esc(label(q('bDst').value)) + '.';
-        markNode(last.node, 'done');
-      }
+      if(last && last.pass){ paintVerdict(hops); markNode(last.node, 'done'); }
       return;
     }
     const h = hops[i];
-    const n = '<span style="color:var(--text-4)">' + String(i + 1).padStart(2, '0') + '</span> ';
     clearNodes();
-    if(h.pass){
-      markNode(h.node, i === hops.length - 1 ? 'done' : 'hit');
-      logLine(h.warn ? 'log-warn' : 'log-ok',
-        n + '<strong>' + (h.warn ? '⚠ ' : '') + esc(h.label) + '</strong><br><span style="color:var(--text-2)">' + esc(h.detail) + '</span>');
-    } else {
-      markNode(h.node, 'stop');
-      logLine('log-block', n + '<strong>✕ ' + esc(h.label) + '</strong><br><span style="color:var(--text-2)">' + esc(h.detail) + '</span>');
-      const v = q('bVerdict');
-      v.classList.remove('hidden');
-      v.style.borderLeftColor = 'var(--bad)';
-      v.style.background = 'var(--bad-bg)';
-      v.innerHTML = '<div class="font-semibold mb-1.5" style="color:var(--bad)">Traffic stopped at ' + esc(h.label) + '</div>' +
-        '<div class="mb-2" style="color:var(--text-2)"><strong>What happened:</strong> ' + esc(h.why || h.detail) + '</div>' +
-        '<div style="color:var(--text-2)"><strong>Fix:</strong> ' + esc(h.fix || '') + '</div>';
+    markNode(h.node, h.pass ? (i === hops.length - 1 ? 'done' : 'hit') : 'stop');
+    paintHop(h, i);
+    if(!h.pass){
+      paintVerdict(hops.slice(0, i + 1));
       q('bRun').disabled = false;
       return;
     }
@@ -3893,6 +3970,7 @@ function run(){
     simTimer = setTimeout(step, 520);
   })();
 }
+function run(){ execute(true); }
 
 /* ------------------------------------------------------------
    SCHEMA (published as annotated YAML)
@@ -4217,11 +4295,15 @@ function normalise(d, fallbackName){
 
 /* Re-rendering the form is unavoidable — the reference dropdowns have to pick
    up new resources — so carry whatever is half-typed across the rebuild. */
-function refresh(){
+function refresh(resetFlow){
   const keep = { name: q('bResName').value, parent: q('bParent').value, props: readForm() };
-  renderTable(); renderTree(); renderIssues(); renderFlow();
+  renderTable(); renderTree(); renderIssues(); renderFlow(resetFlow);
   renderForm({ parent: keep.parent, props: keep.props });
   q('bResName').value = keep.name;
+  /* A result on screen has to describe the design on screen. Replacing the
+     design drops it; editing the design re-runs it in place. */
+  if(resetFlow) clearRun();
+  else if(lastRun) execute(false, 'Updated for the current design');
   persistWorking();
 }
 function renderDesignList(){
@@ -4425,11 +4507,7 @@ const api = {
     saveBlob(name, new Blob([flowSvg(lastRun, livePalette())], { type:'image/svg+xml;charset=utf-8' }));
     status('Saved ' + name + '.');
   },
-  syncPort(){
-    const r = byId(q('bDst').value);
-    if(r) q('bPort').value = dstListen(r) || q('bPort').value;
-    else if(q('bDst').value === 's3') q('bPort').value = 443;
-  },
+  syncPort: syncPortToDst,
   rename(){
     cur.name = q('bName').value.trim() || 'untitled-design';
     persistWorking();
@@ -4453,7 +4531,7 @@ const api = {
     q('bName').value = cur.name;
     editId = null;
     api.pickType();
-    refresh();
+    refresh(true);
     renderDesignList();
     status('Loaded "' + name + '".');
   },
@@ -4472,7 +4550,7 @@ const api = {
     q('bName').value = cur.name;
     editId = null;
     api.pickType();
-    refresh();
+    refresh(true);
     renderDesignList();
   },
   clear(){
@@ -4481,7 +4559,7 @@ const api = {
     cur.resources = [];
     editId = null;
     api.pickType();
-    refresh();
+    refresh(true);
   },
   example(which){
     if(R().length && !confirm('Replace the current design with the example?')) return;
@@ -4490,7 +4568,7 @@ const api = {
     q('bName').value = cur.name;
     editId = null;
     api.pickType();
-    refresh();
+    refresh(true);
     status(which === 'broken'
       ? 'Loaded a design with several real mistakes in it — read the issues panel, then send traffic through.'
       : 'Loaded a working three-tier VPC. Try internet → web-alb on 443, then switch something off.');
@@ -4532,7 +4610,7 @@ const api = {
           q('bName').value = cur.name;
           editId = null;
           api.pickType();
-          refresh();
+          refresh(true);
           status('Loaded "' + cur.name + '" — ' + R().length + ' resources. Save it to keep it.');
         } else {
           status('That file has no "resources" list and no "designs" map.', true);
@@ -4610,7 +4688,7 @@ function designYaml(d){
   q('bName').value = cur.name;
   renderDesignList();
   api.pickType();
-  refresh();
+  refresh(true);
 })();
 
 return api;
