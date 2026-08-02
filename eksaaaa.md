@@ -670,7 +670,663 @@ As of August 2026, EKS supports roughly **1.33 through 1.36** on standard suppor
 5. **GitOps (Argo CD / Flux)** — deploy by merging a pull request instead of running `kubectl apply`.
 6. **Self-managed Karpenter** — the same engine, fully under your control, no Auto Mode fee.
 
-## 2.10 Sources & official docs
+---
+
+# PART 3 — The Terraform version (with separate state per layer)
+
+Everything in Part 1 was typed by hand. That's great for learning and terrible for real life: nobody remembers what they typed six months ago. Terraform lets you write your infrastructure down as files, keep them in Git, and rebuild the whole thing with one command.
+
+## 3.0 What "state" is, and why we split it
+
+**Terraform state** is a save file. It's a JSON file that records "I created VPC `vpc-abc123`, and it belongs to this line of code." Without it, Terraform has no memory and would try to create everything twice.
+
+Think of it like save files in a video game:
+
+- **One giant save file** = every time you want to change your character's hat, the game reloads the entire world. Slow. And if the file corrupts, you lose everything.
+- **Separate save files per level** = change the hat, only the hat level reloads. If one file breaks, the others are fine.
+
+Reasons real teams split state:
+
+| Reason | Plain English |
+|---|---|
+| **Blast radius** | A typo in the app layer can't accidentally delete your VPC. Terraform can only destroy what's in the state file it's holding. |
+| **Speed** | `terraform plan` on 8 resources takes 5 seconds. On 400 resources it takes 4 minutes. |
+| **Permissions** | Network engineers get write access to the network state; app developers only get the app state. |
+| **Change rate** | The VPC changes twice a year. The app changes twice a day. Don't couple them. |
+| **Fewer lock fights** | Two people running `apply` on different layers don't block each other. |
+
+## 3.1 The dependency tree
+
+```
+                    ┌──────────────────────────┐
+                    │  00-bootstrap            │  state: LOCAL (then migrated to itself)
+                    │  S3 bucket for all state │  changes: ~never
+                    └────────────┬─────────────┘
+                                 │ (provides the bucket everything else writes into)
+                    ┌────────────▼─────────────┐
+                    │  01-network              │  state: s3://.../01-network/terraform.tfstate
+                    │  VPC, subnets, NAT, tags │  changes: ~yearly
+                    └────────────┬─────────────┘
+                                 │ outputs: vpc_id, private_subnet_ids, public_subnet_ids
+                    ┌────────────▼─────────────┐
+                    │  02-cluster              │  state: s3://.../02-cluster/terraform.tfstate
+                    │  EKS control plane,      │  changes: ~quarterly (version upgrades)
+                    │  Auto Mode, IAM roles    │
+                    └──────┬──────────────┬────┘
+       outputs: cluster_name,│             │ outputs: cluster_endpoint, ca_data
+       node_iam_role_name    │             │
+              ┌──────────────▼───┐   ┌─────▼──────────────┐
+              │  03-nodepools    │   │  (03b-addons)      │  optional: metrics-server,
+              │  NodeClass +     │   │                    │  observability, etc.
+              │  NodePool CRDs   │   └────────────────────┘
+              │  changes: monthly│
+              └──────────┬───────┘
+                         │ (nodes must be schedulable before pods land)
+              ┌──────────▼───────┐
+              │  04-app          │  state: s3://.../04-app/terraform.tfstate
+              │  hello-world     │  changes: daily
+              │  Deployment + Svc│
+              └──────────────────┘
+```
+
+**Rule of the tree:** arrows point *downward only*. A lower layer may read a higher layer's outputs; a higher layer must never know a lower layer exists. That one rule is what keeps the whole thing untangleable.
+
+| Layer | Owns | Reads from | Blast radius if you break it |
+|---|---|---|---|
+| `00-bootstrap` | State bucket | nothing | Catastrophic — protect it |
+| `01-network` | VPC, subnets, NAT, route tables | nothing | Whole environment down |
+| `02-cluster` | EKS cluster, Auto Mode config, IAM | 01 | Cluster down, VPC safe |
+| `03-nodepools` | NodeClass, NodePool | 02 | Nodes stop scaling; cluster safe |
+| `04-app` | Deployment, Service, HPA, PDB | 02 (+03 labels) | One app down; nothing else |
+
+## 3.2 Folder layout
+
+```
+eks-hello-auto/
+├── backend.hcl                 # shared backend settings (bucket, region)
+├── 00-bootstrap/
+│   ├── main.tf
+│   └── outputs.tf
+├── 01-network/
+│   ├── backend.tf  main.tf  variables.tf  outputs.tf
+├── 02-cluster/
+│   ├── backend.tf  main.tf  variables.tf  outputs.tf
+├── 03-nodepools/
+│   ├── backend.tf  providers.tf  main.tf  variables.tf  outputs.tf
+└── 04-app/
+    ├── backend.tf  providers.tf  main.tf  variables.tf  outputs.tf
+```
+
+Shared `backend.hcl` (backends can't use variables, so we pass a file instead):
+
+```hcl
+# backend.hcl  — pass with: terraform init -backend-config=../backend.hcl
+bucket       = "tfstate-hello-auto-123456789012"   # must be globally unique
+region       = "us-east-1"
+encrypt      = true
+use_lockfile = true    # native S3 locking - no DynamoDB table needed (Terraform 1.11+)
+```
+
+> **Version note:** `use_lockfile` went GA in Terraform 1.11 and the old `dynamodb_table` argument is deprecated. If you see a guide telling you to create a DynamoDB lock table, it's out of date.
+
+---
+
+## 3.3 Layer 00 — bootstrap (the chicken-and-egg layer)
+
+You need an S3 bucket to store state... but that bucket is itself infrastructure. Solution: create it with **local state**, then migrate its own state into itself.
+
+```hcl
+# 00-bootstrap/main.tf
+terraform {
+  required_version = ">= 1.11.0"
+  required_providers {
+    aws = { source = "hashicorp/aws", version = "~> 6.0" }
+  }
+  # NO backend block yet — starts as a local terraform.tfstate file
+}
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+data "aws_caller_identity" "current" {}
+
+resource "aws_s3_bucket" "tfstate" {
+  bucket = "tfstate-hello-auto-${data.aws_caller_identity.current.account_id}"
+
+  lifecycle {
+    prevent_destroy = true    # seatbelt: refuses to be deleted by accident
+  }
+}
+
+resource "aws_s3_bucket_versioning" "tfstate" {
+  bucket = aws_s3_bucket.tfstate.id
+  versioning_configuration { status = "Enabled" }   # REQUIRED for safe locking + undo
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "tfstate" {
+  bucket = aws_s3_bucket.tfstate.id
+  rule {
+    apply_server_side_encryption_by_default { sse_algorithm = "AES256" }
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "tfstate" {
+  bucket                  = aws_s3_bucket.tfstate.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+```
+
+```hcl
+# 00-bootstrap/outputs.tf
+output "state_bucket" { value = aws_s3_bucket.tfstate.id }
+```
+
+Run it:
+
+```bash
+cd 00-bootstrap
+terraform init
+terraform apply
+terraform output state_bucket        # copy this into backend.hcl
+```
+
+*(Optional, once the bucket exists: add a `backend "s3"` block with key `00-bootstrap/terraform.tfstate`, re-run `terraform init -migrate-state`, and answer `yes`. Now even the bootstrap layer lives remotely. Commit the local state file to Git **never** — add `*.tfstate*` to `.gitignore`.)*
+
+---
+
+## 3.4 Layer 01 — network
+
+```hcl
+# 01-network/backend.tf
+terraform {
+  required_version = ">= 1.11.0"
+  backend "s3" {
+    key = "01-network/terraform.tfstate"     # bucket/region come from backend.hcl
+  }
+  required_providers {
+    aws = { source = "hashicorp/aws", version = "~> 6.0" }
+  }
+}
+
+provider "aws" { region = var.region }
+```
+
+```hcl
+# 01-network/main.tf
+data "aws_availability_zones" "available" {
+  filter {
+    name   = "opt-in-status"
+    values = ["opt-in-not-required"]
+  }
+}
+
+module "vpc" {
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "~> 6.0"
+
+  name = "${var.cluster_name}-vpc"
+  cidr = "10.0.0.0/16"
+
+  azs             = slice(data.aws_availability_zones.available.names, 0, 3)
+  private_subnets = ["10.0.1.0/24",   "10.0.2.0/24",   "10.0.3.0/24"]
+  public_subnets  = ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"]
+
+  enable_nat_gateway = true
+  single_nat_gateway = true      # cheap: 1 NAT (~$32/mo). Production: false = 1 per AZ.
+  enable_dns_hostnames = true
+
+  # These tags are how load balancers find the right subnets. Miss them and your
+  # Service sits at EXTERNAL-IP <pending> forever.
+  public_subnet_tags  = { "kubernetes.io/role/elb"          = 1 }
+  private_subnet_tags = { "kubernetes.io/role/internal-elb" = 1 }
+}
+```
+
+```hcl
+# 01-network/outputs.tf   <-- this is the CONTRACT with the layer below
+output "vpc_id"             { value = module.vpc.vpc_id }
+output "private_subnet_ids" { value = module.vpc.private_subnets }
+output "public_subnet_ids"  { value = module.vpc.public_subnets }
+```
+
+```bash
+cd 01-network
+terraform init -backend-config=../backend.hcl
+terraform apply
+```
+
+---
+
+## 3.5 Layer 02 — the EKS cluster with Auto Mode
+
+```hcl
+# 02-cluster/backend.tf
+terraform {
+  required_version = ">= 1.11.0"
+  backend "s3" { key = "02-cluster/terraform.tfstate" }
+  required_providers {
+    aws = { source = "hashicorp/aws", version = "~> 6.0" }
+  }
+}
+provider "aws" { region = var.region }
+```
+
+```hcl
+# 02-cluster/main.tf
+
+# ---- Reach UP the tree and read layer 01's outputs ----
+data "terraform_remote_state" "network" {
+  backend = "s3"
+  config = {
+    bucket = var.state_bucket
+    key    = "01-network/terraform.tfstate"
+    region = var.region
+  }
+}
+
+module "eks" {
+  source  = "terraform-aws-modules/eks/aws"
+  version = "21.24.0"          # PIN EXACTLY. This module changes fast.
+
+  name               = var.cluster_name
+  kubernetes_version = "1.35"
+
+  endpoint_public_access                   = true
+  enable_cluster_creator_admin_permissions = true
+
+  # ===== THE AUTO MODE SWITCH =====
+  compute_config = {
+    enabled    = true
+    node_pools = ["general-purpose", "system"]   # use [] to run ONLY your own pools
+  }
+  # =================================
+
+  vpc_id     = data.terraform_remote_state.network.outputs.vpc_id
+  subnet_ids = data.terraform_remote_state.network.outputs.private_subnet_ids
+
+  tags = { Environment = "learning", ManagedBy = "terraform" }
+}
+```
+
+```hcl
+# 02-cluster/outputs.tf
+output "cluster_name"              { value = module.eks.cluster_name }
+output "cluster_endpoint"          { value = module.eks.cluster_endpoint }
+output "cluster_ca_data"           { value = module.eks.cluster_certificate_authority_data }
+output "node_iam_role_name"        { value = module.eks.node_iam_role_name }   # needed by NodeClass
+output "cluster_security_group_id" { value = module.eks.cluster_security_group_id }
+```
+
+```bash
+cd 02-cluster
+terraform init -backend-config=../backend.hcl
+terraform apply                      # ~15 minutes
+aws eks update-kubeconfig --name hello-auto --region us-east-1
+```
+
+> **Known trap:** the `compute_config` block is what turns Auto Mode on and off, and some module upgrades have generated a spurious "disable Auto Mode" diff. This is exactly why you pin the version and **always read the plan before typing yes**.
+
+---
+
+## 3.6 Layer 03 — the node pools
+
+This layer applies Kubernetes CRDs (`NodeClass`, `NodePool`), so it needs a Kubernetes provider, not just AWS.
+
+```hcl
+# 03-nodepools/providers.tf
+terraform {
+  required_version = ">= 1.11.0"
+  backend "s3" { key = "03-nodepools/terraform.tfstate" }
+  required_providers {
+    aws     = { source = "hashicorp/aws",  version = "~> 6.0" }
+    kubectl = { source = "alekc/kubectl",  version = "~> 2.1" }
+  }
+}
+
+provider "aws" { region = var.region }
+
+data "terraform_remote_state" "cluster" {
+  backend = "s3"
+  config = {
+    bucket = var.state_bucket
+    key    = "02-cluster/terraform.tfstate"
+    region = var.region
+  }
+}
+
+# Log in to the cluster using a short-lived token, generated at run time.
+provider "kubectl" {
+  host                   = data.terraform_remote_state.cluster.outputs.cluster_endpoint
+  cluster_ca_certificate = base64decode(data.terraform_remote_state.cluster.outputs.cluster_ca_data)
+  load_config_file       = false
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    command     = "aws"
+    args = ["eks", "get-token", "--cluster-name",
+            data.terraform_remote_state.cluster.outputs.cluster_name]
+  }
+}
+```
+
+> **Why `kubectl` instead of the official `kubernetes` provider here?** The official provider's `kubernetes_manifest` resource contacts the cluster during `plan` to learn the CRD's shape. If the CRD doesn't exist yet, the plan explodes. The `kubectl_manifest` resource just sends YAML, so it works fine on a brand-new cluster. For plain Deployments and Services (Part 3.7) the official provider is great.
+
+```hcl
+# 03-nodepools/main.tf
+locals {
+  cluster_name = data.terraform_remote_state.cluster.outputs.cluster_name
+  node_role    = data.terraform_remote_state.cluster.outputs.node_iam_role_name
+}
+
+resource "kubectl_manifest" "web_nodeclass" {
+  yaml_body = yamlencode({
+    apiVersion = "eks.amazonaws.com/v1"
+    kind       = "NodeClass"
+    metadata   = { name = "web-nodeclass" }
+    spec = {
+      role = local.node_role
+      subnetSelectorTerms        = [{ tags = { "kubernetes.io/cluster/${local.cluster_name}" = "*" } }]
+      securityGroupSelectorTerms = [{ tags = { "kubernetes.io/cluster/${local.cluster_name}" = "owned" } }]
+      ephemeralStorage = { size = "40Gi", iops = 3000, throughput = 125 }
+    }
+  })
+}
+
+resource "kubectl_manifest" "web_nodepool" {
+  depends_on = [kubectl_manifest.web_nodeclass]   # explicit ordering inside the layer
+
+  yaml_body = yamlencode({
+    apiVersion = "karpenter.sh/v1"
+    kind       = "NodePool"
+    metadata   = { name = "web-pool" }
+    spec = {
+      template = {
+        metadata = { labels = { "workload-type" = "web" } }
+        spec = {
+          nodeClassRef = { group = "eks.amazonaws.com", kind = "NodeClass", name = "web-nodeclass" }
+          requirements = [
+            { key = "eks.amazonaws.com/instance-category",   operator = "In", values = ["c", "m", "r"] },
+            { key = "eks.amazonaws.com/instance-cpu",        operator = "In", values = ["2", "4", "8"] },
+            { key = "eks.amazonaws.com/instance-generation", operator = "Gt", values = ["4"] },
+            { key = "kubernetes.io/arch",                    operator = "In", values = ["amd64"] },
+            { key = "karpenter.sh/capacity-type",            operator = "In", values = var.capacity_types },
+          ]
+          expireAfter = "336h"
+        }
+      }
+      disruption = {
+        consolidationPolicy = "WhenEmptyOrUnderutilized"
+        consolidateAfter    = var.consolidate_after
+      }
+      limits = { cpu = var.pool_cpu_limit, memory = var.pool_memory_limit }
+    }
+  })
+}
+```
+
+```hcl
+# 03-nodepools/variables.tf   — the knobs you actually turn per environment
+variable "region" {
+  type    = string
+  default = "us-east-1"
+}
+
+variable "state_bucket" {
+  type = string          # no default: set it in terraform.tfvars
+}
+
+variable "capacity_types" {
+  type    = list(string)
+  default = ["on-demand"]   # dev/staging: ["spot", "on-demand"]
+}
+
+variable "consolidate_after" {
+  type    = string
+  default = "30s"           # production: "5m" or longer
+}
+
+variable "pool_cpu_limit" {
+  type    = string
+  default = "100"
+}
+
+variable "pool_memory_limit" {
+  type    = string
+  default = "200Gi"
+}
+```
+
+```hcl
+# 03-nodepools/outputs.tf
+output "nodepool_label" { value = "workload-type=web" }   # contract for layer 04
+```
+
+---
+
+## 3.7 Layer 04 — the Hello World app
+
+```hcl
+# 04-app/providers.tf
+terraform {
+  required_version = ">= 1.11.0"
+  backend "s3" { key = "04-app/terraform.tfstate" }
+  required_providers {
+    kubernetes = { source = "hashicorp/kubernetes", version = "~> 2.35" }
+  }
+}
+
+data "terraform_remote_state" "cluster" {
+  backend = "s3"
+  config = { bucket = var.state_bucket, key = "02-cluster/terraform.tfstate", region = var.region }
+}
+
+provider "kubernetes" {
+  host                   = data.terraform_remote_state.cluster.outputs.cluster_endpoint
+  cluster_ca_certificate = base64decode(data.terraform_remote_state.cluster.outputs.cluster_ca_data)
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    command     = "aws"
+    args = ["eks", "get-token", "--cluster-name",
+            data.terraform_remote_state.cluster.outputs.cluster_name]
+  }
+}
+```
+
+```hcl
+# 04-app/main.tf
+resource "kubernetes_deployment" "hello" {
+  metadata {
+    name   = "hello-world"
+    labels = { app = "hello-world" }
+  }
+
+  spec {
+    replicas = var.replicas
+    selector { match_labels = { app = "hello-world" } }
+
+    template {
+      metadata { labels = { app = "hello-world" } }
+      spec {
+        node_selector = { "workload-type" = "web" }   # land on OUR node pool
+
+        container {
+          name    = "web"
+          image   = "public.ecr.aws/nginx/nginx:alpine"
+          command = ["/bin/sh", "-c"]
+          args    = ["echo \"Hello World from $(hostname)\" > /usr/share/nginx/html/index.html && nginx -g 'daemon off;'"]
+
+          port { container_port = 80 }
+
+          resources {
+            requests = { cpu = "250m", memory = "128Mi" }
+            limits   = { cpu = "500m", memory = "256Mi" }
+          }
+
+          readiness_probe {
+            http_get {
+              path = "/"
+              port = 80
+            }
+            initial_delay_seconds = 3
+            period_seconds        = 5
+          }
+        }
+      }
+    }
+  }
+}
+
+resource "kubernetes_service" "hello" {
+  metadata {
+    name = "hello-world"
+    annotations = {
+      "service.beta.kubernetes.io/aws-load-balancer-scheme" = "internet-facing"
+    }
+  }
+  spec {
+    type     = "LoadBalancer"
+    selector = { app = "hello-world" }
+    port {
+      port        = 80
+      target_port = 80
+    }
+  }
+}
+
+resource "kubernetes_pod_disruption_budget_v1" "hello" {
+  metadata { name = "hello-world-pdb" }
+  spec {
+    min_available = 1
+    selector { match_labels = { app = "hello-world" } }
+  }
+}
+```
+
+```hcl
+# 04-app/outputs.tf
+output "url" {
+  value = "http://${kubernetes_service.hello.status[0].load_balancer[0].ingress[0].hostname}"
+}
+```
+
+```bash
+cd 04-app
+terraform init -backend-config=../backend.hcl
+terraform apply
+terraform output url          # paste into your browser
+```
+
+Scaling now means editing one number:
+
+```bash
+terraform apply -var="replicas=20"    # nodes appear
+terraform apply -var="replicas=2"     # nodes disappear
+```
+
+---
+
+## 3.8 Running the whole thing
+
+**Build order — follow the tree downward:**
+
+```bash
+export TF_BACKEND=../backend.hcl
+
+(cd 00-bootstrap && terraform init && terraform apply)
+(cd 01-network   && terraform init -backend-config=$TF_BACKEND && terraform apply)
+(cd 02-cluster   && terraform init -backend-config=$TF_BACKEND && terraform apply)
+aws eks update-kubeconfig --name hello-auto --region us-east-1
+(cd 03-nodepools && terraform init -backend-config=$TF_BACKEND && terraform apply)
+(cd 04-app       && terraform init -backend-config=$TF_BACKEND && terraform apply)
+```
+
+**Destroy order — exactly backwards. This is not optional.**
+
+```bash
+(cd 04-app       && terraform destroy)    # deletes the load balancer FIRST
+(cd 03-nodepools && terraform destroy)
+(cd 02-cluster   && terraform destroy)
+(cd 01-network   && terraform destroy)
+# 00-bootstrap has prevent_destroy = true; remove that line if you really mean it
+```
+
+If you destroy the network before the app, the load balancer still exists, holds network interfaces in the subnets, and the VPC destroy hangs for 20 minutes and then fails. Same trap as Part 1, Step 9 — Terraform doesn't save you from it, because separate states means Terraform *can't see* the dependency across layers.
+
+A tiny `Makefile` makes this safe:
+
+```makefile
+LAYERS_UP   = 01-network 02-cluster 03-nodepools 04-app
+LAYERS_DOWN = 04-app 03-nodepools 02-cluster 01-network
+
+up:
+	@for d in $(LAYERS_UP); do \
+	  (cd $$d && terraform init -input=false -backend-config=../backend.hcl && terraform apply -auto-approve) || exit 1; \
+	done
+
+down:
+	@for d in $(LAYERS_DOWN); do \
+	  (cd $$d && terraform destroy -auto-approve) || exit 1; \
+	done
+
+plan:
+	@for d in $(LAYERS_UP); do echo "== $$d =="; (cd $$d && terraform plan); done
+```
+
+## 3.9 How layers talk to each other
+
+Three ways to pass information down the tree:
+
+| Method | How | Pros | Cons |
+|---|---|---|---|
+| **`terraform_remote_state`** (used above) | Read the layer above's state file directly | Simple, typed, no extra resources | Reader needs S3 read on the *whole* state file — which contains secrets |
+| **AWS data sources** | Look resources up by tag: `data "aws_vpc" { filter { tag:Name } }` | Zero coupling; works even if the VPC wasn't made by Terraform | Silent breakage if someone renames a tag |
+| **SSM Parameter Store** | Upper layer writes params; lower layer reads them | Explicit published contract, fine-grained IAM | One more moving part |
+
+**Best practice for teams:** publish outputs to SSM Parameter Store, and treat those parameter names as a versioned API between teams. For a solo project, `terraform_remote_state` is perfectly fine — just remember that **state files contain secrets in plaintext**, so encrypt the bucket and lock down who can read it.
+
+## 3.10 Split state vs. one big state — pros and cons
+
+| | ✅ Pros | ❌ Cons |
+|---|---|---|
+| **Split state (this guide)** | Small blast radius; fast plans; per-layer permissions; parallel work; easy to destroy just the app | You must remember apply/destroy order yourself; cross-layer changes need multiple applies; more boilerplate |
+| **One giant state** | One `apply` does everything; Terraform figures out all ordering for you | Slow; one bad plan can delete production; everyone fights over the lock; can't give partial access |
+
+**Alternatives worth knowing about:**
+
+- **Terraform workspaces** — same code, different state per environment (`dev`/`prod`). Good for *environments*, bad for *layers*. Easy to run in the wrong workspace by accident.
+- **Terragrunt** — a wrapper that generates the backend blocks and works out layer ordering (`terragrunt run-all apply`) from `dependency` blocks. It exists precisely because of the manual ordering pain in 3.8.
+- **Terraform Stacks / CDKTF / Pulumi** — newer approaches that model cross-layer dependencies natively.
+- **Separate AWS accounts per environment** — the strongest blast-radius boundary of all. Standard in production.
+
+**Rule of thumb:** one state per *thing that changes at a different speed or is owned by a different person.* If two things always change together and are owned by the same person, don't split them.
+
+## 3.11 Terraform-specific gotchas
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `Error: Kubernetes cluster unreachable` in layer 03/04 | kubeconfig/token not available, or cluster endpoint private | Run `aws eks update-kubeconfig` first; check the `exec` block region and profile |
+| Plan fails on `kubernetes_manifest` for a CRD | Official provider queries the API at plan time | Use `kubectl_manifest`, or apply the CRD in an earlier layer |
+| `terraform destroy` on network hangs | Load balancer/ENIs still exist | Destroy layer 04 first; check for orphaned ELBs |
+| Plan wants to disable Auto Mode after a module bump | Module version drift in `compute_config` | Pin the exact module version; read every plan |
+| `Error acquiring the state lock` | Someone else is applying, or a run crashed | Wait; if truly stale, `terraform force-unlock <ID>` (carefully) |
+| Backend config changed | You edited `backend.hcl` | `terraform init -reconfigure` (or `-migrate-state` if moving state) |
+| Secrets visible in state | Normal Terraform behaviour | Encrypt the bucket, restrict IAM, never commit `*.tfstate` |
+
+**Terraform best practices checklist**
+
+- [ ] `.gitignore` contains `*.tfstate`, `*.tfstate.*`, `.terraform/`, `*.tfvars` with secrets.
+- [ ] Commit `.terraform.lock.hcl` (provider version lock) — yes, this one goes in Git.
+- [ ] Pin module versions exactly (`= 21.24.0`), pin providers with `~>`.
+- [ ] Enable S3 bucket versioning — it's your undo button and required for safe locking.
+- [ ] `prevent_destroy` on the state bucket and anything else irreplaceable.
+- [ ] Always run `terraform plan` and actually read it. `-auto-approve` belongs in CI, not your terminal.
+- [ ] Run `terraform fmt` and `terraform validate` before committing; add `tflint`/`checkov` in CI.
+- [ ] Tag everything (`Environment`, `Owner`, `ManagedBy`) so the bill is readable.
+
+## 3.12 Sources & official docs
 
 - EKS Auto Mode overview: https://docs.aws.amazon.com/eks/latest/userguide/automode.html
 - Create an Auto Mode cluster with eksctl: https://docs.aws.amazon.com/eks/latest/userguide/automode-get-started-eksctl.html
@@ -681,6 +1337,14 @@ As of August 2026, EKS supports roughly **1.33 through 1.36** on standard suppor
 - EKS pricing: https://aws.amazon.com/eks/pricing/
 - eksctl Auto Mode docs: https://docs.aws.amazon.com/eks/latest/eksctl/auto-mode.html
 - Karpenter (the engine behind it): https://karpenter.sh/
+
+**Terraform**
+- EKS Terraform module: https://registry.terraform.io/modules/terraform-aws-modules/eks/aws/latest
+- EKS Auto Mode example: https://registry.terraform.io/modules/terraform-aws-modules/eks/aws/latest/examples/eks-auto-mode
+- VPC Terraform module: https://registry.terraform.io/modules/terraform-aws-modules/vpc/aws/latest
+- S3 backend + native locking: https://developer.hashicorp.com/terraform/language/backend/s3
+- `terraform_remote_state`: https://developer.hashicorp.com/terraform/language/state/remote-state-data
+- Terragrunt (if manual layer ordering annoys you): https://terragrunt.gruntwork.io/
 
 ---
 
