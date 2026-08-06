@@ -1,0 +1,1251 @@
+# Cloning a NiFi EC2 Server for a Safe Upgrade and Instant Rollback
+
+**A complete, plain-English runbook with AWS CLI commands and an "undo" for every step.**
+
+Written for: someone running Apache NiFi **1.3.0** on an EC2 instance behind a Load Balancer, who wants to build a copy, upgrade the copy, test it, switch traffic to it, and switch back in under a minute if anything goes wrong.
+
+---
+
+## Part 1 — The Big Idea, In Simple Words
+
+Imagine your school has one photocopier that everybody uses. You want to replace it with a newer model, but you're scared the new one will jam.
+
+The safe way is:
+
+1. Buy the new copier and put it in the same room.
+2. Leave the old one plugged in and working.
+3. Move the sign that says "Copier this way →" to point at the new one.
+4. If the new one jams, move the sign back. Takes five seconds.
+
+That's exactly what we're doing. The "sign" is the **Load Balancer**. The old copier is your current NiFi server. The new copier is a copy of it that we upgrade.
+
+This pattern has a name: **blue/green deployment**. Blue = the old one running now. Green = the new one waiting in the wings.
+
+---
+
+## Part 2 — Background: What Each Piece Actually Is
+
+Skip this if you already know AWS. Read it if any of these words are fuzzy.
+
+### AWS pieces
+
+| Thing | What it really is |
+|---|---|
+| **EC2 instance** | A computer that lives in Amazon's data center. Yours runs NiFi. |
+| **EBS volume** | The hard drive attached to that computer. |
+| **Snapshot** | A frozen photo of that hard drive, saved for later. |
+| **AMI** (Amazon Machine Image) | A photo of the *whole computer* — the drive plus the settings needed to start a new identical one. Think "computer clone template." |
+| **Subnet** | The neighborhood inside your private network where the computer lives. |
+| **Security Group (SG)** | A doorman with a list. It says which network ports are allowed in and who's allowed to knock. |
+| **Load Balancer (ALB)** | The traffic cop at the front door. Users hit the load balancer, and it decides which server actually answers. |
+| **Listener** | The load balancer's ear. It listens on a port, like 443, for incoming traffic. |
+| **Rule** | An if/then instruction on a listener. "If the web address is nifi-test.company.com, send them to the test server." |
+| **Target Group** | A named list of servers. The listener sends traffic *to a target group*, and the target group picks a server from its list. **This is the thing you swap to switch versions.** |
+| **Health check** | The load balancer poking a server every 30 seconds asking "you alive?" If the server doesn't answer correctly, the load balancer stops sending it traffic. |
+| **Stickiness** | A rule that says "once a user lands on server A, keep them on server A." NiFi needs this or the web UI breaks. |
+
+### NiFi pieces
+
+| Thing | What it really is |
+|---|---|
+| **flow.xml.gz** | The file that stores your entire dataflow — every processor, every connection. This is your crown jewel. In NiFi 1.16+ there's also `flow.json.gz`. |
+| **content_repository** | Where NiFi stores the actual data bytes currently moving through the flow. |
+| **flowfile_repository** | Where NiFi tracks *which* pieces of data are sitting in which queue right now. |
+| **provenance_repository** | The history book. Records what happened to every piece of data. |
+| **nifi.properties** | The main settings file. Hostname, ports, security, ZooKeeper — all here. |
+| **ZooKeeper** | A shared notepad that NiFi cluster nodes use to agree on who's in charge and to save processor state (like "I already read file X"). |
+| **Site-to-Site (S2S)** | NiFi's built-in way to send data from one NiFi to another NiFi. We'll use it to secretly copy real traffic to the test server. |
+| **Sensitive props key** | The password NiFi uses to scramble other passwords inside `flow.xml.gz`. If the copy has a different key, none of your saved passwords will decrypt. |
+
+### The one thing that makes this scary
+
+A clone of a NiFi server is **not a harmless copy**. It has the same flow, the same passwords, and the same network access. The moment it starts, it will try to do its job — reading the same Kafka topics, the same SFTP folders, the same database tables, and writing to the same destinations as production.
+
+Two servers doing the same job at the same time = duplicate data, corrupted state, angry phone calls.
+
+**So the number one rule: the clone must boot with every processor STOPPED.** We'll cover exactly how.
+
+---
+
+## Part 3 — Prep Work (Do This Before Touching Anything)
+
+This section is short but it is the difference between a clean rollback and a bad night.
+
+### 3.1 Write down everything about the current setup
+
+You cannot undo what you didn't record. Save the current state to files on your laptop.
+
+```bash
+# Make a folder to hold your "before" pictures
+mkdir -p ~/nifi-migration-backup && cd ~/nifi-migration-backup
+
+# What does the production instance look like?
+aws ec2 describe-instances \
+  --instance-ids i-0PROD1234567890 \
+  --output json > before-instance.json
+
+# What does the load balancer look like?
+aws elbv2 describe-load-balancers \
+  --names my-nifi-alb \
+  --output json > before-loadbalancer.json
+
+# What are the listeners doing right now? THIS IS THE MOST IMPORTANT ONE.
+aws elbv2 describe-listeners \
+  --load-balancer-arn arn:aws:elasticloadbalancing:...:loadbalancer/app/my-nifi-alb/abc123 \
+  --output json > before-listeners.json
+
+# What rules exist on the HTTPS listener?
+aws elbv2 describe-rules \
+  --listener-arn arn:aws:elasticloadbalancing:...:listener/app/my-nifi-alb/abc123/def456 \
+  --output json > before-rules.json
+
+# What target groups exist and what settings do they have?
+aws elbv2 describe-target-groups \
+  --load-balancer-arn arn:aws:elasticloadbalancing:...:loadbalancer/app/my-nifi-alb/abc123 \
+  --output json > before-targetgroups.json
+
+# What's in the security group?
+aws ec2 describe-security-groups \
+  --group-ids sg-0PRODSG12345 \
+  --output json > before-securitygroup.json
+```
+
+**Why this matters:** `before-listeners.json` contains the exact JSON of your current default action. When you roll back, you paste that exact block back in. No guessing.
+
+### 3.2 Back up the NiFi files themselves
+
+Log into the production server and copy the important files somewhere safe (S3 is ideal).
+
+```bash
+# On the production NiFi server
+sudo tar -czf /tmp/nifi-conf-backup-$(date +%F).tar.gz \
+  /opt/nifi/conf/ \
+  /opt/nifi/lib/*custom*.nar 2>/dev/null
+
+# Push it to S3 so it survives even if the instance dies
+aws s3 cp /tmp/nifi-conf-backup-*.tar.gz s3://my-backup-bucket/nifi/
+```
+
+The `conf/` folder contains `flow.xml.gz`, `nifi.properties`, `authorizers.xml`, `state-management.xml`, `bootstrap.conf`, `users.xml`, `authorizations.xml`, and your keystore/truststore. That is everything you need to rebuild by hand if all else fails.
+
+**Keep one pristine, read-only copy of the 1.3 `flow.xml.gz` forever.** Once NiFi 1.28 or 2.x opens that file, it rewrites it in a newer format and 1.3 can never read it again. This is a one-way door.
+
+### 3.3 Set your variables
+
+Every command below uses these. Fill them in once, paste into your terminal, and the rest of the guide copy-pastes cleanly.
+
+```bash
+export REGION=us-east-1
+export PROD_INSTANCE=i-0PROD1234567890
+export VPC_ID=vpc-0abc123
+export SUBNET_ID=subnet-0abc123          # same subnet as prod
+export PROD_SG=sg-0PRODSG12345           # the SG prod uses
+export ALB_SG=sg-0ALBSG12345             # the SG the load balancer uses
+export KEY_NAME=my-ec2-keypair
+export INSTANCE_TYPE=m5.2xlarge          # match prod
+export IAM_PROFILE=NiFiInstanceProfile   # match prod
+export NIFI_PORT=8443                    # 8080 if not secured
+
+export ALB_ARN=arn:aws:elasticloadbalancing:us-east-1:111122223333:loadbalancer/app/my-nifi-alb/abc123
+export LISTENER_ARN=arn:aws:elasticloadbalancing:us-east-1:111122223333:listener/app/my-nifi-alb/abc123/def456
+export OLD_TG_ARN=arn:aws:elasticloadbalancing:us-east-1:111122223333:targetgroup/nifi-prod-tg/aaa111
+```
+
+Find these ARNs with:
+
+```bash
+aws elbv2 describe-load-balancers --names my-nifi-alb \
+  --query 'LoadBalancers[0].LoadBalancerArn' --output text
+
+aws elbv2 describe-listeners --load-balancer-arn $ALB_ARN \
+  --query 'Listeners[?Port==`443`].ListenerArn' --output text
+
+aws elbv2 describe-target-groups --load-balancer-arn $ALB_ARN \
+  --query 'TargetGroups[].[TargetGroupName,TargetGroupArn]' --output table
+```
+
+### 3.4 Pre-flight checklist
+
+Tick every box before Step 1.
+
+- [ ] I have `before-*.json` files saved locally **and** in S3.
+- [ ] I have a `.tar.gz` of `/opt/nifi/conf/` in S3.
+- [ ] I know the value of `nifi.sensitive.props.key` from the prod `nifi.properties`.
+- [ ] I know a maintenance window when stopping NiFi for 10 minutes is acceptable.
+- [ ] I know which processors are the **data sources** (the ones that pull data in). I will need to keep these stopped on the clone.
+- [ ] I know whether NiFi uses **client certificates** for login. (If yes, read Gotcha #7 before continuing — an ALB will break your login.)
+- [ ] I have a way to reach the clone directly, not just through the load balancer (bastion host, SSM Session Manager, or VPN).
+- [ ] Somebody else knows I'm doing this and knows how to roll back.
+
+---
+
+## Part 4 — The Walkthrough (One Complete Example, Start to Finish)
+
+Follow these in order. Every step has: **what we're doing**, **the command**, **the undo command**, and **how to check it worked**.
+
+---
+
+### Step 1 — Give the load balancer more patience
+
+**What:** NiFi's web UI sometimes takes a long time to answer (big provenance searches, loading a huge flow). The load balancer's default patience is 60 seconds. That's too short. We raise it to 300.
+
+**Do it:**
+
+```bash
+aws elbv2 modify-load-balancer-attributes \
+  --load-balancer-arn $ALB_ARN \
+  --attributes Key=idle_timeout.timeout_seconds,Value=300
+```
+
+**Undo:**
+
+```bash
+aws elbv2 modify-load-balancer-attributes \
+  --load-balancer-arn $ALB_ARN \
+  --attributes Key=idle_timeout.timeout_seconds,Value=60
+```
+
+**Check it worked:**
+
+```bash
+aws elbv2 describe-load-balancer-attributes --load-balancer-arn $ALB_ARN \
+  --query "Attributes[?Key=='idle_timeout.timeout_seconds']"
+```
+
+**Gotcha:** This affects production too, right now. Raising it is safe — it only means the load balancer waits longer before hanging up on a slow request. Lowering it later could cut off long requests, so leave it at 300 permanently if NiFi is the only app on this ALB.
+
+---
+
+### Step 2 — Stop NiFi cleanly before taking the photo
+
+**What:** If you photograph the hard drive while NiFi is writing to it, the photo can be half-written and useless — like photographing someone mid-blink. So we stop NiFi first.
+
+**Do it (on the production server, via SSH or SSM):**
+
+```bash
+# Connect without needing SSH keys or open ports
+aws ssm start-session --target $PROD_INSTANCE --region $REGION
+
+# Then, on the server:
+sudo /opt/nifi/bin/nifi.sh stop
+
+# Wait and confirm it's really down
+sudo /opt/nifi/bin/nifi.sh status
+ps -ef | grep -i nifi | grep -v grep     # should return nothing
+```
+
+**Undo:**
+
+```bash
+sudo /opt/nifi/bin/nifi.sh start
+tail -f /opt/nifi/logs/nifi-app.log       # watch until you see "NiFi has started"
+```
+
+**Gotcha:** NiFi can take 1–5 minutes to shut down if it's mid-flight on large files. Do not `kill -9`. That is exactly how the flowfile repository gets corrupted. Wait it out.
+
+**Less-downtime alternative:** If you cannot stop production at all, take the snapshot with NiFi running and accept that the clone's repositories may be inconsistent — then **delete the clone's repositories entirely** before starting it (Step 7.4 covers this). Since we want the clone to start empty anyway, this is actually fine for our purpose. Stopping is still cleaner, but it's not mandatory if you plan to wipe the repos.
+
+---
+
+### Step 3 — Take the photo (create the AMI)
+
+**What:** Make a clone template of the whole production server.
+
+**Do it:**
+
+```bash
+export AMI_NAME="nifi-prod-clone-$(date +%Y%m%d-%H%M)"
+
+export NEW_AMI=$(aws ec2 create-image \
+  --instance-id $PROD_INSTANCE \
+  --name "$AMI_NAME" \
+  --description "Clone of production NiFi 1.3 for upgrade testing" \
+  --tag-specifications "ResourceType=image,Tags=[{Key=Name,Value=$AMI_NAME},{Key=Purpose,Value=nifi-upgrade}]" \
+  --query 'ImageId' --output text)
+
+echo "New AMI: $NEW_AMI"
+```
+
+Notice we did **not** use `--no-reboot`. By default AWS reboots the instance to guarantee a clean image. Since we already stopped NiFi in Step 2, the reboot is harmless and gives us a trustworthy image.
+
+If you cannot allow a reboot, add `--no-reboot` — but then you **must** wipe the clone's repositories later.
+
+**Wait for it to finish (takes 5–20 minutes):**
+
+```bash
+aws ec2 wait image-available --image-ids $NEW_AMI
+echo "AMI is ready"
+```
+
+**Undo (delete the AMI and its snapshots):**
+
+```bash
+# Find the snapshots the AMI created BEFORE deregistering it
+SNAPS=$(aws ec2 describe-images --image-ids $NEW_AMI \
+  --query 'Images[0].BlockDeviceMappings[].Ebs.SnapshotId' --output text)
+echo "Snapshots to remove: $SNAPS"
+
+# Remove the AMI
+aws ec2 deregister-image --image-id $NEW_AMI
+
+# Then remove each snapshot
+for s in $SNAPS; do aws ec2 delete-snapshot --snapshot-id $s; done
+```
+
+**Gotcha:** Order matters. Deregister the AMI first, *then* delete snapshots — but capture the snapshot IDs *before* deregistering, because after deregistration you can no longer look them up from the AMI. Many people delete the AMI and then leave orphaned snapshots costing money forever.
+
+---
+
+### Step 4 — Start production NiFi again
+
+**What:** Production has been down since Step 2. Bring it back before you do anything else.
+
+**Do it:**
+
+```bash
+aws ssm start-session --target $PROD_INSTANCE --region $REGION
+sudo /opt/nifi/bin/nifi.sh start
+tail -f /opt/nifi/logs/nifi-app.log
+```
+
+**Check it worked:**
+
+```bash
+# Load balancer should show the prod instance healthy again
+aws elbv2 describe-target-health --target-group-arn $OLD_TG_ARN \
+  --query 'TargetHealthDescriptions[].[Target.Id,TargetHealth.State]' --output table
+```
+
+Wait until it says `healthy`. Do not proceed until production is confirmed healthy and users can log in.
+
+---
+
+### Step 5 — Make a separate security group for the clone
+
+**What:** The doorman list. You said you want to use the same security groups — but here's the problem.
+
+Most NiFi security groups contain a rule that says "anything else in this same security group can talk to me on any port." That rule exists so cluster nodes can find each other. If the clone joins that same group, **the clone can talk to production on the cluster ports, and it will try to join the production cluster.** That's a very bad day.
+
+So: copy the rules, but leave out the self-reference.
+
+**Do it:**
+
+```bash
+# 1. Look at what prod's SG allows, so you can mirror it
+aws ec2 describe-security-groups --group-ids $PROD_SG \
+  --query 'SecurityGroups[0].IpPermissions' --output json
+
+# 2. Create the new group
+export TEST_SG=$(aws ec2 create-security-group \
+  --group-name nifi-upgrade-test-sg \
+  --description "Isolated SG for parallel NiFi upgrade test" \
+  --vpc-id $VPC_ID \
+  --query 'GroupId' --output text)
+
+echo "Test SG: $TEST_SG"
+
+# 3. Let the load balancer reach the clone's web port
+aws ec2 authorize-security-group-ingress \
+  --group-id $TEST_SG \
+  --protocol tcp --port $NIFI_PORT \
+  --source-group $ALB_SG
+
+# 4. Let your bastion/admin subnet SSH in (adjust to your setup)
+aws ec2 authorize-security-group-ingress \
+  --group-id $TEST_SG \
+  --protocol tcp --port 22 \
+  --source-group sg-0BASTION12345
+
+# 5. ONLY IF you plan to shadow-test with Site-to-Site:
+#    allow production to push data INTO the clone. One direction only.
+aws ec2 authorize-security-group-ingress \
+  --group-id $TEST_SG \
+  --protocol tcp --port $NIFI_PORT \
+  --source-group $PROD_SG
+```
+
+**Undo:**
+
+```bash
+# Remove rules first (only needed if the group is attached somewhere)
+aws ec2 revoke-security-group-ingress \
+  --group-id $TEST_SG --protocol tcp --port $NIFI_PORT --source-group $ALB_SG
+
+# Then delete the group (fails if any instance still uses it — terminate the clone first)
+aws ec2 delete-security-group --group-id $TEST_SG
+```
+
+**What you must NOT open, and why:**
+
+| Port | Default | Why to leave it closed between prod and clone |
+|---|---|---|
+| `nifi.cluster.node.protocol.port` | 11443 | This is how nodes join a cluster. Open it and your clone becomes a production cluster node. |
+| `nifi.cluster.node.load.balance.port` | 6342 | Lets nodes push FlowFiles to each other. Open it and prod will hand real data to the clone. |
+| ZooKeeper 2181 / 2888 / 3888 | — | Shared coordination and shared processor state. This is how "I already read file X" markers get overwritten. |
+
+---
+
+### Step 6 — Launch the clone
+
+**What:** Start a new EC2 from the photo, in the same subnet, with the isolated security group.
+
+**Do it:**
+
+```bash
+export CLONE_INSTANCE=$(aws ec2 run-instances \
+  --image-id $NEW_AMI \
+  --instance-type $INSTANCE_TYPE \
+  --subnet-id $SUBNET_ID \
+  --security-group-ids $TEST_SG \
+  --iam-instance-profile Name=$IAM_PROFILE \
+  --key-name $KEY_NAME \
+  --count 1 \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=nifi-upgrade-test},{Key=Environment,Value=green},{Key=Temporary,Value=true}]' \
+  --query 'Instances[0].InstanceId' --output text)
+
+echo "Clone instance: $CLONE_INSTANCE"
+
+aws ec2 wait instance-running --instance-ids $CLONE_INSTANCE
+
+# Get its private IP — you'll need this a lot
+export CLONE_IP=$(aws ec2 describe-instances --instance-ids $CLONE_INSTANCE \
+  --query 'Reservations[0].Instances[0].PrivateIpAddress' --output text)
+echo "Clone IP: $CLONE_IP"
+```
+
+**Undo:**
+
+```bash
+aws ec2 terminate-instances --instance-ids $CLONE_INSTANCE
+aws ec2 wait instance-terminated --instance-ids $CLONE_INSTANCE
+```
+
+**Critical gotcha — NiFi may already be running.** If NiFi is set to auto-start on boot (a systemd service or an init script), the clone just started NiFi with the production flow, and it is *already* pulling from production data sources. Get on that box immediately:
+
+```bash
+aws ssm start-session --target $CLONE_INSTANCE --region $REGION
+
+# STOP IT NOW
+sudo systemctl stop nifi 2>/dev/null || sudo /opt/nifi/bin/nifi.sh stop
+sudo systemctl disable nifi 2>/dev/null
+
+# Confirm nothing is running
+ps -ef | grep -i nifi | grep -v grep
+```
+
+**Prevention (better):** launch with user-data that disables NiFi before it can start. Add this to the `run-instances` command:
+
+```bash
+cat > /tmp/userdata.sh <<'EOF'
+#!/bin/bash
+systemctl stop nifi 2>/dev/null
+systemctl disable nifi 2>/dev/null
+touch /opt/nifi/DO_NOT_START_UNTIL_RECONFIGURED
+EOF
+
+# add to run-instances:  --user-data file:///tmp/userdata.sh
+```
+
+---
+
+### Step 7 — Reconfigure the clone so it can never hurt production
+
+This is the most important step in the whole guide. Do all of it before starting NiFi on the clone.
+
+#### 7.1 Make every processor start in the STOPPED state
+
+```bash
+# On the clone
+sudo cp /opt/nifi/conf/nifi.properties /opt/nifi/conf/nifi.properties.orig
+
+sudo sed -i 's/^nifi.flowcontroller.autoResumeState=.*/nifi.flowcontroller.autoResumeState=false/' \
+  /opt/nifi/conf/nifi.properties
+
+grep autoResumeState /opt/nifi/conf/nifi.properties
+```
+
+**What this does:** NiFi normally remembers which processors were running and starts them again automatically. This setting says "start everything stopped, wait for a human." It is your seatbelt.
+
+**Undo:** `sudo cp /opt/nifi/conf/nifi.properties.orig /opt/nifi/conf/nifi.properties`
+
+#### 7.2 Fix every place the old hostname or IP appears
+
+```bash
+# See what needs changing
+grep -nE "^nifi\.(web\.(https?\.host|proxy\.host)|cluster\.node\.address|remote\.input\.host|zookeeper\.connect\.string)" \
+  /opt/nifi/conf/nifi.properties
+```
+
+Edit `nifi.properties` and set:
+
+| Property | Set it to |
+|---|---|
+| `nifi.web.https.host` (or `.http.host`) | The clone's own private DNS name, or blank/`0.0.0.0` to listen on all interfaces |
+| `nifi.cluster.node.address` | The clone's own private DNS name |
+| `nifi.remote.input.host` | The clone's own private DNS name |
+| `nifi.web.proxy.host` | Comma list: the ALB DNS name, your test hostname (`nifi-test.company.com`), and the clone's own host:port |
+| `nifi.zookeeper.connect.string` | Point at a **different** ZooKeeper, or leave blank if standalone |
+| `nifi.zookeeper.root.node` | Change to something unique like `/nifi-upgrade-test` |
+| `nifi.sensitive.props.key` | **Must stay identical to production**, or saved passwords won't decrypt |
+
+**The `nifi.web.proxy.host` one catches almost everyone.** If it doesn't list the hostname the browser used, NiFi replies with `System Error: The request contained an invalid host header` and a blank page. Example value:
+
+```
+nifi.web.proxy.host=my-nifi-alb-123456.us-east-1.elb.amazonaws.com,nifi-test.company.com,nifi.company.com,localhost:8443
+```
+
+#### 7.3 Change the ZooKeeper state path
+
+```bash
+sudo cp /opt/nifi/conf/state-management.xml /opt/nifi/conf/state-management.xml.orig
+grep -A5 'zk-provider' /opt/nifi/conf/state-management.xml
+```
+
+Find the `Root Node` property in the ZooKeeper state provider and change it, for example from `/nifi` to `/nifi-upgrade-test`.
+
+**Why this matters so much:** processors like `ListFile`, `ListSFTP`, `ListS3`, and database CDC processors save a bookmark saying "I've already handled everything up to here." That bookmark lives in ZooKeeper. If the clone and production share the same bookmark, the clone will move production's bookmark forward, and **production will skip files it never actually processed.** That data loss is silent and permanent. This one line prevents it.
+
+#### 7.4 Empty the repositories
+
+```bash
+sudo systemctl stop nifi 2>/dev/null; sudo /opt/nifi/bin/nifi.sh stop
+
+# Find where the repos actually are
+grep -E "^nifi\.(flowfile|content|provenance)\.repository\.director" /opt/nifi/conf/nifi.properties
+
+# Move them aside rather than deleting — safer, and you can restore
+sudo mv /opt/nifi/flowfile_repository /opt/nifi/flowfile_repository.bak
+sudo mv /opt/nifi/content_repository  /opt/nifi/content_repository.bak
+sudo mv /opt/nifi/provenance_repository /opt/nifi/provenance_repository.bak
+
+sudo mkdir -p /opt/nifi/flowfile_repository /opt/nifi/content_repository /opt/nifi/provenance_repository
+sudo chown -R nifi:nifi /opt/nifi/flowfile_repository /opt/nifi/content_repository /opt/nifi/provenance_repository
+```
+
+**Undo:** move the `.bak` folders back into place.
+
+**Why:** the copied repositories contain data that production is *also* still processing. If the clone starts with them, that data gets processed twice and delivered twice.
+
+#### 7.5 Fix the certificates (only if NiFi is secured)
+
+The keystore from production has the old server's name inside it. Browsers and NiFi itself check that name.
+
+Options, easiest first:
+
+1. **Wildcard cert** (`*.company.com`) — works for both servers with zero changes. Best option if you have one.
+2. **Regenerate with the NiFi Toolkit** — generate a new keystore whose SAN list includes the clone's hostname.
+3. **Add the clone's name as a SAN** to a reissued cert from your internal CA.
+
+If NiFi is secured, you must also add the clone's node identity to `authorizers.xml` / `users.xml` so it can authenticate.
+
+**Quick check that the cert matches the hostname:**
+
+```bash
+keytool -list -v -keystore /opt/nifi/conf/keystore.jks -storepass CHANGEME | grep -A3 "SubjectAlternativeName"
+```
+
+#### 7.6 Start NiFi on the clone and verify it's inert
+
+```bash
+sudo -u nifi /opt/nifi/bin/nifi.sh start
+tail -f /opt/nifi/logs/nifi-app.log
+```
+
+Then, from the clone itself:
+
+```bash
+curl -k https://localhost:8443/nifi-api/access/config
+```
+
+**Verify before going further:**
+
+- [ ] NiFi UI loads (reach it directly first, via SSH tunnel or bastion — not through the ALB yet).
+- [ ] Every processor shows a red stop square. Nothing is green.
+- [ ] All queues are empty.
+- [ ] `nifi-app.log` has no `ERROR` lines about clustering or ZooKeeper.
+- [ ] Production is still healthy and unaffected. Go look.
+
+**SSH tunnel to view the clone's UI from your laptop:**
+
+```bash
+ssh -i ~/.ssh/$KEY_NAME.pem -L 9443:$CLONE_IP:8443 ec2-user@BASTION_IP
+# then browse to https://localhost:9443/nifi
+```
+
+---
+
+### Step 8 — Create the new target group
+
+**What:** A new list that currently contains only the clone.
+
+**Do it:**
+
+```bash
+export NEW_TG_ARN=$(aws elbv2 create-target-group \
+  --name nifi-green-tg \
+  --protocol HTTPS \
+  --port $NIFI_PORT \
+  --vpc-id $VPC_ID \
+  --target-type instance \
+  --health-check-protocol HTTPS \
+  --health-check-path /nifi-api/access/config \
+  --health-check-interval-seconds 30 \
+  --health-check-timeout-seconds 10 \
+  --healthy-threshold-count 2 \
+  --unhealthy-threshold-count 3 \
+  --matcher HttpCode=200-499 \
+  --query 'TargetGroups[0].TargetGroupArn' --output text)
+
+echo "New target group: $NEW_TG_ARN"
+```
+
+**Now the settings that make NiFi actually work behind a load balancer:**
+
+```bash
+aws elbv2 modify-target-group-attributes \
+  --target-group-arn $NEW_TG_ARN \
+  --attributes \
+    Key=stickiness.enabled,Value=true \
+    Key=stickiness.type,Value=lb_cookie \
+    Key=stickiness.lb_cookie.duration_seconds,Value=86400 \
+    Key=deregistration_delay.timeout_seconds,Value=30
+```
+
+**Do the same to the OLD target group** so rollback is equally fast:
+
+```bash
+aws elbv2 modify-target-group-attributes \
+  --target-group-arn $OLD_TG_ARN \
+  --attributes \
+    Key=stickiness.enabled,Value=true \
+    Key=stickiness.type,Value=lb_cookie \
+    Key=stickiness.lb_cookie.duration_seconds,Value=86400 \
+    Key=deregistration_delay.timeout_seconds,Value=30
+```
+
+**Undo:**
+
+```bash
+aws elbv2 delete-target-group --target-group-arn $NEW_TG_ARN
+# (Fails if a listener or rule still points at it — delete those first.)
+```
+
+**Explaining the odd bits:**
+
+- **`--health-check-path /nifi-api/access/config`** — this endpoint answers without needing a login. `/nifi-api/system-diagnostics` requires authentication, so the load balancer would get a 401 and mark your healthy server as dead.
+- **`--matcher HttpCode=200-499`** — belt and braces. Even if NiFi answers 401 or 403, we count it as "the server is alive and answering," which is what a health check is really asking.
+- **`stickiness`** — NiFi's UI uses a session. Without stickiness, request 1 goes to server A, request 2 goes to server B, and the UI logs you out or throws errors constantly. **This is non-optional for NiFi.**
+- **`deregistration_delay 30`** — how long the load balancer waits for in-flight requests to finish before fully removing a server. Default is 300 seconds, which makes rollback feel slow. 30 is a good balance.
+- The load balancer does **not** verify the backend's TLS certificate, so a self-signed NiFi cert is fine on the health check.
+
+---
+
+### Step 9 — Register the clone in the new target group
+
+```bash
+aws elbv2 register-targets \
+  --target-group-arn $NEW_TG_ARN \
+  --targets Id=$CLONE_INSTANCE,Port=$NIFI_PORT
+```
+
+**Undo:**
+
+```bash
+aws elbv2 deregister-targets \
+  --target-group-arn $NEW_TG_ARN \
+  --targets Id=$CLONE_INSTANCE,Port=$NIFI_PORT
+```
+
+**Watch it turn healthy (takes 1–2 minutes):**
+
+```bash
+watch -n 10 "aws elbv2 describe-target-health --target-group-arn $NEW_TG_ARN \
+  --query 'TargetHealthDescriptions[].[Target.Id,TargetHealth.State,TargetHealth.Reason,TargetHealth.Description]' \
+  --output table"
+```
+
+Do not continue until it says `healthy`. If it says `unhealthy`, go to Troubleshooting T1.
+
+---
+
+### Step 10 — Add a test-only door to the load balancer
+
+**What:** Right now the clone is registered but nothing sends traffic to it. We add a rule: "if someone types `nifi-test.company.com`, send them to the clone." Production traffic is completely untouched.
+
+**Do it:**
+
+```bash
+aws elbv2 create-rule \
+  --listener-arn $LISTENER_ARN \
+  --priority 10 \
+  --conditions '[{"Field":"host-header","HostHeaderConfig":{"Values":["nifi-test.company.com"]}}]' \
+  --actions '[{"Type":"forward","TargetGroupArn":"'$NEW_TG_ARN'"}]' \
+  --query 'Rules[0].RuleArn' --output text
+```
+
+Save the returned ARN:
+
+```bash
+export TEST_RULE_ARN=arn:aws:elasticloadbalancing:...:listener-rule/app/.../ghi789
+```
+
+You also need a DNS record pointing `nifi-test.company.com` at the ALB:
+
+```bash
+cat > /tmp/dns-add.json <<EOF
+{
+  "Changes": [{
+    "Action": "UPSERT",
+    "ResourceRecordSet": {
+      "Name": "nifi-test.company.com",
+      "Type": "CNAME",
+      "TTL": 60,
+      "ResourceRecords": [{"Value": "my-nifi-alb-123456.us-east-1.elb.amazonaws.com"}]
+    }
+  }]
+}
+EOF
+
+aws route53 change-resource-record-sets \
+  --hosted-zone-id Z1234567890ABC \
+  --change-batch file:///tmp/dns-add.json
+```
+
+**Undo:**
+
+```bash
+# Remove the rule
+aws elbv2 delete-rule --rule-arn $TEST_RULE_ARN
+
+# Remove the DNS record (same JSON, Action changed to DELETE)
+sed 's/"UPSERT"/"DELETE"/' /tmp/dns-add.json > /tmp/dns-del.json
+aws route53 change-resource-record-sets \
+  --hosted-zone-id Z1234567890ABC --change-batch file:///tmp/dns-del.json
+```
+
+**Gotcha:** the ALB's TLS certificate must cover `nifi-test.company.com`, or browsers will scream. If your cert is a wildcard, you're fine. If not, add a certificate to the listener:
+
+```bash
+aws elbv2 add-listener-certificates \
+  --listener-arn $LISTENER_ARN \
+  --certificates CertificateArn=arn:aws:acm:us-east-1:111122223333:certificate/xyz
+
+# Undo:
+aws elbv2 remove-listener-certificates \
+  --listener-arn $LISTENER_ARN \
+  --certificates CertificateArn=arn:aws:acm:us-east-1:111122223333:certificate/xyz
+```
+
+**Also:** whatever hostname you use here must be in the clone's `nifi.web.proxy.host` (Step 7.2), or you get the invalid-host-header error.
+
+---
+
+### Step 11 — Practice the rollback BEFORE you need it
+
+**What:** This is the step everybody skips and everybody regrets skipping. Rehearse the switch and switch-back **now**, while the clone is still running the old, unchanged 1.3 flow. If the mechanism is broken, you find out during a rehearsal instead of during an outage.
+
+Because both servers are still identical 1.3, switching traffic between them is harmless.
+
+**Switch to green (rehearsal):**
+
+```bash
+aws elbv2 modify-listener \
+  --listener-arn $LISTENER_ARN \
+  --default-actions '[{
+    "Type":"forward",
+    "ForwardConfig":{
+      "TargetGroups":[
+        {"TargetGroupArn":"'$OLD_TG_ARN'","Weight":0},
+        {"TargetGroupArn":"'$NEW_TG_ARN'","Weight":100}
+      ],
+      "TargetGroupStickinessConfig":{"Enabled":true,"DurationSeconds":3600}
+    }
+  }]'
+```
+
+**Switch back to blue (the rollback you're rehearsing):**
+
+```bash
+aws elbv2 modify-listener \
+  --listener-arn $LISTENER_ARN \
+  --default-actions '[{
+    "Type":"forward",
+    "ForwardConfig":{
+      "TargetGroups":[
+        {"TargetGroupArn":"'$OLD_TG_ARN'","Weight":100},
+        {"TargetGroupArn":"'$NEW_TG_ARN'","Weight":0}
+      ],
+      "TargetGroupStickinessConfig":{"Enabled":true,"DurationSeconds":3600}
+    }
+  }]'
+```
+
+**Time yourself.** From typing the rollback command to users being back on the old server should be under 60 seconds.
+
+**Save both commands as shell scripts right now:**
+
+```bash
+cat > ~/nifi-migration-backup/go-green.sh <<EOF
+#!/bin/bash
+aws elbv2 modify-listener --listener-arn $LISTENER_ARN \
+  --default-actions '[{"Type":"forward","ForwardConfig":{"TargetGroups":[{"TargetGroupArn":"$OLD_TG_ARN","Weight":0},{"TargetGroupArn":"$NEW_TG_ARN","Weight":100}],"TargetGroupStickinessConfig":{"Enabled":true,"DurationSeconds":3600}}}]'
+echo "Traffic now on GREEN (new)"
+EOF
+
+cat > ~/nifi-migration-backup/rollback-blue.sh <<EOF
+#!/bin/bash
+aws elbv2 modify-listener --listener-arn $LISTENER_ARN \
+  --default-actions '[{"Type":"forward","ForwardConfig":{"TargetGroups":[{"TargetGroupArn":"$OLD_TG_ARN","Weight":100},{"TargetGroupArn":"$NEW_TG_ARN","Weight":0}],"TargetGroupStickinessConfig":{"Enabled":true,"DurationSeconds":3600}}}]'
+echo "ROLLED BACK to BLUE (original)"
+EOF
+
+chmod +x ~/nifi-migration-backup/*.sh
+```
+
+Now rollback is one command: `./rollback-blue.sh`. Print it out. Put it in the runbook. Tell your teammates.
+
+**Why weights instead of just swapping the target group ARN?** With weights, the listener already knows about both target groups. Rolling back is a number change, and the structure never changes — so there's nothing to typo at 2 a.m. It also lets you do a gradual cutover (90/10, then 50/50) if you want. Downside: NiFi's session stickiness works best with an all-or-nothing switch, so for NiFi specifically, use 100/0 and 0/100 only.
+
+---
+
+### Step 12 — Now do the actual upgrade, one hop at a time
+
+Snapshot the clone before **every** hop. Each snapshot is a "restart from here" point.
+
+#### 12.1 Snapshot the clone
+
+```bash
+export CLONE_VOL=$(aws ec2 describe-instances --instance-ids $CLONE_INSTANCE \
+  --query 'Reservations[0].Instances[0].BlockDeviceMappings[0].Ebs.VolumeId' --output text)
+
+export SNAP_BEFORE_128=$(aws ec2 create-snapshot \
+  --volume-id $CLONE_VOL \
+  --description "NiFi clone before 1.28.1 upgrade" \
+  --tag-specifications 'ResourceType=snapshot,Tags=[{Key=Name,Value=nifi-before-128}]' \
+  --query 'SnapshotId' --output text)
+
+aws ec2 wait snapshot-completed --snapshot-ids $SNAP_BEFORE_128
+echo "Snapshot: $SNAP_BEFORE_128"
+```
+
+**Restoring from a snapshot** (the practical way — build an AMI from it and relaunch):
+
+```bash
+# Easier alternative: just make an AMI of the whole clone instead of a raw snapshot
+aws ec2 create-image --instance-id $CLONE_INSTANCE \
+  --name "nifi-clone-checkpoint-$(date +%Y%m%d-%H%M)" \
+  --description "Restore point"
+# then run-instances from that AMI exactly like Step 6
+```
+
+**Undo (delete the snapshot):**
+
+```bash
+aws ec2 delete-snapshot --snapshot-id $SNAP_BEFORE_128
+```
+
+#### 12.2 Understand the version path
+
+You are on **1.3.0**. You cannot jump straight to 2.x.
+
+```
+1.3.0  →  1.28.1  →  2.x
+  ↑         ↑          ↑
+ today   the bridge   the goal
+```
+
+Apache's own guidance requires stopping at a late 1.x release before 2.0.0, and 1.28.1 is the recommended bridge no matter which 1.x you start from. 1.28.1 is also the final 1.x release; the 1.x line went end-of-support in December 2024.
+
+Java versions differ at each hop:
+
+| NiFi version | Java needed |
+|---|---|
+| 1.3.0 | Java 8 |
+| 1.28.1 | Java 11 or 17 |
+| 2.x | Java 21 |
+
+Install them side by side, and point NiFi at the right one in `conf/bootstrap.conf`:
+
+```bash
+sudo yum install -y java-17-amazon-corretto java-21-amazon-corretto
+
+# In /opt/nifi/conf/bootstrap.conf:
+java=/usr/lib/jvm/java-17-amazon-corretto/bin/java
+```
+
+#### 12.3 The upgrade method: new folder, never overwrite
+
+```bash
+cd /opt
+sudo wget https://archive.apache.org/dist/nifi/1.28.1/nifi-1.28.1-bin.zip
+sudo unzip nifi-1.28.1-bin.zip
+sudo chown -R nifi:nifi nifi-1.28.1
+
+# Copy the flow — NOT the whole conf folder
+sudo cp /opt/nifi/conf/flow.xml.gz          /opt/nifi-1.28.1/conf/
+sudo cp /opt/nifi/conf/authorizers.xml      /opt/nifi-1.28.1/conf/
+sudo cp /opt/nifi/conf/users.xml            /opt/nifi-1.28.1/conf/
+sudo cp /opt/nifi/conf/authorizations.xml   /opt/nifi-1.28.1/conf/
+sudo cp /opt/nifi/conf/*.jks                /opt/nifi-1.28.1/conf/
+sudo cp -r /opt/nifi/lib/custom_lib          /opt/nifi-1.28.1/lib/ 2>/dev/null
+```
+
+**Do NOT copy `nifi.properties` wholesale.** A 1.3-era `nifi.properties` is missing dozens of settings that 1.28 needs. Instead, open the *new* `nifi.properties` and hand-copy your values into it, one at a time. It's tedious. Do it anyway.
+
+**Values that must carry across:**
+- `nifi.sensitive.props.key` — **must be identical** or your saved passwords are lost
+- All hostnames and ports from Step 7.2
+- Repository directory paths
+- Security/keystore settings
+- `nifi.flowcontroller.autoResumeState=false` — set this again in the new file
+
+**Start it:**
+
+```bash
+sudo -u nifi /opt/nifi-1.28.1/bin/nifi.sh start
+tail -f /opt/nifi-1.28.1/logs/nifi-app.log
+```
+
+**Undo:** stop the new version, start the old one. Both folders exist side by side, so this is instant:
+
+```bash
+sudo /opt/nifi-1.28.1/bin/nifi.sh stop
+sudo -u nifi /opt/nifi/bin/nifi.sh start
+```
+
+But note — **only if you kept a copy of the original `flow.xml.gz`.** 1.28 rewrites the flow file. That's why we copied it rather than pointing the new NiFi at the old folder.
+
+#### 12.4 What breaks going 1.3 → 1.28.1
+
+1.3.0 is from 2017. That's a very long gap. Expect:
+
+- **Processors that no longer exist** — they show as "ghost processors" with a question-mark icon. You must replace them by hand.
+- **The authorizer format changed** in 1.4. Your 1.3 `authorized-users.xml` needs converting to the `file-user-group-provider` model.
+- **`encrypt-config` tooling changed.** If `nifi.sensitive.props.key` was blank in 1.3 (the default), NiFi 1.28 will refuse to start without one. You'll need to set one and re-enter every password in the flow.
+- **Custom NARs must be recompiled** against the new NiFi API version.
+- **Variables → Parameter Contexts.** Do this conversion *while on 1.28.1*, because 2.x removed the Variable Registry entirely and 1.28 still has the migration tooling.
+
+#### 12.5 Then 1.28.1 → 2.x
+
+Take another snapshot first. Then repeat the same "new folder" method.
+
+Expect a bigger jump this time. NiFi 2.0 requires Java 21 and modernizes the whole stack — Spring 6, Jetty 12, Angular. It also removes a long list of things:
+
+- **Templates are gone** — export anything you need as a flow definition first
+- **Variable Registry is gone** — must already be Parameter Contexts
+- **Many processors removed** — check the Deprecated Components list
+- The flow file format is now `flow.json.gz`
+
+Budget real engineering time here. A 1.3 flow will not load cleanly into 2.x without hands-on editing.
+
+---
+
+### Step 13 — Shadow-test with real data (optional but strongly recommended)
+
+**What:** Send a *copy* of real production traffic to the upgraded clone, without the clone touching any real destination. This proves the upgrade works with real-world data shapes before you trust it.
+
+**How:**
+
+1. On the **clone**, change every output processor to point at a test destination — a scratch S3 bucket, a `LogAttribute` processor, or a `PutFile` into `/tmp`. Nothing that writes to a real system.
+2. On **production**, add a Remote Process Group (RPG) pointing at the clone's URL. Fork a copy of the flow into it.
+3. Open only the Site-to-Site port from prod to clone (already done in Step 5).
+4. Let it run for a full business cycle — including your busiest hour and any nightly batch.
+5. Compare: FlowFiles in, FlowFiles out, error counts, bulletin board messages, CPU and heap.
+
+**Undo:** delete the RPG on production and remove the SG rule.
+
+**Safer alternative if forking real data makes you nervous:** don't connect them at all. Instead, use provenance replay on production to export a sample of real FlowFiles, then feed that sample into the clone by hand with `GetFile`. Slower, but zero risk of the two systems interacting.
+
+---
+
+### Step 14 — The real cutover
+
+**Go/no-go checklist. Every box must be ticked.**
+
+- [ ] Clone shows `healthy` in `describe-target-health`.
+- [ ] Rollback rehearsal (Step 11) completed and timed.
+- [ ] `rollback-blue.sh` is saved, tested, and known to the on-call person.
+- [ ] Shadow test ran for a full cycle with no errors.
+- [ ] All processors on the clone are repointed at **real** destinations now, not test ones.
+- [ ] Production queues have been drained as far as practical.
+- [ ] You are inside an agreed maintenance window.
+- [ ] You have a named "call it" person who decides go/no-go on rollback.
+
+**The cutover:**
+
+```bash
+# 1. Stop production from ingesting new data (stop source processors in the prod UI).
+#    Let existing queues drain. Watch the UI until queues are empty.
+
+# 2. Start the clone's processors (in the clone UI).
+
+# 3. Flip the traffic
+~/nifi-migration-backup/go-green.sh
+
+# 4. Watch health
+watch -n 5 "aws elbv2 describe-target-health --target-group-arn $NEW_TG_ARN \
+  --query 'TargetHealthDescriptions[].[Target.Id,TargetHealth.State]' --output table"
+```
+
+**The rollback:**
+
+```bash
+# 1. Stop the clone's source processors
+# 2. Flip traffic back
+~/nifi-migration-backup/rollback-blue.sh
+# 3. Start production's source processors again
+```
+
+**Do not terminate the old instance.** Leave it stopped-but-intact for at least two weeks — ideally a full month-end cycle, because monthly batch jobs are where surprises hide.
+
+---
+
+### Step 15 — Cleanup (only after weeks of success)
+
+```bash
+# Remove the test rule and DNS
+aws elbv2 delete-rule --rule-arn $TEST_RULE_ARN
+
+# Deregister prod from the old target group
+aws elbv2 deregister-targets --target-group-arn $OLD_TG_ARN \
+  --targets Id=$PROD_INSTANCE,Port=$NIFI_PORT
+
+# Simplify the listener back to a single target group
+aws elbv2 modify-listener --listener-arn $LISTENER_ARN \
+  --default-actions Type=forward,TargetGroupArn=$NEW_TG_ARN
+
+# Stop (don't terminate) the old instance — cheap insurance
+aws ec2 stop-instances --instance-ids $PROD_INSTANCE
+
+# Much later, when you're certain:
+aws ec2 terminate-instances --instance-ids $PROD_INSTANCE
+aws elbv2 delete-target-group --target-group-arn $OLD_TG_ARN
+aws ec2 delete-snapshot --snapshot-id $SNAP_BEFORE_128
+```
+
+---
+
+## Part 5 — Gotchas That Actually Bite
+
+### G1. The clone silently joins the production cluster
+**Symptom:** Production suddenly shows two nodes. Or the flow on production changes by itself.
+**Cause:** Same security group with a self-reference rule, plus the same ZooKeeper connect string and root node.
+**Fix:** Separate SG (Step 5) + different `nifi.zookeeper.root.node` (Step 7.3). Never open ports 11443 or 6342 between them.
+
+### G2. Both servers process the same data
+**Symptom:** Duplicate records downstream. Files disappearing before production sees them.
+**Cause:** The clone booted with processors running.
+**Fix:** `nifi.flowcontroller.autoResumeState=false` before first boot, plus user-data that disables the NiFi service.
+
+### G3. Shared ZooKeeper state causes silent data loss
+**Symptom:** Production skips files it never processed. Nobody notices for days.
+**Cause:** Both NiFis share the same ZooKeeper root node, so `ListFile`/`ListSFTP`/CDC bookmarks get overwritten by whichever ran last.
+**Fix:** Different `Root Node` in `state-management.xml`. This is the single most dangerous gotcha in the list because it fails quietly.
+
+### G4. flow.xml.gz is a one-way door
+**Symptom:** You upgrade, decide to roll back, and NiFi 1.3 won't start — it can't read the flow file.
+**Cause:** Newer NiFi rewrites the flow file in a newer format on first load.
+**Fix:** Keep a pristine, read-only copy of the 1.3 `flow.xml.gz` in S3 forever. Never point old and new NiFi at the same conf directory.
+
+### G5. "System Error: invalid host header"
+**Symptom:** Blank page or error text when hitting NiFi through the load balancer, but it works fine when you hit the server directly.
+**Cause:** `nifi.web.proxy.host` doesn't list the hostname the browser used.
+**Fix:** Add every hostname — ALB DNS name, test hostname, production hostname — comma-separated.
+
+### G6. The UI logs you out constantly
+**Symptom:** Clicking around NiFi randomly throws errors or bounces you to login.
+**Cause:** Stickiness is off, so consecutive requests hit different servers.
+**Fix:** `stickiness.enabled=true` on **both** target groups.
+
+### G7. Client-certificate login stops working behind the ALB
+**Symptom:** Nobody can log in through the load balancer, even though the server is healthy.
+**Cause:** An **ALB terminates TLS**. The client certificate never reaches NiFi, so NiFi sees an anonymous request. If cert auth is your only login method, that's a hard wall.
+**Fix — pick one:**
+- Use a **Network Load Balancer** with TCP passthrough instead, so the cert reaches NiFi intact.
+- Switch NiFi to a login method that survives a proxy: LDAP, or OIDC/SAML with your identity provider.
+- Use ALB **mutual TLS (mTLS)** mode and pass the cert through in `X-Amzn-Mtls-Clientcert`, then configure NiFi to trust that header.
+
+Decide this before you build anything, not after.
+
+### G8. Rollback doesn't undo what the new server already did
+**Symptom:** You roll back cleanly, but duplicate rows are in the database.
+**Cause:** The load balancer switch is instant; writes to S3, databases, and Kafka are permanent.
+**Fix:** This is why Step 13 says point the clone at test destinations until the very last moment. Also know your downstream systems' idempotency — can you safely replay?
+
+### G9. In-flight data is stranded on the old server
+**Symptom:** After cutover, some records never arrive.
+**Cause:** FlowFiles sitting in the old server's queues don't move to the new one.
+**Fix:** Stop production's source processors and let queues drain to zero **before** flipping traffic. Confirm visually in the prod UI.
+
+### G10. Orphaned snapshots costing money
+**Symptom:** Surprise on the AWS bill months later.
+**Cause:** AMI deregistered but its snapshots left behind.
+**Fix:** Always capture snapshot IDs before deregistering (Step 3 undo block).
+
+### G11. The health check fails because it needs a login
+**Symptom:** Target group stuck at `unhealthy`, reason `Health checks failed with these codes: [401]`.
+**Cause:** Health check path requires authentication.
+**Fix:** Use `/nifi-api/access/config` and matcher `200-499`.
+
+### G12. Sensitive props key mismatch
+**Symptom:** NiFi starts but every processor with a password shows invalid, and the log says it can't decrypt.
+**Cause:** `nifi.sensitive.props.key` differs between old and new.
+**Fix:** Copy the exact value. If 1.3 had it blank, you'll need to set one and re-enter passwords manually — plan for that as a task, not a surprise.
+
+---
+
+## Part 6 — Troubleshooting Guide
+
+### T1. Target shows `unhealthy`
+
+Work through this in order:
+
+```bash
+# What exactly is the reason?
+aws elbv2 describe-target-health --target-group-arn $NEW_TG_ARN \
+  --query 'TargetHealthDescriptions[].[Target.Id,TargetHealth.State,TargetHealth.Reason,TargetHealth.Description]' \
+  --output table
+```
+
+| Reason | Meaning | Fix |
+|---|---|---|
+| `Target.Timeout` | The load balancer couldn't reach the server at all | Security group is blocking it. Check the clone's SG allows the ALB's SG on the NiFi port. |
+| `Target.FailedHealthChecks` with code 401/403 | Server is alive, health check needs auth | Change path to `/nifi-api/access/config`, matcher to `200-499` |
+| `Target.FailedHealthChecks` with code 404 | Wrong path | Check the path exists: `curl -k https://localhost:8443/nifi-api/access/config` on the server |
+| `Target.NotInUse` | Target group isn't attached to any listener | Expected before Step 10/11 — not a problem |
+| `Target.ResponseCodeMismatch` | Server answered, code not in matcher | Widen the matcher |
+
+Also verify from the server itself:
+
+```bash
+curl -kv https://localhost:8443/nifi-api/access/config
+sudo ss -tlnp | grep 8443       # is NiFi actually listening?
+```
+
+### T2. NiFi won't start on the clone
+
+```bash
+tail -200 /opt/nifi/logs/nifi-app.log
+tail -100 /opt/nifi/logs/nifi-bootstrap.log
+```
+
+| Log message contains | Likely cause | Fix |
+|---|---|---|
+| `Unable to load flow` / `FlowSynchronizationException` | Flow file incompatible with this NiFi version | You skipped a version hop. Go through 1.28.1. |
+| `Cannot decrypt` / `sensitive properties` | Wrong `nifi.sensitive.props.key` | Copy the exact value from production |
+| `Address already in use` | Something else on that port, or NiFi is already running | `sudo ss -tlnp \| grep 8443` |
+| `UnsupportedClassVersionError` | Wrong Java version | Fix `java=` in `bootstrap.conf` |
+| `Unable to connect to ZooKeeper` | Bad connect string, or you correctly blocked it | If standalone, clear the ZK settings entirely |
+| `KeyStoreException` / `password was incorrect` | Keystore password wrong or file corrupted in copy | Re-copy the `.jks` files, verify with `keytool -list` |
+| `No applicable policies could be found` | Authorizer config doesn't know the new node identity | Update `authorizers.xml` and `users.xml` with the new DN |
+
+### T3. UI loads but is broken/blank through the load balancer
+
+```bash
+# Test bypassing the load balancer entirely
+curl -k https://$CLONE_IP:8443/nifi/ -I
+```
+
+If direct works and through-the-LB doesn't:
+
+1. Check `nifi.web.proxy.host` includes the hostname you used (G5).
+2. Check stickiness is enabled (G6).
+3. Check the ALB idle timeout is 300 (Step 1).
+4. If NiFi sits under a path prefix, check `nifi.web.proxy.context.path`.
+
+### T4. Rollback didn't seem to work
+
+```bash
+# What is the listener ACTUALLY pointing at right now?
+aws elbv2 describe-listeners --listener-arn $LISTENER_ARN \
+  --query 'Listeners[0].DefaultActions' --output json
+```
+
+Common causes:
+- **Stickiness cookies.** Existing users are still pinned to the new server. Their sessions will move on cookie expiry, or they can clear cookies / use a private window.
+- **A rule is overriding the default action.** Rules are evaluated by priority *before* the default action. Check: `aws elbv2 describe-rules --listener-arn $LISTENER_ARN`.
+- **DNS caching** if you rolled back via DNS instead of target groups. This is exactly why target-group swapping is better.
+- **Deregistration delay** still draining. Wait up to the configured seconds.
+
+### T5. Production behaved oddly after starting the clone
+
+Stop the clone immediately, then check:
+
+```bash
+# On production — did a second node appear?
+curl -k https://localhost:8443/nifi-api/controller/cluster | python3 -m json.tool
+```
+
+Then check whether ZooKeeper state was shared, and whether source processors on production have skipped ahead. This is G1 and G3. You may need to reset processor state on production.
+
+---
+
+## Part 7 — Your Options, With Honest Pros and Cons
+
+### How to switch traffic
+
+| Option | Pros | Cons | Verdict |
+|---|---|---|---|
+| **Weighted target groups** (`modify-listener` with weights) | Instant. Rollback is a number change. Structure never changes, so no typos. Supports gradual shifts. | Slightly wordier JSON. | **Best for NiFi.** Use 100/0 and 0/100 only, because sessions don't like being split. |
+| **Swap the target group ARN** (`modify-listener` simple forward) | Simplest command to read. | You must retype the old ARN correctly under pressure. | Fine, but save the exact rollback command in a script first. |
+| **Change the DNS record** | Works even across different load balancers or regions. | DNS caching means rollback is *not* fast. Clients and OSes cache aggressively. | Avoid for rollback. Fine for a planned, unhurried migration. |
+| **Host-header rule for testing** | Zero risk to production. Test whenever you like. | Needs an extra DNS name and possibly an extra certificate. | **Always do this** during the test phase. |
+
+### How to build the clone
+
+| Option | Pros | Cons |
+|---|---|---|
+| **AMI from production** (this guide) | Guaranteed identical — same OS patches, same tuning, same everything. Fast. | Copies the bad along with the good. Requires the careful de-fanging in Step 7. |
+| **Fresh install + copy the flow** | Clean slate. No inherited cruft. Forces you to document the config. | Slow. Easy to miss an OS tuning setting (file descriptors, kernel params) and get different performance. |
+| **Infrastructure-as-code** (Terraform/CloudFormation) | Repeatable forever. Best long-term answer. | Big upfront effort. Not the right choice for a one-off upgrade under time pressure. |
+
+### How to test with real data
+
+| Option | Pros | Cons |
+|---|---|---|
+| **Site-to-Site shadow fork** | Real data, real shapes, real volumes. Highest confidence. | Requires opening a port between prod and clone. Adds a little load to production. |
+| **Provenance replay of a sample** | Zero connection between the systems. Very safe. | Manual. Small sample may miss the weird edge cases. |
+| **Synthetic data (GenerateFlowFile)** | Totally isolated, fully repeatable. | Won't catch real-world data quirks — which is usually what breaks. |
+
+### Same security group or a new one
+
+| Option | Pros | Cons |
+|---|---|---|
+| **Same SG** (as originally planned) | Zero setup. Guaranteed same network behavior. | **Self-reference rules let the clone join the production cluster and share state.** This is the highest-risk shortcut in the whole plan. |
+| **Cloned SG minus self-reference** (recommended) | Same access to external systems, but the two NiFis cannot reach each other's cluster ports. | Ten minutes of setup. |
+
+---
+
+## Part 8 — Quick Reference Card
+
+Print this.
+
+```bash
+# ---------- CHECK STATE ----------
+aws elbv2 describe-listeners --listener-arn $LISTENER_ARN --query 'Listeners[0].DefaultActions'
+aws elbv2 describe-target-health --target-group-arn $NEW_TG_ARN --output table
+aws elbv2 describe-target-health --target-group-arn $OLD_TG_ARN --output table
+
+# ---------- GO GREEN (new version) ----------
+~/nifi-migration-backup/go-green.sh
+
+# ---------- ROLLBACK TO BLUE (original) ----------
+~/nifi-migration-backup/rollback-blue.sh
+
+# ---------- EMERGENCY: stop the clone entirely ----------
+aws elbv2 deregister-targets --target-group-arn $NEW_TG_ARN --targets Id=$CLONE_INSTANCE
+aws ec2 stop-instances --instance-ids $CLONE_INSTANCE
+
+# ---------- NiFi on a server ----------
+sudo /opt/nifi/bin/nifi.sh start | stop | status
+tail -f /opt/nifi/logs/nifi-app.log
+curl -k https://localhost:8443/nifi-api/access/config
+```
+
+### The five rules to remember
+
+1. **The clone starts with everything stopped.** `nifi.flowcontroller.autoResumeState=false`.
+2. **Different ZooKeeper root node.** Shared state causes silent data loss.
+3. **Separate security group.** No self-reference, no cluster ports between them.
+4. **Keep one pristine copy of the 1.3 flow.xml.gz forever.** The upgrade is a one-way door.
+5. **Rehearse the rollback before you need it**, and save it as a one-line script.
