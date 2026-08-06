@@ -1,4 +1,8 @@
-In the 
+In 
+
+sudo hostnamectl set-hostname web01.example.internal
+echo "preserve_hostname: true" | sudo tee /etc/cloud/cloud.cfg.d/99-hostname.cfg
+ 
 
 sudo hostnamectl set-hostname web01.example.internal
 echo "preserve_hostname: true" | sudo tee /etc/cloud/cloud.cfg.d/99-hostname.cfg
