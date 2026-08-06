@@ -1,4 +1,10 @@
-In the EC2 console, Launch instance page:
+In the 
+
+sudo hostnamectl set-hostname web01.example.internal
+echo "preserve_hostname: true" | sudo tee /etc/cloud/cloud.cfg.d/99-hostname.cfg
+
+
+EC2 console, Launch instance page:
 
 1. Fill in Name, AMI, instance type, key pair, network settings as usual.
 2. Scroll to the bottom, expand **Advanced details**.
