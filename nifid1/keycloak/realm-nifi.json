@@ -1,0 +1,64 @@
+{
+  "realm": "nifi",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "accessTokenLifespan": 900,
+  "clients": [
+    {
+      "clientId": "nifi",
+      "name": "Apache NiFi",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "secret": "nifi-client-secret-change-me",
+      "redirectUris": [
+        "https://localhost:8443/*",
+        "https://127.0.0.1:8443/*"
+      ],
+      "webOrigins": [
+        "https://localhost:8443"
+      ],
+      "attributes": {
+        "post.logout.redirect.uris": "https://localhost:8443/*"
+      }
+    }
+  ],
+  "users": [
+    {
+      "username": "nifi-admin",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "admin@nifi.local",
+      "firstName": "NiFi",
+      "lastName": "Admin",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "nifi-admin-password",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "nifi-user",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "user@nifi.local",
+      "firstName": "NiFi",
+      "lastName": "User",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "nifi-user-password",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}
