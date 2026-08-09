@@ -245,7 +245,10 @@ for _ in $(seq 1 80); do
 done
 
 save_state OIDC_APPLIED "true"
-save_state OIDC_APPLIED_AT "$(date -Is)"
+# Not `date -Is`: that is GNU-only and fails on macOS. This format works
+# on both. (The scripts that RUN ON THE INSTANCES may use -Is freely -
+# Amazon Linux has GNU coreutils.)
+save_state OIDC_APPLIED_AT "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 cat <<EOF
 

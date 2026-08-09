@@ -345,6 +345,7 @@ sudo /opt/nifi/current/bin/../../..//usr/bin/keytool -list \
 
 | What you see | Why | Fix |
 | --- | --- | --- |
+| `sed: -e: No such file or directory` while rendering user-data | An old copy of `01-kc-launch.sh` using GNU-only `sed -i`. macOS needs a backup-suffix argument after `-i`, so it ate the first `-e` | Use the current script — the render is done in Python now |
 | `Invalid parameter: redirect_uri` on the Keycloak page | NiFi's public IP changed, so it no longer matches the client's allowed list | `./06-kc-sync-urls.sh` |
 | Login works, then NiFi says "Unable to view the user interface" | Authentication succeeded, authorisation did not | Add the identity under **Users**, grant *view the user interface* |
 | `PKIX path building failed` in `nifi-app.log` | NiFi does not trust Keycloak's certificate | Re-run `./03-nifi-oidc.sh`; check the truststore has the `keycloak-nifi` alias |

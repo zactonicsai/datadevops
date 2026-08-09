@@ -9,15 +9,15 @@ exec > >(tee -a /var/log/keycloak-bootstrap.log) 2>&1
 
 # These are inserted already shell-quoted by 01-kc-launch.sh, so passwords
 # containing quotes, backslashes, $ or backticks cannot break the script.
-KC_VERSION=__KC_VERSION__
-KC_IMAGE=__KC_IMAGE__
-KC_PORT=__KC_PORT__
-KC_ADMIN_USER=__KC_ADMIN_USER__
-KC_ADMIN_PASSWORD=__KC_ADMIN_PASSWORD__
-KC_REALM=__KC_REALM__
-KC_CLIENT_ID=__KC_CLIENT_ID__
-NIFI_HOST=__NIFI_HOST__
-NIFI_PORT=__NIFI_PORT__
+KC_VERSION=26.7.0
+KC_IMAGE=quay.io/keycloak/keycloak
+KC_PORT=8443
+KC_ADMIN_USER=kcadmin
+KC_ADMIN_PASSWORD='ChangeMe-KcAdmin-2026!'
+KC_REALM=nifi
+KC_CLIENT_ID=nifi
+NIFI_HOST=98.92.97.11
+NIFI_PORT=8443
 
 echo "=== [1/6] Packages: docker + openssl ==="
 dnf -y update --security || true
@@ -61,7 +61,85 @@ echo "=== [4/6] Realm import file ==="
 # handing it to Keycloak, because a malformed file makes Keycloak exit with
 # a stack trace that is far harder to read.
 cat > /opt/keycloak/data/import/realm-nifi.json <<'REALM_JSON'
-__REALM_JSON__
+{
+  "realm": "nifi",
+  "enabled": true,
+  "displayName": "NiFi Single Sign-On",
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "clients": [
+    {
+      "clientId": "nifi",
+      "name": "Apache NiFi",
+      "description": "Apache NiFi dataflow UI",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "55e92df856c4ee54c8a89f4d97f27254e8e80f17ad149d1c",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": true,
+      "redirectUris": [
+        "https://98.92.97.11:8443/nifi-api/access/oidc/callback",
+        "https://98.92.97.11:8443/nifi/*"
+      ],
+      "webOrigins": [
+        "https://98.92.97.11:8443"
+      ],
+      "attributes": {
+        "post.logout.redirect.uris": "https://98.92.97.11:8443/nifi/*"
+      }
+    }
+  ],
+  "roles": {
+    "realm": [
+      {
+        "name": "nifi-admin",
+        "description": "Full control of the NiFi flow"
+      },
+      {
+        "name": "nifi-user",
+        "description": "Read and operate the NiFi flow"
+      }
+    ]
+  },
+  "groups": [
+    {
+      "name": "nifi-admins"
+    },
+    {
+      "name": "nifi-users"
+    }
+  ],
+  "users": [
+    {
+      "username": "nifiadmin",
+      "email": "nifi.admin@example.com",
+      "emailVerified": true,
+      "firstName": "NiFi",
+      "lastName": "Admin",
+      "enabled": true,
+      "groups": [
+        "/nifi-admins"
+      ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "ChangeMe-NiFiAdmin-2026!",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}
 REALM_JSON
 python3 -c "import json,sys; d=json.load(open('/opt/keycloak/data/import/realm-nifi.json')); \
 print('realm file is valid JSON: realm=%s, clients=%d, users=%d' % (d['realm'], len(d.get('clients',[])), len(d.get('users',[]))))"

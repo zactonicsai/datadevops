@@ -90,41 +90,68 @@ mkdir -p "$BUILD_DIR"
 UD="${BUILD_DIR}/kc-user-data.sh"
 log "Rendering user-data..."
 
-python3 - "$KC_DIR" "$UD" <<'PY'
-import sys, pathlib
-kc_dir, out = sys.argv[1], sys.argv[2]
-tmpl  = pathlib.Path(kc_dir, "kc-user-data.sh.tmpl").read_text()
-realm = pathlib.Path(kc_dir, "templates", "realm-nifi.json.tmpl").read_text()
-# The realm JSON is pasted into the script inside a quoted heredoc, so the
-# shell leaves its $ and backticks completely alone.
-pathlib.Path(out).write_text(tmpl.replace("__REALM_JSON__", realm.rstrip()))
-PY
+# Everything is substituted in one Python pass. This used to be `sed -i`,
+# which is NOT portable: on macOS/BSD `-i` demands a backup-suffix argument,
+# so `sed -i -e ...` swallows the first -e and then treats the rest as
+# filenames ("sed: -e: No such file or directory"). Python behaves the same
+# on every platform, and it does not care about /, |, & or \ inside the
+# passwords and secrets we are inserting.
+python3 - "$KC_DIR" "$UD" \
+  "$KC_VERSION" "$KC_IMAGE" "$KC_PORT" "$KC_ADMIN_USER" "$KC_ADMIN_PASSWORD" \
+  "$NIFI_PUBLIC_IP" "$NIFI_HTTPS_PORT" "$KC_REALM" "$KC_CLIENT_ID" "$KC_CLIENT_SECRET" \
+  "$NIFI_ADMIN_USERNAME" "$NIFI_ADMIN_EMAIL" "$NIFI_ADMIN_PASSWORD" <<'PY'
+import json, pathlib, shlex, sys
 
-sed -i \
-  -e "s|__KC_VERSION__|${KC_VERSION}|g" \
-  -e "s|__KC_IMAGE__|${KC_IMAGE}|g" \
-  -e "s|__KC_PORT__|${KC_PORT}|g" \
-  -e "s|__KC_ADMIN_USER__|${KC_ADMIN_USER}|g" \
-  -e "s|__KC_ADMIN_PASSWORD__|${KC_ADMIN_PASSWORD}|g" \
-  -e "s|__NIFI_HOST__|${NIFI_PUBLIC_IP}|g" \
-  -e "s|__NIFI_PORT__|${NIFI_HTTPS_PORT}|g" \
-  "$UD"
-# These may contain characters sed would treat specially, so use a delimiter
-# that cannot appear in them.
-python3 - "$UD" "$KC_REALM" "$KC_CLIENT_ID" "$KC_CLIENT_SECRET" \
-         "$NIFI_ADMIN_USERNAME" "$NIFI_ADMIN_EMAIL" "$NIFI_ADMIN_PASSWORD" <<'PY'
-import sys, pathlib
-p = pathlib.Path(sys.argv[1]); s = p.read_text()
-for k, v in zip(["__KC_REALM__","__KC_CLIENT_ID__","__KC_CLIENT_SECRET__",
-                 "__NIFI_ADMIN_USERNAME__","__NIFI_ADMIN_EMAIL__","__NIFI_ADMIN_PASSWORD__"],
-                sys.argv[2:]):
-    s = s.replace(k, v)
-p.write_text(s)
+kc_dir, out = sys.argv[1], sys.argv[2]
+names = ["KC_VERSION", "KC_IMAGE", "KC_PORT", "KC_ADMIN_USER", "KC_ADMIN_PASSWORD",
+         "NIFI_HOST", "NIFI_PORT", "KC_REALM", "KC_CLIENT_ID", "KC_CLIENT_SECRET",
+         "NIFI_ADMIN_USERNAME", "NIFI_ADMIN_EMAIL", "NIFI_ADMIN_PASSWORD"]
+values = sys.argv[3:]
+if len(values) != len(names):
+    sys.exit(f"expected {len(names)} values, got {len(values)}")
+val = dict(zip(names, values))
+
+# ---- 1. The realm file -------------------------------------------------
+# Parse the template as JSON, substitute inside the parsed structure, then
+# re-encode. json.dumps does the escaping, so a password containing a quote
+# or a backslash produces valid JSON instead of a file Keycloak rejects.
+realm_tmpl = json.loads(pathlib.Path(kc_dir, "templates", "realm-nifi.json.tmpl").read_text())
+
+def substitute(node):
+    if isinstance(node, str):
+        for name, value in val.items():
+            node = node.replace(f"__{name}__", value)
+        return node
+    if isinstance(node, list):
+        return [substitute(item) for item in node]
+    if isinstance(node, dict):
+        return {key: substitute(item) for key, item in node.items()}
+    return node
+
+realm_json = json.dumps(substitute(realm_tmpl), indent=2)
+
+# ---- 2. The bootstrap script -------------------------------------------
+# Shell values are inserted with shlex.quote, so quotes, backslashes, $ and
+# backticks in a password cannot break (or be executed by) the script.
+text = pathlib.Path(kc_dir, "kc-user-data.sh.tmpl").read_text()
+text = text.replace("__REALM_JSON__", realm_json)
+for name, value in val.items():
+    text = text.replace(f"__{name}__", shlex.quote(value))
+
+pathlib.Path(out).write_text(text)
+
+# ---- 3. Prove nothing was missed ---------------------------------------
+leftover = sorted({word.strip('",') for word in text.split()
+                   if word.strip('",').startswith("__")
+                   and word.strip('",').endswith("__")} - {"__LIKE_THIS__"})
+if leftover:
+    sys.exit("placeholders left unreplaced: " + ", ".join(leftover))
+json.loads(realm_json)   # belt and braces
+print(f"rendered {len(text)} bytes, realm file {len(realm_json)} bytes")
 PY
 
 chmod 600 "$UD"           # it contains two passwords and the client secret
 bash -n "$UD" || die "Rendered user-data has a syntax error."
-grep -q '__' "$UD" && warn "Some placeholders were not replaced - check $UD"
 ok "Wrote $UD ($(wc -c < "$UD") bytes; EC2 limit is 16384)"
 
 # --------------------------------------------------------------------------

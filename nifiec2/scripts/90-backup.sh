@@ -43,7 +43,18 @@ done
 aws ssm get-command-invocation --region "$AWS_REGION" \
   --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
   --query StandardOutputContent --output text \
-  | tr -d '\n' | base64 -d > "${DEST}/nifi-conf-backup.tgz"
+  | tr -d '\n' > "${DEST}/backup.b64"
+
+# GNU base64 decodes with -d, BSD/macOS with -D. Try both, then fall back to
+# openssl, which is present everywhere.
+decode() {
+  base64 -d  < "${DEST}/backup.b64" > "$1" 2>/dev/null && return 0
+  base64 -D  < "${DEST}/backup.b64" > "$1" 2>/dev/null && return 0
+  openssl base64 -d -A < "${DEST}/backup.b64" > "$1" 2>/dev/null && return 0
+  return 1
+}
+decode "${DEST}/nifi-conf-backup.tgz" || die "Could not decode the backup payload."
+rm -f "${DEST}/backup.b64"
 
 [ -s "${DEST}/nifi-conf-backup.tgz" ] || die "Backup came back empty."
 tar tzf "${DEST}/nifi-conf-backup.tgz" | sed 's/^/    /'
