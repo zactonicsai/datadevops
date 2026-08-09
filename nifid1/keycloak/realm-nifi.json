@@ -43,6 +43,11 @@
           "value": "nifi-admin-password",
           "temporary": false
         }
+      ],
+      "realmRoles": [
+        "default-roles-nifi",
+        "offline_access",
+        "uma_authorization"
       ]
     },
     {
@@ -58,6 +63,11 @@
           "value": "nifi-user-password",
           "temporary": false
         }
+      ],
+      "realmRoles": [
+        "default-roles-nifi",
+        "offline_access",
+        "uma_authorization"
       ]
     }
   ]

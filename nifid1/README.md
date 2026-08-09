@@ -45,6 +45,7 @@ docker-compose.yml           two services, keycloak + nifi
 keycloak/realm-nifi.json     realm "nifi", client "nifi", two users
 nifi/oidc-entrypoint.sh      certs + nifi.properties + authorizers.xml, then starts NiFi
 verify.sh                    end-to-end test
+fix-keycloak.sh              repairs roles/scopes on a running Keycloak
 ```
 
 ## How it works
@@ -57,6 +58,10 @@ verify.sh                    end-to-end test
   same string is the `Initial Admin Identity` in `authorizers.xml`.
 - **One auth mechanism only.** NiFi 1.x fails to start if OIDC and a login
   identity provider are both configured, so `single-user-provider` is cleared.
+- **NiFi asks for every scope.** Since 1.21, NiFi reads `scopes_supported` from
+  the discovery document and requests all of them, including `offline_access`.
+  So each realm user needs the `offline_access` role, and the client needs every
+  realm scope assigned. `fix-keycloak.sh` handles both.
 - **Startup order.** NiFi reads the discovery document at boot, so it waits on a
   Keycloak healthcheck.
 
@@ -69,6 +74,10 @@ User with their email → then Policies. Or add their email as
 **Change a password/secret:** edit `.env` *and* `keycloak/realm-nifi.json` (the
 client secret and user passwords live in both). `verify.sh` step 2 catches drift.
 
+**Re-import the realm after editing `realm-nifi.json`:** the import only runs on an
+empty Keycloak database, so recreate the container:
+`docker compose rm -sf keycloak && docker compose up -d keycloak`
+
 **Reset everything:** `docker compose down -v && docker compose up -d`
 
 ## Troubleshooting
@@ -80,6 +89,8 @@ client secret and user passwords live in both). `verify.sh` step 2 catches drift
 | `Invalid parameter: redirect_uri` on the Keycloak page | you're using a URL other than `https://localhost:8443` |
 | Logged in but "Untrusted proxy" / no permissions | identity ≠ Initial Admin Identity; check `docker compose exec nifi cat conf/users.xml` |
 | NiFi exits at boot | check `docker compose logs nifi` for the property it rejected |
+| Keycloak: `Offline tokens not allowed for the user or client` | user lacks the `offline_access` role — run `./fix-keycloak.sh` |
+| Keycloak: `Invalid scopes: ... offline_access` | client is missing scopes NiFi requests — run `./fix-keycloak.sh --scopes` |
 | Keycloak: `bootstrap-admin-username available only when bootstrap admin password is set` | `.env` not found by Compose — run `docker compose config \| grep BOOTSTRAP` and check `ls -la` shows `.env` next to `docker-compose.yml` |
 
 Logs: `docker compose exec nifi tail -f logs/nifi-app.log`

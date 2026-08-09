@@ -5,7 +5,7 @@ services:
     command: ["start-dev", "--import-realm"]
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
-      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
       # Issuer must be identical for the browser AND for NiFi, or token
       # validation fails. Both reach Keycloak as "keycloak:8080".
       KC_HOSTNAME: http://keycloak:8080
