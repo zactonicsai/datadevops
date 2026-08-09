@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# ==========================================================================
+# user-data.sh -- runs ONCE, as root, the first time the EC2 instance boots.
+# Placeholders (__LIKE_THIS__) are filled in by 03-launch.sh before upload.
+# Everything it prints lands in /var/log/nifi-bootstrap.log on the server.
+# ==========================================================================
+set -euxo pipefail
+exec > >(tee -a /var/log/nifi-bootstrap.log) 2>&1
+
+NIFI_VERSION="__NIFI_VERSION__"
+NIFI_MIRROR="__NIFI_MIRROR__"
+JAVA_PKG="__JAVA_PKG__"
+NIFI_HEAP="__NIFI_HEAP__"
+HTTPS_PORT="__NIFI_HTTPS_PORT__"
+NIFI_USERNAME="__NIFI_USERNAME__"
+NIFI_PASSWORD="__NIFI_PASSWORD__"
+
+NIFI_HOME="/opt/nifi/nifi-${NIFI_VERSION}"
+NIFI_LINK="/opt/nifi/current"
+
+echo "=== [1/9] OS packages ==="
+dnf -y update --security || true
+dnf -y install unzip tar procps-ng which
+
+echo "=== [2/9] Java (NiFi 1.x supports Java 8 and 11 only) ==="
+dnf -y install "$JAVA_PKG" || dnf -y install java-11-amazon-corretto
+JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")"
+echo "JAVA_HOME=$JAVA_HOME"
+java -version
+
+echo "=== [3/9] Service account ==="
+id nifi >/dev/null 2>&1 || useradd --system --create-home --home-dir /home/nifi --shell /sbin/nologin nifi
+
+echo "=== [4/9] Download NiFi ${NIFI_VERSION} (~1.2 GB, be patient) ==="
+mkdir -p /opt/nifi /tmp/nifi-dl && cd /tmp/nifi-dl
+ZIP="nifi-${NIFI_VERSION}-bin.zip"
+curl -fL --retry 5 --retry-delay 10 -o "$ZIP"       "${NIFI_MIRROR}/${NIFI_VERSION}/${ZIP}"
+curl -fL --retry 5 --retry-delay 10 -o "${ZIP}.sha512" "${NIFI_MIRROR}/${NIFI_VERSION}/${ZIP}.sha512"
+
+echo "=== [5/9] Verify checksum (never skip this) ==="
+EXPECTED="$(tr -d '[:space:]' < "${ZIP}.sha512" | tr '[:upper:]' '[:lower:]' | sed 's/.*=//')"
+ACTUAL="$(sha512sum "$ZIP" | awk '{print $1}')"
+[ "$EXPECTED" = "$ACTUAL" ] || { echo "CHECKSUM MISMATCH - aborting"; exit 1; }
+echo "checksum ok"
+
+echo "=== [6/9] Install ==="
+unzip -q "$ZIP" -d /opt/nifi
+ln -sfn "$NIFI_HOME" "$NIFI_LINK"
+chown -R nifi:nifi /opt/nifi "$NIFI_HOME"
+rm -rf /tmp/nifi-dl
+
+echo "=== [7/9] Configure ==="
+PROPS="${NIFI_HOME}/conf/nifi.properties"
+BOOT="${NIFI_HOME}/conf/bootstrap.conf"
+cp "$PROPS" "${PROPS}.orig"
+
+# Ask the instance metadata service (IMDSv2) who we are on the public internet.
+TOKEN="$(curl -s -X PUT http://169.254.169.254/latest/api/token \
+         -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')"
+meta() { curl -s -H "X-aws-ec2-metadata-token: $TOKEN" "http://169.254.169.254/latest/meta-data/$1"; }
+PUBLIC_IP="$(meta public-ipv4 || true)"
+PUBLIC_DNS="$(meta public-hostname || true)"
+PRIVATE_IP="$(meta local-ipv4)"
+
+set_prop() {  # set_prop <key> <value>
+  if grep -q "^${1}=" "$PROPS"; then
+    sed -i "s|^${1}=.*|${1}=${2}|" "$PROPS"
+  else
+    echo "${1}=${2}" >> "$PROPS"
+  fi
+}
+
+# By default NiFi 1.x listens on 127.0.0.1 only. 0.0.0.0 lets the security
+# group (not NiFi) decide who may connect.
+set_prop "nifi.web.https.host" "0.0.0.0"
+set_prop "nifi.web.https.port" "${HTTPS_PORT}"
+set_prop "nifi.web.http.host"  ""
+set_prop "nifi.web.http.port"  ""
+# NiFi rejects requests whose Host header it does not recognise. List every
+# name/IP you might type in the browser, WITH the port.
+PROXY_HOSTS="localhost:${HTTPS_PORT},${PRIVATE_IP}:${HTTPS_PORT}"
+[ -n "$PUBLIC_IP" ]  && PROXY_HOSTS="${PROXY_HOSTS},${PUBLIC_IP}:${HTTPS_PORT}"
+[ -n "$PUBLIC_DNS" ] && PROXY_HOSTS="${PROXY_HOSTS},${PUBLIC_DNS}:${HTTPS_PORT}"
+set_prop "nifi.web.proxy.host" "$PROXY_HOSTS"
+
+# JVM heap. Rule of thumb: no more than half the machine's RAM.
+sed -i "s|^java.arg.2=.*|java.arg.2=-Xms${NIFI_HEAP}|" "$BOOT"
+sed -i "s|^java.arg.3=.*|java.arg.3=-Xmx${NIFI_HEAP}|" "$BOOT"
+
+# Linux limits: NiFi opens a lot of files and threads.
+cat > /etc/security/limits.d/90-nifi.conf <<'LIMITS'
+nifi soft nofile 50000
+nifi hard nofile 50000
+nifi soft nproc  10000
+nifi hard nproc  10000
+LIMITS
+echo "vm.swappiness=0" > /etc/sysctl.d/90-nifi.conf
+sysctl -p /etc/sysctl.d/90-nifi.conf || true
+
+echo "=== [8/9] Single-user credentials (password must be 12+ chars) ==="
+chown -R nifi:nifi "$NIFI_HOME"
+runuser -u nifi -- env JAVA_HOME="$JAVA_HOME" \
+  "${NIFI_HOME}/bin/nifi.sh" set-single-user-credentials "$NIFI_USERNAME" "$NIFI_PASSWORD"
+
+echo "=== [9/9] systemd service ==="
+cat > /etc/systemd/system/nifi.service <<UNIT
+[Unit]
+Description=Apache NiFi ${NIFI_VERSION}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nifi
+Group=nifi
+Environment=JAVA_HOME=${JAVA_HOME}
+Environment=NIFI_HOME=${NIFI_LINK}
+ExecStart=${NIFI_LINK}/bin/nifi.sh run
+Restart=on-failure
+RestartSec=30
+TimeoutStartSec=600
+TimeoutStopSec=180
+LimitNOFILE=50000
+LimitNPROC=10000
+SuccessExitStatus=143
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now nifi.service
+
+touch /opt/nifi/.bootstrap-complete
+echo "=== BOOTSTRAP COMPLETE at $(date -Is) ==="
+echo "NiFi UI: https://${PUBLIC_IP:-$PRIVATE_IP}:${HTTPS_PORT}/nifi"
