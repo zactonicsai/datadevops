@@ -1,0 +1,58 @@
+[14:27:15] Checking local tools...
+  OK aws aws-cli/2.36.12, jq jq-1.7.1-apple
+[14:27:15] Checking AWS credentials...
+  OK Account 406207085797 as arn:aws:iam::406207085797:user/zactonicsuser01
+[14:27:16] Checking region and quota basics...
+  OK Region us-east-1 reachable
+[14:27:16] Validating config values...
+  !! You are still using the example password. Change it in 00-config.sh.
+  OK NiFi 1.28.1, instance t3.large, 40GB gp3
+[14:27:16] Verifying the NiFi download URL exists (this is the #1 cause of failures)...
+  OK Download URL reachable: https://archive.apache.org/dist/nifi/1.28.1/nifi-1.28.1-bin.zip
+[14:27:17] Detecting your public IP (used to lock down the firewall)...
+  OK Your IP is 68.32.112.68 -> firewall will allow 68.32.112.68/32 only
+[14:27:17] Preflight passed. Next: ./02-network.sh
+zach@zachs-MacBook-Air scripts % ./02*
+[14:27:25] STEP 1/7  VPC
+[14:27:25]   Creating VPC 10.20.0.0/16 ...
+  OK Created VPC vpc-01565c56755f65aad with DNS support + hostnames enabled
+[14:27:28] STEP 2/7  Internet gateway
+  OK Created and attached igw-05f7e3d5be5c56616
+[14:27:31] STEP 3/7  Public subnets
+  OK   10.20.1.0/24 us-east-1a -> subnet-00051f11d9e6989ed (created, public)
+  OK   10.20.2.0/24 us-east-1b -> subnet-0604c1fa07bb99480 (created, public)
+[14:27:37]   Public route table (0.0.0.0/0 -> igw-05f7e3d5be5c56616)
+  OK   Created rtb-00429f9802b2620e6 with default route to the internet
+  OK   subnet-00051f11d9e6989ed associated with rtb-00429f9802b2620e6
+  OK   subnet-0604c1fa07bb99480 associated with rtb-00429f9802b2620e6
+[14:27:41] STEP 4/7  Private subnets
+  OK   10.20.11.0/24 us-east-1a -> subnet-0869efa7c68e658bc (created, private)
+  OK   10.20.12.0/24 us-east-1b -> subnet-02c8549293a1699ea (created, private)
+  OK   Created rtb-08e42be3878e3665b (local routes only - no NAT gateway, so no
+  OK   outbound internet from here. A NAT gateway costs ~$32/month.)
+  OK   subnet-0869efa7c68e658bc associated
+  OK   subnet-02c8549293a1699ea associated
+[14:27:50] STEP 5/7  Key pair
+  OK Private key at /Users/zach/.ssh/nifi-demo-key.pem (chmod 400). AWS keeps no copy.
+[14:27:51] STEP 6/7  Security group
+  OK Created sg-0d940ac7b7529230e
+  OK Allowed tcp/8443 from 68.32.112.68/32
+  OK Allowed tcp/22 from 68.32.112.68/32
+[14:27:54] STEP 7/7  IAM role
+  OK Role created
+  OK AmazonSSMManagedInstanceCore attached
+[14:27:57]   Waiting 12s for IAM to propagate...
+  OK Instance profile created
+
+  ┌────────────────────────────────────────────────────────────┐
+  │  NETWORK BUILT                                             │
+  ├────────────────────────────────────────────────────────────┤
+  │  VPC              vpc-01565c56755f65aad  10.20.0.0/16
+  │  Internet gateway igw-05f7e3d5be5c56616
+  │  Public subnets   subnet-00051f11d9e6989ed subnet-0604c1fa07bb99480
+  │  Public route tbl rtb-00429f9802b2620e6  (0.0.0.0/0 -> igw)
+  │  Private subnets  subnet-0869efa7c68e658bc subnet-02c8549293a1699ea
+  │  Private route tbl rtb-08e42be3878e3665b  (local only)
+  │  Security group   sg-0d940ac7b7529230e  (tcp/8443, tcp/22 from 68.32.112.68/32)
+  │  NiFi launches in subnet-00051f11d9e6989ed (us-east-1a)
+  └────────────────────────────────────────────────────────────┘

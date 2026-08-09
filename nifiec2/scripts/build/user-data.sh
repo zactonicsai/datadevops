@@ -7,13 +7,13 @@
 set -euxo pipefail
 exec > >(tee -a /var/log/nifi-bootstrap.log) 2>&1
 
-NIFI_VERSION="__NIFI_VERSION__"
-NIFI_MIRROR="__NIFI_MIRROR__"
-JAVA_PKG="__JAVA_PKG__"
-NIFI_HEAP="__NIFI_HEAP__"
-HTTPS_PORT="__NIFI_HTTPS_PORT__"
-NIFI_USERNAME="__NIFI_USERNAME__"
-NIFI_PASSWORD="__NIFI_PASSWORD__"
+NIFI_VERSION="1.28.1"
+NIFI_MIRROR="https://archive.apache.org/dist/nifi"
+JAVA_PKG="java-11-amazon-corretto-headless"
+NIFI_HEAP="2g"
+HTTPS_PORT="8443"
+NIFI_USERNAME="admin"
+NIFI_PASSWORD="ChangeMe-Str0ngPass!"
 
 NIFI_HOME="/opt/nifi/nifi-${NIFI_VERSION}"
 NIFI_LINK="/opt/nifi/current"

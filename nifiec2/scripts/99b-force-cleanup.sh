@@ -38,10 +38,12 @@ sweep_region() {
   local A=(aws --region "$R")
   local TAGF=("Name=tag:${TAG_KEY},Values=${TAG_VALUE}")
 
-  local inst sg eip vol snap
+  local inst sg eip vol snap vpc
   inst="$("${A[@]}" ec2 describe-instances \
     --filters "${TAGF[@]}" "Name=instance-state-name,Values=pending,running,stopping,stopped" \
     --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null | tr '\t' ' ')"
+  vpc="$("${A[@]}" ec2 describe-vpcs --filters "${TAGF[@]}" \
+    --query 'Vpcs[].VpcId' --output text 2>/dev/null | tr '\t' ' ')"
   sg="$("${A[@]}" ec2 describe-security-groups \
     --filters "Name=group-name,Values=${SG_NAME}" \
     --query 'SecurityGroups[].GroupId' --output text 2>/dev/null | tr '\t' ' ')"
@@ -52,7 +54,7 @@ sweep_region() {
   snap="$("${A[@]}" ec2 describe-snapshots --owner-ids self --filters "${TAGF[@]}" \
     --query 'Snapshots[].SnapshotId' --output text 2>/dev/null | tr '\t' ' ')"
 
-  if [ -z "${inst}${sg}${eip}${vol}${snap}" ]; then
+  if [ -z "${inst}${sg}${eip}${vol}${snap}${vpc}" ]; then
     $ALL_REGIONS && printf '  %-16s clean\n' "$R"
     return 0
   fi
@@ -64,6 +66,7 @@ sweep_region() {
   [ -n "$vol"  ] && echo "    volumes   : $vol"
   [ -n "$eip"  ] && echo "    elastic ip: $eip"
   [ -n "$sg"   ] && echo "    sec group : $sg"
+  [ -n "$vpc"  ] && echo "    vpc       : $vpc (+ its subnets, route tables, gateway)"
   [ -n "$snap" ] && echo "    snapshots : $snap  (NOT deleted by this script)"
 
   if $DRY_RUN; then
@@ -110,6 +113,49 @@ sweep_region() {
     done
     for _ in $(seq 1 12); do
       "${A[@]}" ec2 delete-security-group --group-id "$g" 2>/dev/null && { ok "sg $g deleted"; break; }
+      sleep 10
+    done
+  done
+
+  # --- network, innermost first: subnets -> route tables -> igw -> vpc ---
+  for v in $vpc; do
+    for e in $("${A[@]}" ec2 describe-network-interfaces \
+                --filters "Name=vpc-id,Values=$v" "Name=status,Values=available" \
+                --query 'NetworkInterfaces[].NetworkInterfaceId' --output text 2>/dev/null); do
+      "${A[@]}" ec2 delete-network-interface --network-interface-id "$e" >/dev/null 2>&1
+    done
+
+    for s in $("${A[@]}" ec2 describe-subnets --filters "Name=vpc-id,Values=$v" \
+                --query 'Subnets[].SubnetId' --output text 2>/dev/null); do
+      for _ in $(seq 1 6); do
+        "${A[@]}" ec2 delete-subnet --subnet-id "$s" 2>/dev/null && { ok "subnet $s deleted"; break; }
+        sleep 10
+      done
+    done
+
+    # the VPC's MAIN route table cannot be deleted; it goes with the VPC
+    for rt in $("${A[@]}" ec2 describe-route-tables --filters "Name=vpc-id,Values=$v" \
+                 --query 'RouteTables[?!(Associations[?Main==`true`])].RouteTableId' \
+                 --output text 2>/dev/null); do
+      for as in $("${A[@]}" ec2 describe-route-tables --route-table-ids "$rt" \
+                   --query 'RouteTables[0].Associations[?Main!=`true`].RouteTableAssociationId' \
+                   --output text 2>/dev/null); do
+        "${A[@]}" ec2 disassociate-route-table --association-id "$as" >/dev/null 2>&1
+      done
+      "${A[@]}" ec2 delete-route-table --route-table-id "$rt" >/dev/null 2>&1 \
+        && ok "route table $rt deleted"
+    done
+
+    for g in $("${A[@]}" ec2 describe-internet-gateways \
+                --filters "Name=attachment.vpc-id,Values=$v" \
+                --query 'InternetGateways[].InternetGatewayId' --output text 2>/dev/null); do
+      "${A[@]}" ec2 detach-internet-gateway --internet-gateway-id "$g" --vpc-id "$v" >/dev/null 2>&1
+      "${A[@]}" ec2 delete-internet-gateway --internet-gateway-id "$g" >/dev/null 2>&1 \
+        && ok "igw $g deleted"
+    done
+
+    for _ in $(seq 1 6); do
+      "${A[@]}" ec2 delete-vpc --vpc-id "$v" 2>/dev/null && { ok "vpc $v deleted"; break; }
       sleep 10
     done
   done

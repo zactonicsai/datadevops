@@ -25,22 +25,32 @@ tutorial.
 Here is the finished picture:
 
 ```
-   Your laptop                          AWS (region: us-east-1)
-  ┌───────────┐                  ┌──────────────────────────────────┐
-  │  AWS CLI  │──── HTTPS ──────▶│  Security Group (the firewall)   │
-  │  browser  │                  │   allows YOUR ip only: 22, 8443  │
-  └───────────┘                  │            │                     │
-                                 │   ┌────────▼──────────┐          │
-                                 │   │ EC2 t3.large      │          │
-                                 │   │ Amazon Linux 2023 │          │
-                                 │   │ Java 11 (Corretto)│          │
-                                 │   │ NiFi 1.28.1       │          │
-                                 │   │ systemd: nifi     │          │
-                                 │   │ 40 GB encrypted   │          │
-                                 │   └───────────────────┘          │
-                                 │        ▲ IAM role → SSM          │
-                                 └────────┼─────────────────────────┘
-                                          └─ manage without SSH keys
+  Your laptop                    AWS region us-east-1
+ ┌───────────┐   ┌──────────────────────────────────────────────────────┐
+ │  AWS CLI  │   │  VPC  nifi-demo-vpc   10.20.0.0/16                   │
+ │  browser  │   │                                                      │
+ └─────┬─────┘   │   [Internet Gateway]                                 │
+       │         │           │                                          │
+       │  HTTPS  │   ┌───────┴────────────────────────────────┐         │
+       └────────▶│   │ public route table  0.0.0.0/0 -> igw   │         │
+        :8443    │   └───┬────────────────────────┬───────────┘         │
+                 │       │                        │                     │
+                 │  ┌────▼─────────────┐   ┌──────▼───────────┐         │
+                 │  │ public-1  AZ-a   │   │ public-2  AZ-b   │         │
+                 │  │ 10.20.1.0/24     │   │ 10.20.2.0/24     │         │
+                 │  │  ┌────────────┐  │   │  (spare: ALB,    │         │
+                 │  │  │ EC2        │  │   │   2nd node)      │         │
+                 │  │  │ t3.large   │  │   └──────────────────┘         │
+                 │  │  │ AL2023     │  │                                │
+                 │  │  │ Java 11    │  │   ┌──────────────────┐         │
+                 │  │  │ NiFi 1.28.1│  │   │ private-1 AZ-a   │         │
+                 │  │  │ 40GB enc.  │  │   │ 10.20.11.0/24    │         │
+                 │  │  └────────────┘  │   │ private-2 AZ-b   │         │
+                 │  │  SG: 22,8443     │   │ 10.20.12.0/24    │         │
+                 │  │  from YOUR ip    │   │ no internet route│         │
+                 │  └──────────────────┘   └──────────────────┘         │
+                 │            ▲ IAM role -> SSM (shell without SSH)     │
+                 └────────────┼─────────────────────────────────────────┘
 ```
 
 ---
@@ -151,13 +161,33 @@ firewall can be locked to just you.
 ./02-network.sh
 ```
 
-What appears in AWS:
+This builds a **dedicated VPC** — it does not borrow your default one, so
+nothing it creates or deletes can affect anything else in the account:
 
-- your **default VPC** and a **public subnet** are found (not created)
-- an **ed25519 key pair**, saved to `~/.ssh/nifi-demo-key.pem` with mode `400`
-- a **security group** allowing TCP 8443 and 22 **from your IP only**
-- an **IAM role + instance profile** so you can manage the box through
-  Systems Manager without any SSH key at all
+| Created | Value |
+| --- | --- |
+| VPC | `10.20.0.0/16`, with DNS support and DNS hostnames turned on |
+| Internet gateway | attached to the VPC |
+| Public subnets | `10.20.1.0/24` and `10.20.2.0/24`, in two different AZs, auto-assigning public IPs |
+| Public route table | `0.0.0.0/0` → internet gateway, associated with both public subnets |
+| Private subnets | `10.20.11.0/24` and `10.20.12.0/24`, in two AZs, no public IPs |
+| Private route table | local routes only — deliberately no internet access |
+| Key pair | ed25519, saved to `~/.ssh/nifi-demo-key.pem` with mode `400` |
+| Security group | TCP 8443 and 22 **from your IP only** |
+| IAM role + profile | so SSM can manage the box without any SSH key |
+
+Why two of each subnet? NiFi itself only needs one, but almost anything you
+add later — a load balancer, an RDS subnet group, a second cluster node —
+requires two Availability Zones. Building them now costs nothing; subnets are
+free.
+
+The private subnets have **no NAT gateway**, so nothing in them can reach the
+internet. That is deliberate: a NAT gateway costs about $32/month. Add one
+only when you actually need outbound access from a private instance.
+
+Prefer to use your existing default VPC instead? Set
+`REUSE_DEFAULT_VPC="true"` in `00-config.sh`. Teardown will then leave the
+VPC alone, since it is not ours to delete.
 
 ### Step 4 — Launch the server
 
@@ -223,9 +253,13 @@ sudo tail -f /opt/nifi/current/logs/nifi-app.log
 ```
 
 This removes, in dependency order: the instance, its disk, any Elastic IP,
-orphan network interfaces, the security group, the key pair, and the IAM
-objects — then re-queries AWS to prove nothing is left. Full details and the
-raw CLI equivalents are in **TEARDOWN.md**.
+orphan network interfaces, the security group, **all four subnets, the route
+tables, the internet gateway and the VPC**, then the key pair and the IAM
+objects — and finally re-queries AWS to prove nothing is left.
+
+The VPC is only deleted because these scripts created it. If you set
+`REUSE_DEFAULT_VPC="true"`, or pass `--keep-vpc`, the network is left intact.
+Full details and the raw CLI equivalents are in **TEARDOWN.md**.
 
 Not finished, just pausing? `./98-stop.sh` stops the instance (keeps your
 flow, still pays for the disk) and `./98-stop.sh --start` brings it back.
@@ -259,17 +293,26 @@ that out *after* a 10-minute install is miserable.
 
 ### `02-network.sh` — the surroundings
 
-Every step is **idempotent** — safe to run twice. It checks whether a thing
-exists before creating it, so a half-finished run can just be re-run.
+Every step is **idempotent** — safe to run twice. It looks a thing up before
+creating it, so a half-finished run can just be re-run.
 
 Notable choices:
 
 | Choice | Why |
 | --- | --- |
+| Build our own VPC | Deleting it later is then safe; deleting a shared default VPC is not |
+| `--enable-dns-hostnames` | A hand-made VPC has this **off**, and without it the instance gets no public DNS name and SSM/package lookups turn flaky |
+| A dedicated public route table | Editing the VPC's *main* table would be harder to unwind — the main table cannot be deleted |
+| Two AZs | Load balancers and RDS subnet groups both demand it; subnets are free |
+| Private subnets with no NAT | Ready for future use without the ~$32/month NAT gateway bill |
 | `--key-type ed25519` | Shorter and stronger than RSA; supported by modern OpenSSH |
 | firewall scoped to `YOUR.IP/32` | The single most important security decision here |
 | IAM role with `AmazonSSMManagedInstanceCore` | Lets you get a shell without opening port 22 |
 | `sleep 12` after creating the instance profile | IAM is *eventually consistent*; launching too fast throws "Invalid IAM Instance Profile" |
+
+Each resource it creates is recorded in `.deploy-state` with a `CREATED_*`
+flag. That flag is what teardown consults: **it deletes what it made, and
+nothing else.**
 
 ### `03-launch.sh` — the launch
 
@@ -333,16 +376,22 @@ certificate is self-signed.
 
 ### `90-backup.sh`, `98-stop.sh`, `99-teardown.sh`, `99b-force-cleanup.sh` — the way out
 
-Destroying is not one command, it is an ordered sequence: instance → volumes →
-Elastic IP → network interfaces → security group → key pair → IAM → snapshots
-→ local state. AWS refuses to delete anything another resource still points
-at, so the order is forced on you.
+Destroying is not one command, it is an ordered sequence:
 
-`99-teardown.sh` runs that sequence with `--dry-run`, `--yes`, `--snapshots`
-and `--keep-iam` flags, retries the security group for up to 100 seconds while
-network interfaces detach, then verifies by re-querying AWS.
-`99b-force-cleanup.sh` does the same by **tag** when the state file is gone,
-optionally across every region.
+```
+instance → volumes → Elastic IP → network interfaces → security group
+ → subnets → route tables → internet gateway (detach, then delete) → VPC
+ → key pair → IAM → snapshots → local state
+```
+
+AWS refuses to delete anything another resource still points at, so the order
+is forced on you. The VPC goes last because everything else lives inside it.
+
+`99-teardown.sh` runs that sequence with `--dry-run`, `--yes`, `--snapshots`,
+`--keep-iam` and `--keep-vpc` flags, retries the security group, subnets and
+VPC while network interfaces finish detaching, then verifies by re-querying
+AWS. `99b-force-cleanup.sh` does the same by **tag** when the state file is
+gone, optionally across every region.
 
 **See TEARDOWN.md** for the full ordered explanation, the raw CLI commands, the
 error messages you will hit, and a cost checklist.
@@ -358,20 +407,69 @@ the equivalent sequence. Replace the bracketed values.
 REGION=us-east-1
 export AWS_PAGER=""
 
-# --- 1. Network -----------------------------------------------------------
-VPC_ID=$(aws ec2 describe-vpcs --region $REGION \
-  --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text)
+# --- 1. Build the VPC -----------------------------------------------------
+VPC_ID=$(aws ec2 create-vpc --region $REGION --cidr-block 10.20.0.0/16 \
+  --tag-specifications 'ResourceType=vpc,Tags=[{Key=Name,Value=nifi-vpc}]' \
+  --query Vpc.VpcId --output text)
+aws ec2 wait vpc-available --region $REGION --vpc-ids $VPC_ID
 
-SUBNET_ID=$(aws ec2 describe-subnets --region $REGION \
-  --filters Name=vpc-id,Values=$VPC_ID Name=map-public-ip-on-launch,Values=true \
-  --query 'Subnets[0].SubnetId' --output text)
+# a hand-made VPC has DNS hostnames OFF; the instance needs them ON
+aws ec2 modify-vpc-attribute --region $REGION --vpc-id $VPC_ID --enable-dns-support  '{"Value":true}'
+aws ec2 modify-vpc-attribute --region $REGION --vpc-id $VPC_ID --enable-dns-hostnames '{"Value":true}'
 
-# --- 2. Key pair ----------------------------------------------------------
+# --- 2. Internet gateway --------------------------------------------------
+IGW_ID=$(aws ec2 create-internet-gateway --region $REGION \
+  --tag-specifications 'ResourceType=internet-gateway,Tags=[{Key=Name,Value=nifi-igw}]' \
+  --query InternetGateway.InternetGatewayId --output text)
+aws ec2 attach-internet-gateway --region $REGION \
+  --internet-gateway-id $IGW_ID --vpc-id $VPC_ID
+
+# --- 3. Two public subnets, in two AZs ------------------------------------
+AZ1=$(aws ec2 describe-availability-zones --region $REGION \
+  --query 'AvailabilityZones[0].ZoneName' --output text)
+AZ2=$(aws ec2 describe-availability-zones --region $REGION \
+  --query 'AvailabilityZones[1].ZoneName' --output text)
+
+SUBNET_ID=$(aws ec2 create-subnet --region $REGION --vpc-id $VPC_ID \
+  --cidr-block 10.20.1.0/24 --availability-zone $AZ1 \
+  --tag-specifications 'ResourceType=subnet,Tags=[{Key=Name,Value=nifi-public-1}]' \
+  --query Subnet.SubnetId --output text)
+SUBNET2_ID=$(aws ec2 create-subnet --region $REGION --vpc-id $VPC_ID \
+  --cidr-block 10.20.2.0/24 --availability-zone $AZ2 \
+  --tag-specifications 'ResourceType=subnet,Tags=[{Key=Name,Value=nifi-public-2}]' \
+  --query Subnet.SubnetId --output text)
+
+# "public" part 1: hand out public IPs automatically
+aws ec2 modify-subnet-attribute --region $REGION --subnet-id $SUBNET_ID  --map-public-ip-on-launch
+aws ec2 modify-subnet-attribute --region $REGION --subnet-id $SUBNET2_ID --map-public-ip-on-launch
+
+# "public" part 2: a route to the internet gateway
+RTB_ID=$(aws ec2 create-route-table --region $REGION --vpc-id $VPC_ID \
+  --tag-specifications 'ResourceType=route-table,Tags=[{Key=Name,Value=nifi-public-rtb}]' \
+  --query RouteTable.RouteTableId --output text)
+aws ec2 create-route --region $REGION --route-table-id $RTB_ID \
+  --destination-cidr-block 0.0.0.0/0 --gateway-id $IGW_ID
+aws ec2 associate-route-table --region $REGION --route-table-id $RTB_ID --subnet-id $SUBNET_ID
+aws ec2 associate-route-table --region $REGION --route-table-id $RTB_ID --subnet-id $SUBNET2_ID
+
+# --- 4. Two private subnets (no internet route) ---------------------------
+PRIV1=$(aws ec2 create-subnet --region $REGION --vpc-id $VPC_ID \
+  --cidr-block 10.20.11.0/24 --availability-zone $AZ1 \
+  --query Subnet.SubnetId --output text)
+PRIV2=$(aws ec2 create-subnet --region $REGION --vpc-id $VPC_ID \
+  --cidr-block 10.20.12.0/24 --availability-zone $AZ2 \
+  --query Subnet.SubnetId --output text)
+PRIV_RTB=$(aws ec2 create-route-table --region $REGION --vpc-id $VPC_ID \
+  --query RouteTable.RouteTableId --output text)
+aws ec2 associate-route-table --region $REGION --route-table-id $PRIV_RTB --subnet-id $PRIV1
+aws ec2 associate-route-table --region $REGION --route-table-id $PRIV_RTB --subnet-id $PRIV2
+
+# --- 5. Key pair ----------------------------------------------------------
 aws ec2 create-key-pair --region $REGION --key-name nifi-key --key-type ed25519 \
   --query KeyMaterial --output text > ~/.ssh/nifi-key.pem
 chmod 400 ~/.ssh/nifi-key.pem
 
-# --- 3. Firewall ----------------------------------------------------------
+# --- 6. Firewall ----------------------------------------------------------
 MY_IP=$(curl -s https://checkip.amazonaws.com)
 SG_ID=$(aws ec2 create-security-group --region $REGION \
   --group-name nifi-sg --description "NiFi" --vpc-id $VPC_ID \
@@ -382,7 +480,7 @@ aws ec2 authorize-security-group-ingress --region $REGION --group-id $SG_ID \
 aws ec2 authorize-security-group-ingress --region $REGION --group-id $SG_ID \
   --protocol tcp --port 22   --cidr ${MY_IP}/32
 
-# --- 4. IAM role for SSM --------------------------------------------------
+# --- 7. IAM role for SSM --------------------------------------------------
 aws iam create-role --role-name nifi-role --assume-role-policy-document \
   '{"Version":"2012-10-17","Statement":[{"Effect":"Allow",
     "Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
@@ -393,12 +491,12 @@ aws iam add-role-to-instance-profile \
   --instance-profile-name nifi-profile --role-name nifi-role
 sleep 15   # IAM propagation
 
-# --- 5. Newest Amazon Linux 2023 image ------------------------------------
+# --- 8. Newest Amazon Linux 2023 image ------------------------------------
 AMI_ID=$(aws ssm get-parameters --region $REGION \
   --names /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 \
   --query 'Parameters[0].Value' --output text)
 
-# --- 6. Launch ------------------------------------------------------------
+# --- 9. Launch ------------------------------------------------------------
 INSTANCE_ID=$(aws ec2 run-instances --region $REGION \
   --image-id $AMI_ID --instance-type t3.large \
   --key-name nifi-key --subnet-id $SUBNET_ID --security-group-ids $SG_ID \

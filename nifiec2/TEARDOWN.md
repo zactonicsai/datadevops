@@ -14,19 +14,19 @@ you try, you get errors like `DependencyViolation` or `DeleteConflict`.
 The chain looks like this — arrows mean "depends on":
 
 ```
-   IAM role ◀── instance profile ◀── EC2 instance ──▶ EBS volume
-                                          │
-                                          ▼
-                                 network interface (ENI)
-                                          │
-                                          ▼
-                                   security group
+   VPC ◀── subnet ◀── network interface ◀── EC2 instance ──▶ EBS volume
+    ▲        ▲                                    ▲
+    │        └── route table association          └── Elastic IP
+    ├── route table
+    ├── internet gateway   (must be DETACHED before deletion)
+    └── security group
 
-   Elastic IP ──▶ EC2 instance
+   IAM role ◀── instance profile ◀── EC2 instance
 ```
 
 So you always work from the **outside in**: kill the instance first, wait for
-it to *actually* be gone, then unpick everything that was attached to it.
+it to *actually* be gone, then unpick everything that was attached to it. The
+VPC — which everything else lives inside — goes last.
 
 **The correct order:**
 
@@ -36,12 +36,20 @@ it to *actually* be gone, then unpick everything that was attached to it.
 | 1 | EC2 instance | Everything else is attached to it |
 | 2 | Leftover EBS volumes | Only survive if `DeleteOnTermination=false` |
 | 3 | Elastic IP | **Billed hourly even when unattached** — never forget this one |
-| 4 | Orphan network interfaces | The usual reason step 5 fails |
+| 4 | Orphan network interfaces | Blocks both the security group *and* the subnet |
 | 5 | Security group | Cannot be deleted while an ENI uses it |
-| 6 | Key pair | Independent, but tidy up the `.pem` on your laptop too |
-| 7 | Instance profile, then role | Role must leave the profile before either can go |
-| 8 | Snapshots (optional) | Your only rollback — delete on purpose, not by accident |
-| 9 | Local state files | `build/user-data.sh` contains your password |
+| 6 | Subnets | Cannot be deleted while anything lives in them |
+| 7 | Route tables | Must be disassociated first; the **main** table can't be deleted at all |
+| 8 | Internet gateway | **Detach from the VPC, then delete** — two separate calls |
+| 9 | VPC | Only once it is empty. Its default SG, main route table and NACL go automatically |
+| 10 | Key pair | Independent; tidy up the `.pem` on your laptop too |
+| 11 | Instance profile, then role | Role must leave the profile before either can go |
+| 12 | Snapshots (optional) | Your only rollback — delete on purpose, not by accident |
+
+> 🛡️ **The VPC is only deleted if the scripts created it.** `02-network.sh`
+> records `CREATED_VPC=true` in `.deploy-state` when it builds one. If you set
+> `REUSE_DEFAULT_VPC="true"`, teardown skips steps 6–9 entirely and your
+> default VPC is never touched. `--keep-vpc` forces the same behaviour.
 
 ---
 
@@ -59,8 +67,8 @@ cd nifi-ec2/scripts
 | --- | --- |
 | `90-backup.sh` | Pulls `conf/flow.json.gz`, `nifi.properties`, users/authorizations down to `./backups/<timestamp>/`, and starts an EBS snapshot. Optional S3 upload: `./90-backup.sh s3://my-bucket` |
 | `98-stop.sh` | **Not** a delete. Stops the instance so compute billing pauses; `--start` brings it back and repairs `nifi.web.proxy.host` for the new IP |
-| `99-teardown.sh` | The ordered destroy. Flags: `--dry-run`, `--yes`, `--snapshots`, `--keep-iam` |
-| `99b-force-cleanup.sh` | Finds resources by **tag** instead of the state file. For when you lost `.deploy-state`, deployed twice, or something is still billing. `--all-regions` scans everywhere |
+| `99-teardown.sh` | The ordered destroy, including the VPC it built. Flags: `--dry-run`, `--yes`, `--snapshots`, `--keep-iam`, `--keep-vpc` |
+| `99b-force-cleanup.sh` | Finds resources by **tag** instead of the state file, VPC and subnets included. For when you lost `.deploy-state`, deployed twice, or something is still billing. `--all-regions` scans everywhere |
 
 ### Stop vs. terminate — pick the right one
 
@@ -209,14 +217,90 @@ for i in $(seq 1 12); do
 done
 ```
 
-### Step 6 — Key pair
+### Step 6 — Subnets (only the ones you created)
+
+```bash
+VPC_ID=vpc-0123456789abcdef0
+
+aws ec2 describe-subnets --region $REGION \
+  --filters Name=vpc-id,Values=$VPC_ID \
+  --query 'Subnets[].[SubnetId,CidrBlock,AvailabilityZone]' --output table
+
+aws ec2 delete-subnet --region $REGION --subnet-id subnet-0123...
+# repeat for every subnet — public and private
+```
+
+If this says `DependencyViolation`, something still lives in the subnet.
+Find it:
+
+```bash
+aws ec2 describe-network-interfaces --region $REGION \
+  --filters Name=subnet-id,Values=subnet-0123... \
+  --query 'NetworkInterfaces[].[NetworkInterfaceId,Status,Description]' --output table
+```
+
+### Step 7 — Route tables
+
+The VPC's **main** route table cannot be deleted — it disappears with the VPC.
+Only delete the custom ones, and disassociate them first.
+
+```bash
+# list the non-main tables
+aws ec2 describe-route-tables --region $REGION \
+  --filters Name=vpc-id,Values=$VPC_ID \
+  --query 'RouteTables[?!(Associations[?Main==`true`])].[RouteTableId]' --output text
+
+# drop any remaining associations
+aws ec2 describe-route-tables --region $REGION --route-table-ids rtb-0123... \
+  --query 'RouteTables[0].Associations[?Main!=`true`].RouteTableAssociationId' --output text
+aws ec2 disassociate-route-table --region $REGION --association-id rtbassoc-0123...
+
+aws ec2 delete-route-table --region $REGION --route-table-id rtb-0123...
+```
+
+### Step 8 — Internet gateway (detach, *then* delete)
+
+Two calls. Deleting without detaching always fails.
+
+```bash
+IGW_ID=$(aws ec2 describe-internet-gateways --region $REGION \
+  --filters Name=attachment.vpc-id,Values=$VPC_ID \
+  --query 'InternetGateways[0].InternetGatewayId' --output text)
+
+aws ec2 detach-internet-gateway --region $REGION \
+  --internet-gateway-id $IGW_ID --vpc-id $VPC_ID
+aws ec2 delete-internet-gateway --region $REGION --internet-gateway-id $IGW_ID
+```
+
+### Step 9 — The VPC itself
+
+```bash
+aws ec2 delete-vpc --region $REGION --vpc-id $VPC_ID
+```
+
+Its default security group, main route table and default network ACL are
+removed by AWS automatically. If it refuses, something is still inside:
+
+```bash
+aws ec2 describe-network-interfaces --region $REGION --filters Name=vpc-id,Values=$VPC_ID
+aws ec2 describe-subnets            --region $REGION --filters Name=vpc-id,Values=$VPC_ID
+aws ec2 describe-security-groups    --region $REGION --filters Name=vpc-id,Values=$VPC_ID
+aws ec2 describe-nat-gateways       --region $REGION --filter  Name=vpc-id,Values=$VPC_ID
+aws ec2 describe-vpc-endpoints      --region $REGION --filters Name=vpc-id,Values=$VPC_ID
+```
+
+> ⚠️ Never run `delete-vpc` on your account's **default** VPC unless you mean
+> it. Other people's resources may be sitting in it, and recreating it
+> (`aws ec2 create-default-vpc`) does not bring their configuration back.
+
+### Step 10 — Key pair
 
 ```bash
 aws ec2 delete-key-pair --region $REGION --key-name $KEY_NAME
 rm -f ~/.ssh/${KEY_NAME}.pem
 ```
 
-### Step 7 — IAM, strictly in this order
+### Step 11 — IAM, strictly in this order
 
 ```bash
 aws iam remove-role-from-instance-profile \
@@ -236,7 +320,7 @@ aws iam list-attached-role-policies --role-name $ROLE
 aws iam list-role-policies --role-name $ROLE      # inline policies too
 ```
 
-### Step 8 — Snapshots (only when you are truly finished)
+### Step 12 — Snapshots (only when you are truly finished)
 
 ```bash
 aws ec2 describe-snapshots --region $REGION --owner-ids self \
@@ -246,14 +330,14 @@ aws ec2 describe-snapshots --region $REGION --owner-ids self \
 aws ec2 delete-snapshot --region $REGION --snapshot-id snap-0123456789abcdef0
 ```
 
-### Step 9 — Local files
+### Step 13 — Local files
 
 ```bash
 rm -f  nifi-ec2/scripts/.deploy-state
 rm -rf nifi-ec2/scripts/build      # build/user-data.sh has your password in it
 ```
 
-### Step 10 — Verify nothing is left
+### Step 14 — Verify nothing is left
 
 ```bash
 aws ec2 describe-instances --region $REGION \
@@ -263,6 +347,10 @@ aws ec2 describe-instances --region $REGION \
 
 aws ec2 describe-volumes    --region $REGION --filters Name=tag:Project,Values=nifi-demo --query 'Volumes[].VolumeId'      --output text
 aws ec2 describe-addresses  --region $REGION --filters Name=tag:Project,Values=nifi-demo --query 'Addresses[].AllocationId' --output text
+aws ec2 describe-vpcs       --region $REGION --filters Name=tag:Project,Values=nifi-demo --query 'Vpcs[].VpcId'            --output text
+aws ec2 describe-subnets    --region $REGION --filters Name=tag:Project,Values=nifi-demo --query 'Subnets[].SubnetId'      --output text
+aws ec2 describe-route-tables --region $REGION --filters Name=tag:Project,Values=nifi-demo --query 'RouteTables[].RouteTableId' --output text
+aws ec2 describe-internet-gateways --region $REGION --filters Name=tag:Project,Values=nifi-demo --query 'InternetGateways[].InternetGatewayId' --output text
 aws ec2 describe-snapshots  --region $REGION --owner-ids self --filters Name=tag:Project,Values=nifi-demo --query 'Snapshots[].SnapshotId' --output text
 aws ec2 describe-security-groups --region $REGION --filters Name=group-name,Values=nifi-demo-sg --query 'SecurityGroups[].GroupId' --output text
 aws iam get-role --role-name $ROLE 2>&1 | head -1
@@ -297,6 +385,10 @@ IDS=$(aws ec2 describe-instances --region $REGION \
 | `DeleteConflict: must detach all policies first` | Managed policy still attached | `detach-role-policy`, and check inline with `list-role-policies` |
 | `OperationNotPermitted: may not be detached ... disableApiTermination` | Termination protection is on | `modify-instance-attribute --no-disable-api-termination` |
 | `VolumeInUse` | Volume still attached to a live instance | Terminate/detach first, then delete |
+| `DependencyViolation: The vpc ... has dependencies` | Something is still inside the VPC | Delete subnets, route tables, gateway, endpoints first — see step 9's list |
+| `DependencyViolation` on the internet gateway | You skipped the detach | `detach-internet-gateway`, then `delete-internet-gateway` |
+| `DependencyViolation` on a subnet | An ENI still lives in it | Terminate the instance and wait; then delete the ENI |
+| `InvalidParameterValue: cannot delete the main route table` | You tried to delete the main table | You cannot — it goes with the VPC |
 | `InvalidAllocationID.NotFound` | Elastic IP already released | Nothing to do |
 | `IncorrectState: ... available` | You tried to disassociate an unattached EIP | Skip straight to `release-address` |
 | `AuthFailure` / `UnauthorizedOperation` | Your IAM user lacks that delete permission | The message names the exact action to request |
@@ -312,6 +404,9 @@ Things that keep charging if you miss them:
 - ☐ **Snapshots** — ~$0.05 per GB-month, forever, quietly
 - ☐ **A second instance from a repeat deploy** — run `99b-force-cleanup.sh --all-regions`
 - ☐ **Resources in a region you forgot** — same sweeper, same flag
+- ☐ **NAT gateway** — ~$32/month if you ever add one to the private subnets:
+  `aws ec2 describe-nat-gateways --region $REGION --filter Name=vpc-id,Values=$VPC_ID`
+- ☐ **VPC endpoints** — interface endpoints bill hourly and block VPC deletion
 - ☐ **CloudWatch log groups** — if you added the agent:
   `aws logs delete-log-group --region $REGION --log-group-name /nifi/app`
 

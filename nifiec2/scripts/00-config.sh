@@ -46,6 +46,25 @@ export ENABLE_SSH="true"
 # true = give the box a fixed public IP that survives stop/start
 export ALLOCATE_EIP="false"
 
+# ---------- Networking ----------
+# 02-network.sh BUILDS a dedicated VPC with its own subnets, and
+# 99-teardown.sh deletes every piece of it. Nothing is shared with the
+# account's default VPC, so a mistake here cannot damage anything else.
+export VPC_CIDR="10.20.0.0/16"
+
+# Two PUBLIC subnets in two different Availability Zones. NiFi runs in the
+# first one; the second exists because almost everything you might add later
+# (an Application Load Balancer, an RDS subnet group) requires two AZs.
+export PUBLIC_SUBNET_CIDRS="10.20.1.0/24 10.20.2.0/24"
+
+# Two PRIVATE subnets: no route to the internet. Good place for future
+# cluster nodes or a database. Set to "" to skip creating them.
+export PRIVATE_SUBNET_CIDRS="10.20.11.0/24 10.20.12.0/24"
+
+# true = reuse the account's default VPC instead of building one.
+# Teardown then leaves the VPC alone (it is not ours to delete).
+export REUSE_DEFAULT_VPC="false"
+
 # ---------- Internal ----------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export SCRIPT_DIR
