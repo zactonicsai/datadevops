@@ -1,0 +1,98 @@
+[1;34m[15:14:07][0m Checking local tools...
+[1;32m  OK[0m aws aws-cli/2.36.12, jq jq-1.7.1-apple
+[1;34m[15:14:07][0m Checking AWS credentials...
+[1;32m  OK[0m Account 406207085797 as arn:aws:iam::406207085797:user/zactonicsuser01
+[1;34m[15:14:08][0m Checking region and quota basics...
+[1;32m  OK[0m Region us-east-1 reachable
+[1;34m[15:14:08][0m Validating config values...
+[1;33m  !![0m You are still using the example password. Change it in 00-config.sh.
+[1;32m  OK[0m NiFi 1.28.1, instance t3.large, 40GB gp3
+[1;34m[15:14:08][0m Verifying the NiFi download URL exists (this is the #1 cause of failures)...
+[1;32m  OK[0m Download URL reachable: https://archive.apache.org/dist/nifi/1.28.1/nifi-1.28.1-bin.zip
+[1;34m[15:14:09][0m Detecting your public IP (used to lock down the firewall)...
+[1;32m  OK[0m Your IP is 68.32.112.68 -> firewall will allow 68.32.112.68/32 only
+[1;34m[15:14:09][0m Preflight passed. Next: ./02-network.sh
+[1;34m[15:14:09][0m STEP 1/7  VPC
+[1;32m  OK[0m Reusing our VPC vpc-0543f468fb796e3e4 from an earlier run
+[1;34m[15:14:09][0m STEP 2/7  Internet gateway
+[1;32m  OK[0m Created and attached igw-0848bef2f1e0f654b
+[1;34m[15:14:12][0m STEP 3/7  Public subnets
+[1;32m  OK[0m   10.20.1.0/24 us-east-1a -> subnet-08bcca5229dec11bc (created, public)
+[1;32m  OK[0m   10.20.2.0/24 us-east-1b -> subnet-0535bd62909c2a7e7 (created, public)
+[1;34m[15:14:18][0m   Public route table (0.0.0.0/0 -> igw-0848bef2f1e0f654b)
+[1;32m  OK[0m   Created rtb-05e1822600c60bf80 with default route to the internet
+[1;32m  OK[0m   subnet-08bcca5229dec11bc associated with rtb-05e1822600c60bf80
+[1;32m  OK[0m   subnet-0535bd62909c2a7e7 associated with rtb-05e1822600c60bf80
+[1;34m[15:14:22][0m STEP 4/7  Private subnets
+[1;32m  OK[0m   10.20.11.0/24 us-east-1a -> subnet-00c83502c18796184 (created, private)
+[1;32m  OK[0m   10.20.12.0/24 us-east-1b -> subnet-0299bb7739265e0a1 (created, private)
+[1;32m  OK[0m   Created rtb-047fc290b0c2902cc (local routes only - no NAT gateway, so no
+[1;32m  OK[0m   outbound internet from here. A NAT gateway costs ~$32/month.)
+[1;32m  OK[0m   subnet-00c83502c18796184 associated
+[1;32m  OK[0m   subnet-0299bb7739265e0a1 associated
+[1;34m[15:14:30][0m STEP 5/7  Key pair
+[1;32m  OK[0m Private key at /Users/zach/.ssh/nifi-demo-key.pem (chmod 400). AWS keeps no copy.
+[1;34m[15:14:32][0m STEP 6/7  Security group
+[1;32m  OK[0m Created sg-0f5f25404ce52c383
+[1;32m  OK[0m Allowed tcp/8443 from 68.32.112.68/32
+[1;32m  OK[0m Allowed tcp/22 from 68.32.112.68/32
+[1;34m[15:14:35][0m STEP 7/7  IAM role
+[1;32m  OK[0m Role created
+[1;32m  OK[0m AmazonSSMManagedInstanceCore attached
+[1;34m[15:14:38][0m   Waiting 12s for IAM to propagate...
+[1;32m  OK[0m Instance profile created
+
+  ┌────────────────────────────────────────────────────────────┐
+  │  NETWORK BUILT                                             │
+  ├────────────────────────────────────────────────────────────┤
+  │  VPC              vpc-0543f468fb796e3e4  10.20.0.0/16
+  │  Internet gateway igw-0848bef2f1e0f654b
+  │  Public subnets   subnet-08bcca5229dec11bc subnet-0535bd62909c2a7e7
+  │  Public route tbl rtb-05e1822600c60bf80  (0.0.0.0/0 -> igw)
+  │  Private subnets  subnet-00c83502c18796184 subnet-0299bb7739265e0a1
+  │  Private route tbl rtb-047fc290b0c2902cc  (local only)
+  │  Security group   sg-0f5f25404ce52c383  (tcp/8443, tcp/22 from 68.32.112.68/32)
+  │  NiFi launches in subnet-08bcca5229dec11bc (us-east-1a)
+  └────────────────────────────────────────────────────────────┘
+
+[1;34m[15:14:50][0m Next: ./03-launch.sh
+[1;34m[15:14:50][0m Rendering user-data...
+[1;32m  OK[0m Wrote /Users/zach/datadevops/nifiec2/scripts/build/user-data.sh (    4951 bytes; the EC2 limit is 16384)
+[1;34m[15:14:50][0m Looking up AMI (x86_64)...
+[1;32m  OK[0m AMI ami-07a5b367e8dc8bd92
+[1;34m[15:14:51][0m Launching t3.large ...
+[1;32m  OK[0m Instance i-059500abec6ec58d2 requested
+[1;34m[15:14:53][0m Waiting for the instance to be running...
+[1;32m  OK[0m Running
+[1;34m[15:15:10][0m Waiting for EC2 status checks (2-3 minutes)...
+[1;32m  OK[0m Instance healthy at 100.52.194.103
+
+  The machine is up, but NiFi is still installing in the background.
+  Downloading and unpacking a 1.2 GB archive typically takes 5-10 minutes.
+
+  Watch progress:   ./04-verify.sh --follow
+  UI (when ready):  https://100.52.194.103:8443/nifi
+
+[1;34m[15:17:27][0m Polling until the NiFi UI responds (up to 20 minutes)...
+  attempt 01/80  http=000000  (still installing...)[1;32m  OK[0m UI answered with HTTP 200
+
+
+[1;34m[15:17:52][0m === Status report ===
+  EC2 instance     : i-059500abec6ec58d2 (running)
+  Public IP        : 100.52.194.103
+  Bootstrap done   : unknown - SSM starting
+  systemd nifi     : active
+  UI HTTP code     : 200
+
+  Open:      https://100.52.194.103:8443/nifi
+  Username:  admin
+  Password:  (the NIFI_PASSWORD from 00-config.sh)
+
+  Your browser WILL warn about the certificate. That is expected:
+  NiFi generated a self-signed one. Click through, or install a real
+  certificate later (see the tutorial, 'Making HTTPS real').
+
+  SSH:  ssh -i /Users/zach/.ssh/nifi-demo-key.pem ec2-user@100.52.194.103
+  SSM:  aws ssm start-session --region us-east-1 --target i-059500abec6ec58d2
+
+Done. If the UI did not answer, run './04-verify.sh --logs' to see why.

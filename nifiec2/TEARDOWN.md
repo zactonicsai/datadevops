@@ -53,7 +53,24 @@ VPC — which everything else lives inside — goes last.
 
 ---
 
-## 2. The scripts
+## 2. If you added Keycloak
+
+Tear Keycloak down **before** the main stack, because its script restores
+NiFi's original login first — deleting the identity server while NiFi still
+points at it leaves a NiFi nobody can enter:
+
+```bash
+cd ../keycloak
+./99-kc-teardown.sh --dry-run
+./99-kc-teardown.sh
+```
+
+Forgot, and did the main teardown first? Everything is deleted either way —
+the Keycloak instance carries the same `Project=nifi-demo` tag, and step 5
+removes every non-default security group in the VPC. You just lose the chance
+to restore NiFi's old config, which no longer matters once NiFi is gone.
+
+## 3. The scripts
 
 ```bash
 cd nifi-ec2/scripts
@@ -109,7 +126,7 @@ something?"
 
 ---
 
-## 3. The same thing as raw AWS CLI commands
+## 4. The same thing as raw AWS CLI commands
 
 Set these once:
 
@@ -360,7 +377,7 @@ All empty (and `NoSuchEntity` for the role) means you are done.
 
 ---
 
-## 4. One-liner: destroy everything tagged, no prompts
+## 5. One-liner: destroy everything tagged, no prompts
 
 Handy in a sandbox account. **Dangerous anywhere else** — it deletes by tag,
 so anything sharing that tag goes too.
@@ -376,7 +393,7 @@ IDS=$(aws ec2 describe-instances --region $REGION \
 
 ---
 
-## 5. Errors you will hit, and what they mean
+## 6. Errors you will hit, and what they mean
 
 | Error | Meaning | Fix |
 | --- | --- | --- |
@@ -395,7 +412,7 @@ IDS=$(aws ec2 describe-instances --region $REGION \
 
 ---
 
-## 6. Cost checklist after teardown
+## 7. Cost checklist after teardown
 
 Things that keep charging if you miss them:
 

@@ -1,0 +1,67 @@
+{
+  "realm": "__KC_REALM__",
+  "enabled": true,
+  "displayName": "NiFi Single Sign-On",
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "clients": [
+    {
+      "clientId": "__KC_CLIENT_ID__",
+      "name": "Apache NiFi",
+      "description": "Apache NiFi dataflow UI",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "__KC_CLIENT_SECRET__",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": true,
+      "redirectUris": [
+        "https://__NIFI_HOST__:__NIFI_PORT__/nifi-api/access/oidc/callback",
+        "https://__NIFI_HOST__:__NIFI_PORT__/nifi/*"
+      ],
+      "webOrigins": [
+        "https://__NIFI_HOST__:__NIFI_PORT__"
+      ],
+      "attributes": {
+        "post.logout.redirect.uris": "https://__NIFI_HOST__:__NIFI_PORT__/nifi/*"
+      }
+    }
+  ],
+  "roles": {
+    "realm": [
+      { "name": "nifi-admin", "description": "Full control of the NiFi flow" },
+      { "name": "nifi-user",  "description": "Read and operate the NiFi flow" }
+    ]
+  },
+  "groups": [
+    { "name": "nifi-admins" },
+    { "name": "nifi-users" }
+  ],
+  "users": [
+    {
+      "username": "__NIFI_ADMIN_USERNAME__",
+      "email": "__NIFI_ADMIN_EMAIL__",
+      "emailVerified": true,
+      "firstName": "NiFi",
+      "lastName": "Admin",
+      "enabled": true,
+      "groups": [ "/nifi-admins" ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "__NIFI_ADMIN_PASSWORD__",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}

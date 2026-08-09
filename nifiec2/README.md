@@ -244,6 +244,24 @@ aws ssm start-session --region us-east-1 --target <instance-id>
 sudo tail -f /opt/nifi/current/logs/nifi-app.log
 ```
 
+### Step 7b — Optional: real logins with Keycloak
+
+The single shared password is fine for a lab, not for a team. The
+`../keycloak` directory stands up a Keycloak identity server next to NiFi and
+switches NiFi to single sign-on, so every person gets their own account:
+
+```bash
+cd ../keycloak
+nano 00-kc-config.sh          # set your email and two passwords
+./01-kc-launch.sh             # Keycloak on t3.small, in public subnet 2
+./02-kc-verify.sh --follow
+./03-nifi-oidc.sh             # backs NiFi up, then switches it over
+```
+
+Changed your mind? `./04-nifi-restore.sh` puts NiFi back exactly as it was,
+from the backup `03-nifi-oidc.sh` made before touching anything. See
+**keycloak/README.md** for the full walkthrough.
+
 ### Step 8 — Delete it all when you are done
 
 ```bash
@@ -733,7 +751,13 @@ until the new flows pass.
 
 ---
 
-## 12. Cheat sheet
+## 12. Where to go next
+
+- **keycloak/** — swap the shared password for per-person single sign-on with
+  Keycloak, with a one-command path back to the original login
+- **TEARDOWN.md** — the ordered destroy, explained, with raw CLI equivalents
+
+## 13. Cheat sheet
 
 ```bash
 # deploy

@@ -74,9 +74,12 @@ find_ids() { "${A[@]}" ec2 "$@" 2>/dev/null | tr '\t' ' ' | xargs 2>/dev/null; }
 
 # Inside the VPC, find everything by VPC id rather than trusting the state file.
 if [ -n "${VPC_ID:-}" ]; then
+  # Every non-default security group in the VPC, not just NiFi's. The
+  # Keycloak group lives here too, and any group left behind blocks the
+  # VPC from being deleted.
   SG_ID="$(find_ids describe-security-groups \
-    --filters "Name=vpc-id,Values=${VPC_ID}" "Name=group-name,Values=${SG_NAME}" \
-    --query 'SecurityGroups[].GroupId' --output text)"
+    --filters "Name=vpc-id,Values=${VPC_ID}" \
+    --query 'SecurityGroups[?GroupName!=`default`].GroupId' --output text)"
   ALL_SUBNETS="$(find_ids describe-subnets \
     --filters "Name=vpc-id,Values=${VPC_ID}" --query 'Subnets[].SubnetId' --output text)"
   ALL_RTBS="$(find_ids describe-route-tables \
@@ -110,7 +113,8 @@ cat <<PLAN
   │   2. EBS volumes     : any left in 'available' state
   │   3. Elastic IP(s)   : ${ALLOC_ID:-<none>}
   │   4. Network i/faces : any orphans in the VPC
-  │   5. Security group  : ${SG_ID:-<none>}
+  │   5. Security groups : ${SG_ID:-<none>}
+  │      (all non-default groups in the VPC, Keycloak's included)
   │   6. Subnets         : $($OWN_VPC && echo "${ALL_SUBNETS:-<none>}" || echo "KEPT")
   │   7. Route tables    : $($OWN_VPC && echo "${ALL_RTBS:-<none>}" || echo "KEPT")
   │   8. Internet gwy    : $($OWN_VPC && echo "${IGW_ID:-<none>}" || echo "KEPT")
@@ -203,22 +207,35 @@ fi
 # STEP 5 - Security group. Retries while ENIs finish detaching.
 # ==========================================================================
 if [ -n "${SG_ID:-}" ]; then
-  log "STEP 5/12  Security group $SG_ID"
+  log "STEP 5/12  Security group(s): $SG_ID"
   if $DRY_RUN; then
-    RUN "${A[@]}" ec2 delete-security-group --group-id "$SG_ID"
+    for g in $SG_ID; do RUN "${A[@]}" ec2 delete-security-group --group-id "$g"; done
   else
-    DELETED=false
-    for attempt in $(seq 1 12); do
-      "${A[@]}" ec2 delete-security-group --group-id "$SG_ID" 2>/dev/null && { DELETED=true; break; }
-      printf '\r           attempt %02d/12 - still in use, waiting 10s...' "$attempt"
-      sleep 10
+    # Groups can reference each other (the Keycloak group allows traffic
+    # from the NiFi group), and AWS will not delete a group another group
+    # still points at. Strip every rule first, then delete.
+    for g in $SG_ID; do
+      PERMS="$("${A[@]}" ec2 describe-security-groups --group-ids "$g" \
+        --query 'SecurityGroups[0].IpPermissions' --output json 2>/dev/null)"
+      if [ -n "$PERMS" ] && [ "$PERMS" != "[]" ] && [ "$PERMS" != "null" ]; then
+        "${A[@]}" ec2 revoke-security-group-ingress --group-id "$g" \
+          --ip-permissions "$PERMS" >/dev/null 2>&1 && ok "Cleared inbound rules on $g"
+      fi
     done
-    echo
-    $DELETED && ok "Deleted" || warn "Could not delete $SG_ID — find the holder with:
-             aws ec2 describe-network-interfaces --region $AWS_REGION --filters Name=group-id,Values=$SG_ID"
+    for g in $SG_ID; do
+      DELETED=false
+      for attempt in $(seq 1 12); do
+        "${A[@]}" ec2 delete-security-group --group-id "$g" 2>/dev/null && { DELETED=true; break; }
+        printf '\r           %s attempt %02d/12 - still in use, waiting 10s...' "$g" "$attempt"
+        sleep 10
+      done
+      echo
+      $DELETED && ok "Deleted $g" || warn "Could not delete $g — find the holder with:
+             aws ec2 describe-network-interfaces --region $AWS_REGION --filters Name=group-id,Values=$g"
+    done
   fi
 else
-  ok "STEP 5/12  No security group"
+  ok "STEP 5/12  No security groups"
 fi
 
 # ==========================================================================
