@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+# ==========================================================================
+# user-data-private.sh -- first-boot script for NiFi on a PRIVATE instance
+# that people reach by its DNS name.
+#
+# Differences from the public build:
+#   * no public IP is ever consulted
+#   * the download may come from S3 instead of the internet
+#   * nifi.web.proxy.host is the DNS NAME, not an address
+#   * the TLS certificate is generated with that DNS name inside it
+#
+# Log: /var/log/nifi-bootstrap.log
+# ==========================================================================
+set -euxo pipefail
+exec > >(tee -a /var/log/nifi-bootstrap.log) 2>&1
+
+# These arrive already shell-quoted from 03-launch-private.sh, so a password
+# containing quotes, backslashes, $ or backticks cannot break the script.
+NIFI_VERSION=__NIFI_VERSION__
+NIFI_MIRROR=__NIFI_MIRROR__
+SOURCE_MODE=__SOURCE_MODE__
+S3_PREFIX=__S3_PREFIX__
+JAVA_PKG=__JAVA_PKG__
+NIFI_HEAP=__NIFI_HEAP__
+HTTPS_PORT=__NIFI_HTTPS_PORT__
+NIFI_USERNAME=__NIFI_USERNAME__
+NIFI_PASSWORD=__NIFI_PASSWORD__
+DNS_NAME=__DNS_NAME__
+GEN_CERT=__GENERATE_CERT__
+
+NIFI_HOME="/opt/nifi/nifi-${NIFI_VERSION}"
+NIFI_LINK="/opt/nifi/current"
+ZIP="nifi-${NIFI_VERSION}-bin.zip"
+
+echo "=== [1/9] OS packages ==="
+dnf -y update --security || true
+dnf -y install unzip tar procps-ng which
+command -v aws >/dev/null || dnf -y install awscli-2 || true
+
+echo "=== [2/9] Java (NiFi 1.x supports Java 8 and 11 only) ==="
+dnf -y install "$JAVA_PKG" || dnf -y install java-11-amazon-corretto
+JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")"
+java -version
+
+echo "=== [3/9] Service account ==="
+id nifi >/dev/null 2>&1 || useradd --system --create-home --home-dir /home/nifi --shell /sbin/nologin nifi
+
+echo "=== [4/9] Our own addresses (private only - there is no public IP) ==="
+TOKEN="$(curl -s -X PUT http://169.254.169.254/latest/api/token \
+         -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')"
+meta() { curl -s -H "X-aws-ec2-metadata-token: $TOKEN" "http://169.254.169.254/latest/meta-data/$1"; }
+PRIVATE_IP="$(meta local-ipv4)"
+LOCAL_HOSTNAME="$(meta local-hostname)"
+echo "private ip ${PRIVATE_IP}, hostname ${LOCAL_HOSTNAME}, dns name ${DNS_NAME}"
+
+echo "=== [5/9] Download NiFi (~1.2 GB) from ${SOURCE_MODE} ==="
+mkdir -p /opt/nifi /tmp/nifi-dl && cd /tmp/nifi-dl
+if [ "$SOURCE_MODE" = "s3" ]; then
+  # No route to the internet. The zip comes from a bucket we can read
+  # through an S3 gateway VPC endpoint.
+  aws s3 cp "${S3_PREFIX%/}/${ZIP}"        "./${ZIP}"
+  aws s3 cp "${S3_PREFIX%/}/${ZIP}.sha512" "./${ZIP}.sha512"
+else
+  curl -fL --retry 5 --retry-delay 10 -o "$ZIP"          "${NIFI_MIRROR}/${NIFI_VERSION}/${ZIP}"
+  curl -fL --retry 5 --retry-delay 10 -o "${ZIP}.sha512" "${NIFI_MIRROR}/${NIFI_VERSION}/${ZIP}.sha512"
+fi
+
+echo "=== [6/9] Verify checksum ==="
+EXPECTED="$(tr -d '[:space:]' < "${ZIP}.sha512" | tr '[:upper:]' '[:lower:]' | sed 's/.*=//')"
+ACTUAL="$(sha512sum "$ZIP" | awk '{print $1}')"
+[ "$EXPECTED" = "$ACTUAL" ] || { echo "CHECKSUM MISMATCH - aborting"; exit 1; }
+echo "checksum ok"
+
+echo "=== [7/9] Install ==="
+unzip -q "$ZIP" -d /opt/nifi
+ln -sfn "$NIFI_HOME" "$NIFI_LINK"
+chown -R nifi:nifi /opt/nifi
+rm -rf /tmp/nifi-dl
+
+PROPS="${NIFI_HOME}/conf/nifi.properties"
+BOOT="${NIFI_HOME}/conf/bootstrap.conf"
+cp "$PROPS" "${PROPS}.orig"
+
+set_prop() {
+  if grep -q "^${1}=" "$PROPS"; then
+    sed -i "s|^${1}=.*|${1}=${2}|" "$PROPS"
+  else
+    echo "${1}=${2}" >> "$PROPS"
+  fi
+}
+
+echo "=== [8/9] Configure for DNS access ==="
+set_prop "nifi.web.https.host" "0.0.0.0"
+set_prop "nifi.web.https.port" "${HTTPS_PORT}"
+set_prop "nifi.web.http.host"  ""
+set_prop "nifi.web.http.port"  ""
+
+# The DNS name is what people type, so it must be first. The private IP and
+# the internal hostname are added for health checks and local testing.
+set_prop "nifi.web.proxy.host" \
+  "${DNS_NAME}:${HTTPS_PORT},${DNS_NAME},${PRIVATE_IP}:${HTTPS_PORT},${LOCAL_HOSTNAME}:${HTTPS_PORT},localhost:${HTTPS_PORT}"
+
+sed -i "s|^java.arg.2=.*|java.arg.2=-Xms${NIFI_HEAP}|" "$BOOT"
+sed -i "s|^java.arg.3=.*|java.arg.3=-Xmx${NIFI_HEAP}|" "$BOOT"
+
+cat > /etc/security/limits.d/90-nifi.conf <<'LIMITS'
+nifi soft nofile 50000
+nifi hard nofile 50000
+nifi soft nproc  10000
+nifi hard nproc  10000
+LIMITS
+echo "vm.swappiness=0" > /etc/sysctl.d/90-nifi.conf
+sysctl -p /etc/sysctl.d/90-nifi.conf || true
+
+if [ "$GEN_CERT" = "true" ]; then
+  echo "--- generating a certificate that names ${DNS_NAME} ---"
+  # Left to itself, NiFi makes a certificate naming this machine's own
+  # hostname. Browsers would then complain that the name does not match
+  # ${DNS_NAME}. This one carries the right name. It is still self-signed,
+  # so there is still one warning - but only one, and an honest one.
+  KS_PASS="$(head -c 24 /dev/urandom | base64 | tr -d '/+=')"
+  KEYTOOL="${JAVA_HOME}/bin/keytool"
+  CONF="${NIFI_HOME}/conf"
+  rm -f "${CONF}/keystore.p12" "${CONF}/truststore.p12"
+
+  "$KEYTOOL" -genkeypair -alias nifi-key \
+    -keyalg RSA -keysize 2048 -validity 825 \
+    -dname "CN=${DNS_NAME}, OU=NiFi, O=Internal" \
+    -ext "SAN=DNS:${DNS_NAME},DNS:${LOCAL_HOSTNAME},DNS:localhost,IP:${PRIVATE_IP}" \
+    -ext "EKU=serverAuth,clientAuth" \
+    -keystore "${CONF}/keystore.p12" -storetype PKCS12 \
+    -storepass "$KS_PASS" -keypass "$KS_PASS"
+
+  "$KEYTOOL" -exportcert -alias nifi-key -rfc \
+    -keystore "${CONF}/keystore.p12" -storetype PKCS12 -storepass "$KS_PASS" \
+    -file /tmp/nifi-cert.pem
+  "$KEYTOOL" -importcert -noprompt -alias nifi-cert -file /tmp/nifi-cert.pem \
+    -keystore "${CONF}/truststore.p12" -storetype PKCS12 -storepass "$KS_PASS"
+  rm -f /tmp/nifi-cert.pem
+
+  set_prop "nifi.security.keystore"       "./conf/keystore.p12"
+  set_prop "nifi.security.keystoreType"   "PKCS12"
+  set_prop "nifi.security.keystorePasswd" "$KS_PASS"
+  set_prop "nifi.security.keyPasswd"      "$KS_PASS"
+  set_prop "nifi.security.truststore"     "./conf/truststore.p12"
+  set_prop "nifi.security.truststoreType" "PKCS12"
+  set_prop "nifi.security.truststorePasswd" "$KS_PASS"
+
+  # Anyone who needs to trust this NiFi can fetch the certificate from here.
+  cp "${CONF}/keystore.p12" /dev/null 2>/dev/null || true
+  "$KEYTOOL" -exportcert -alias nifi-key -rfc \
+    -keystore "${CONF}/keystore.p12" -storetype PKCS12 -storepass "$KS_PASS" \
+    -file /opt/nifi/nifi-public-cert.pem
+  chmod 644 /opt/nifi/nifi-public-cert.pem
+  echo "public certificate left at /opt/nifi/nifi-public-cert.pem"
+fi
+
+chown -R nifi:nifi "$NIFI_HOME"
+runuser -u nifi -- env JAVA_HOME="$JAVA_HOME" \
+  "${NIFI_HOME}/bin/nifi.sh" set-single-user-credentials "$NIFI_USERNAME" "$NIFI_PASSWORD"
+
+echo "=== [9/9] systemd service ==="
+cat > /etc/systemd/system/nifi.service <<UNIT
+[Unit]
+Description=Apache NiFi ${NIFI_VERSION} (private / DNS access)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nifi
+Group=nifi
+Environment=JAVA_HOME=${JAVA_HOME}
+Environment=NIFI_HOME=${NIFI_LINK}
+ExecStart=${NIFI_LINK}/bin/nifi.sh run
+Restart=on-failure
+RestartSec=30
+TimeoutStartSec=600
+TimeoutStopSec=180
+LimitNOFILE=50000
+LimitNPROC=10000
+SuccessExitStatus=143
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now nifi.service
+
+touch /opt/nifi/.bootstrap-complete
+echo "=== BOOTSTRAP COMPLETE at $(date -Is) ==="
+echo "NiFi UI: https://${DNS_NAME}:${HTTPS_PORT}/nifi  (private address ${PRIVATE_IP})"
