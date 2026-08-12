@@ -8,24 +8,38 @@ Updated: August 2026 · Newest NiFi version: **2.11.0** (released 2026-08-03)
 
 ## Table of Contents
 
+**Background**
 1. [What is NiFi? (The big picture)](#1-what-is-nifi-the-big-picture)
 2. [The words you need to know](#2-the-words-you-need-to-know)
-3. [Latest facts you must know in 2026](#3-latest-facts-you-must-know-in-2026)
+3. [Version history: 1.28 → 2.11](#3-version-history-128--211-what-changed-and-why-it-matters)
+
+**Using NiFi**
+
 4. [Part 1 — Step-by-step: build your first flow](#4-part-1--step-by-step-build-your-first-flow)
 5. [Part 2 — The troubleshooting guide](#5-part-2--the-troubleshooting-guide)
+
+**Understanding an existing flow**
+
 6. [Part 3 — How to review a processor](#6-part-3--how-to-review-a-processor)
 7. [Part 4 — How to review a whole flow](#7-part-4--how-to-review-a-whole-flow)
 8. [Part 5 — How to decompose a flow (the 6-box method)](#8-part-5--how-to-decompose-a-flow-the-6-box-method)
+
+**Rebuilding it somewhere cheaper**
+
 9. [Part 6 — Rebuild it as a shell command-line flow](#9-part-6--rebuild-it-as-a-shell-command-line-flow)
 10. [Part 7 — Rebuild it as a Python flow](#10-part-7--rebuild-it-as-a-python-flow)
 11. [Part 8 — Rebuild it as AWS Lambda](#11-part-8--rebuild-it-as-aws-lambda)
 12. [Part 9 — Rebuild it with Ansible](#12-part-9--rebuild-it-with-ansible)
-13. [Part 10 — The big translation table](#13-part-10--the-big-translation-table)
-14. [Part 11 — What you lose when you leave NiFi](#14-part-11--what-you-lose-when-you-leave-nifi)
-15. [Part 12 — Safe migration plan](#15-part-12--safe-migration-plan)
-16. [Pros and cons of every option](#16-pros-and-cons-of-every-option)
-17. [Best practices checklist](#17-best-practices-checklist)
-18. [Cheat sheet](#18-cheat-sheet)
+13. [Part 10 — Going on-demand: cutting the bill with serverless](#13-part-10--going-on-demand-cutting-the-bill-with-serverless) ⭐ *cost reduction*
+
+**Reference**
+
+14. [Part 11 — The big translation table](#14-part-11--the-big-translation-table)
+15. [Part 12 — What you lose when you leave NiFi](#15-part-12--what-you-lose-when-you-leave-nifi)
+16. [Part 13 — Safe migration plan](#16-part-13--safe-migration-plan)
+17. [Pros and cons of every option](#17-pros-and-cons-of-every-option)
+18. [Best practices checklist](#18-best-practices-checklist)
+19. [Cheat sheet](#19-cheat-sheet)
 
 ---
 
@@ -53,7 +67,40 @@ NiFi is a free program from the Apache Software Foundation. It was originally bu
 - Reviewing a flow in a code review is painful, because the "code" is a giant JSON file made by dragging boxes.
 - Cloud services like AWS Lambda now do many of the same jobs for pennies.
 
-This guide teaches you **both**: how to run NiFi well, and how to safely tear a flow apart and rebuild it as a shell script, a Python script, a Lambda function, or an Ansible playbook.
+### How NiFi works under the hood (the background that explains everything else)
+
+You do not need to be a Java programmer, but understanding these five mechanics explains almost every behaviour, every error message, and every cost in the rest of this guide.
+
+**1. Data is a "FlowFile," and it lives in two places at once.**
+The *attributes* (the sticky notes: filename, size, your own labels) live in memory and in the **FlowFile repository**. The *content* (the actual bytes) lives in the **content repository** on disk. This split is why NiFi can move a 10 GB file around a canvas quickly — it is usually just passing a pointer, not copying bytes.
+
+**2. Content is copy-on-write, and stored in shared "claims."**
+Many small FlowFiles are packed into one file on disk called a *content claim*. When a processor changes content, NiFi writes a new version rather than editing in place. Two consequences you will meet in real life:
+- Disk usage can look far bigger than your data, because an old claim is kept as long as *any* FlowFile still references part of it.
+- The archive keeps copies after processing, which is why the content repository fills up if you never tune retention.
+
+**3. Every processor runs inside a transaction ("process session").**
+A processor gets FlowFiles, does work, and then either **commits** (changes are permanent, data moves to the next queue) or **rolls back** (as if nothing happened, data returns to the input queue). This is why NiFi almost never loses data mid-step, and why a badly written script processor that hangs will keep re-running the same batch forever.
+
+**4. Threads are scheduled, not dedicated.**
+NiFi has one shared pool of "timer-driven" threads. Each processor asks for a turn based on its **Run Schedule** and **Concurrent Tasks**. Nothing has its own permanent thread. This is why setting `0 sec` schedules and 20 concurrent tasks everywhere makes the whole canvas *slower*, not faster — everyone is fighting for the same pool.
+
+**5. Queues are on disk, bounded, and push back.**
+Every connection has a limit (by default **10,000 FlowFiles or 1 GB**). When it fills, the processor feeding it simply stops being scheduled. That is **back pressure**, and it is the single feature people most underestimate until they try to rebuild a flow without it.
+
+### And this is why NiFi costs money
+
+Because of points 1, 3, and 5, NiFi must be **running all the time** — it is holding queues, state, and repositories open. It cannot "wake up when a file arrives" the way a serverless function does. A NiFi cluster with zero data flowing still costs exactly the same as one running flat out.
+
+Hold on to that sentence. It is the entire argument of Part 10, where we turn an always-on bill into an on-demand one.
+
+### What this guide teaches
+
+Three things, in order:
+
+1. **Run NiFi well** — install it, build a flow, and fix it when it breaks (Parts 1–2).
+2. **Understand any existing flow** — review it, and break it into six simple boxes (Parts 3–5).
+3. **Rebuild it cheaper** — as a shell script, Python, Lambda, Ansible, NiFi Stateless, Fargate, or Step Functions, with a real cost model (Parts 6–13).
 
 ---
 
@@ -81,23 +128,145 @@ Two more that matter for troubleshooting:
 
 ---
 
-## 3. Latest facts you must know in 2026
+## 3. Version history: 1.28 → 2.11 (what changed and why it matters)
 
-These are the up-to-date facts. A lot of blog posts online are from the NiFi 1.x days and are now **wrong**.
+### 3.1 The short version
 
-| Fact | Details |
-|---|---|
-| Current version | **NiFi 2.11.0**, released **2026-08-03**. Only the newest release gets security fixes. |
-| Java version | **Java 21 is the minimum** for NiFi 2. Java 8 and 11 will not work. |
-| NiFi 1.x | Version **1.28.1** was the last of the 1.x line, and its end-of-support date was **2024-12-08**. If you are still on 1.x, you are running unpatched software. |
-| Templates | **Gone.** NiFi 2 removed XML templates. Use **flow definitions** (JSON) or a Git-backed registry instead. |
-| Variables / Variable Registry | **Gone.** Use **Parameter Contexts** instead. They support sensitive (secret) values; variables did not. |
-| NiFi Registry | **Deprecated** after a community vote in **February 2026**, and planned for removal in NiFi 3.0. The replacement is a **Git-based Flow Registry Client** — your flows live in a GitHub/GitLab repo. |
-| Jython / Python in `ExecuteScript` | **Removed** in NiFi 2. `ExecuteScript` now supports only **Groovy and Clojure**. |
-| New Python API | NiFi 2 lets you write **real processors in Python 3**. There are three base classes: `FlowFileTransform`, `RecordTransform`, and `FlowFileSource`. Note: you can only build **processors** this way — not controller services or reporting tasks. |
-| Repository encryption | Removed in NiFi 2. Use disk-level encryption instead. |
+NiFi split into two eras:
 
-> **Rule of thumb:** if a tutorial tells you to use a Template, a Variable, or a Jython script — it is out of date.
+- **The 1.x era (2015 → 2024)** ended at **1.28.1**. It ran on Java 8/11/17, used XML Templates, and had the old AngularJS user interface. Its end-of-support date was **2024-12-08**. It is now unpatched software.
+- **The 2.x era (Nov 2024 → today)** requires **Java 21**, has a rewritten Angular user interface, dropped a pile of old features, and added **Python-native processors**. The current release is **2.11.0**.
+
+**The release cadence is roughly every 6–10 weeks, and only the newest release is supported.** That is important for planning: NiFi is not a "install it and forget it for three years" product. If you cannot commit to upgrading a few times a year, that is itself an argument for moving simple flows to something serverless.
+
+### 3.2 Every release, with dates and support status
+
+| Version | Released | Supported until | Status | Headline |
+|---|---|---|---|---|
+| **1.19** | 2022-11-28 | 2023-02-09 | EOL | Last big Java 8-friendly line; added `PutIceberg`, `PutSnowflake`, `UpdateDatabaseTable` |
+| **1.20** | 2023-02-09 | 2023-04-07 | EOL | Deprecated processors removed; Java 11.0.16 became the recommended minimum |
+| **1.21** | 2023-04-07 | 2023-06-11 | EOL | Jetty 10 upgrade work; security hardening |
+| **1.22** | 2023-06-11 | 2023-07-25 | EOL | Minimum Java raised toward 17 in the 2.x line (NIFI-11717) |
+| **1.23** (→1.23.2) | 2023-07-25 | 2023-11-27 | EOL | Security fixes |
+| **1.24** | 2023-11-27 | 2024-01-29 | EOL | Maintenance |
+| **1.25** | 2024-01-29 | 2024-05-06 | EOL | Maintenance |
+| **1.26** | 2024-05-06 | 2024-07-07 | EOL | Maintenance |
+| **1.27** | 2024-07-07 | 2024-10-26 | EOL | Maintenance |
+| **1.28** (→1.28.1, 2024-11-19) | 2024-10-26 | **2024-12-08** | **EOL — last 1.x** | Final 1.x release. Jetty 9.4, Spring 5.3, and AngularJS 1.8 could not be upgraded, which is *why* 1.x had to end |
+| **2.0.0** | 2024-11-01 | 2024-12-23 | EOL | **The big break.** Java 21 minimum, new UI, Python extension API, Templates and Variable Registry removed |
+| **2.1.0** | 2024-12-23 | 2025-01-27 | EOL | First stabilisation round after 2.0 |
+| **2.2.0** | 2025-01-27 | 2025-03-11 | EOL | Feature + bug-fix release |
+| **2.3.0** | 2025-03-11 | 2025-05-01 | EOL | Feature + bug-fix release |
+| **2.4.0** | 2025-05-01 | 2025-07-22 | EOL | Feature + bug-fix release |
+| **2.5.0** | 2025-07-22 | 2025-09-21 | EOL | Feature + bug-fix release |
+| **2.6.0** | 2025-09-21 | 2025-12-09 | EOL | Feature + bug-fix release |
+| **2.7.0** (→2.7.2, 2025-12-17) | 2025-12-09 | 2026-02-13 | EOL | Feature + bug-fix release with two patch releases |
+| **2.8.0** | 2026-02-13 | 2026-04-10 | EOL | 170+ issues resolved |
+| **2.9.0** | 2026-04-10 | 2026-06-18 | EOL | 150+ issues. **Initial support for Connectors**; Google Cloud Storage support for Iceberg; `ConsumeKinesis` no longer depends on the KCL |
+| **2.10.0** | 2026-06-18 | 2026-08-03 | EOL | 160+ issues. **Connectors get a UI**; Registry Clients support branch creation; JSON reader/writer made more forgiving; content-repository tail-claim truncation (partial defragmentation); author+committer support for Git registry clients; Restricted-component authorization removed from the framework |
+| **2.11.0** | **2026-08-03** | **Active** | ✅ **Current** | 160+ issues resolved. The only release receiving security patches today |
+
+> **How to read this table:** the "Supported until" column is really "the date the next version came out." NiFi's community effectively supports **one** release at a time. Plan an upgrade every quarter, or accept that you are running with known CVEs.
+>
+> Full per-version detail lives at https://cwiki.apache.org/confluence/display/NIFI/Release+Notes and the matching **Migration Guidance** page. Always read Migration Guidance before jumping versions — it lists property renames and removed components for each hop.
+
+### 3.3 What actually broke between 1.28 and 2.x
+
+This is the list that bites people during an upgrade.
+
+| Thing | In 1.28 | In 2.x | What you must do |
+|---|---|---|---|
+| **Java** | 8 / 11 / 17 | **21 minimum** | Install JDK 21 first. Running 1.x on 21 is not officially supported for long periods, so do the JVM move as part of the upgrade, not before. |
+| **Templates (XML)** | Yes | **Removed** | Before upgrading, export every template as a **flow definition (JSON)**: right-click the process group → *Download flow definition*, or start version control. Do this while still on 1.28. |
+| **Variables / Variable Registry** | Yes | **Removed** | Convert every variable into a **Parameter Context** parameter. Sensitive values finally work properly here. |
+| **`flow.xml.gz`** | Primary | **`flow.json.gz` only** | 1.16+ already wrote `flow.json.gz`. On first 2.x start, the XML is converted; keep a backup. |
+| **Jython / Python in `ExecuteScript`** | Yes | **Removed** | Rewrite in **Groovy**, or convert to a real **Python processor** using the new API. |
+| **ECMAScript, Lua, Ruby scripting** | Yes | **Removed** | Same as above. |
+| **Repository encryption** | Yes | **Removed** | Use disk-level encryption (LUKS, EBS encryption) instead. |
+| **NiFi Registry** | The standard | **Deprecated (Feb 2026), removal planned in 3.0** | Migrate to a **Git-based Flow Registry Client** (GitHub / GitLab / plain Git). |
+| **The user interface** | AngularJS | Rewritten in modern Angular | Nothing to do, but retrain your users — menus moved. |
+| **Some processors** | Present | Removed / "ghosted" | NiFi 2 starts with **ghosted components** (a placeholder) so the app still boots. Search the canvas for ghosted boxes and replace them. |
+| **Toolkit commands** | Full set | Reduced | Check your automation scripts against the 2.x toolkit. |
+
+### 3.4 Step-by-step: upgrading from 1.28 to 2.11
+
+Follow this exactly. Do **not** upgrade in place on your only server.
+
+**Step 1 — Take a full backup (do this first, always).**
+
+```bash
+cd $NIFI_HOME
+./bin/nifi.sh stop
+tar czf ~/nifi-1.28-backup-$(date +%F).tgz conf/ database_repository/ \
+    flowfile_repository/ content_repository/ state/
+```
+
+**Step 2 — Export every flow to JSON while you still can.**
+
+For each top-level process group: right-click → **Download flow definition** → *with external services* if you want the controller services included. Commit these files to Git. **If you skip this step and you were using Templates, your flows are gone.**
+
+**Step 3 — Inventory what will break.**
+
+```bash
+# find templates (they will not survive)
+ls -la conf/templates/ 2>/dev/null
+
+# find variables in the old flow (grep the decompressed flow)
+zcat conf/flow.json.gz | jq -r '.. | .variables? // empty | keys[]' | sort -u
+
+# find scripting processors using a removed language
+zcat conf/flow.json.gz | jq -r '.. | objects
+  | select(.type? and (.type|test("ExecuteScript|InvokeScriptedProcessor")))
+  | "\(.name): \(.properties["Script Engine"] // "?")"'
+```
+
+Anything reporting `python`, `jython`, `ruby`, `lua`, or `ECMAScript` is work you must do **before** the upgrade.
+
+**Step 4 — Install Java 21 and a fresh NiFi 2.11.0 next to the old one.**
+
+```bash
+sudo apt-get install -y openjdk-21-jdk        # or your distro's package
+java -version                                  # must show 21.x
+
+cd /opt
+sudo unzip nifi-2.11.0-bin.zip                 # do NOT unzip over the 1.28 folder
+sudo mv nifi-2.11.0 nifi2
+```
+
+**Step 5 — Port your configuration by hand, not by copying files.**
+
+Do **not** copy `nifi.properties` from 1.28 into 2.11 — property names changed. Open both side by side and copy only the values you actually changed: ports, hostnames, repository paths, security settings, cluster settings.
+
+**Step 6 — Bring the flow across.**
+
+Copy `conf/flow.json.gz` from 1.28 into the 2.11 `conf/` directory, then start:
+
+```bash
+sudo /opt/nifi2/bin/nifi.sh start
+tail -f /opt/nifi2/logs/nifi-app.log
+```
+
+Watch for lines about **ghosted components** — those are processors that no longer exist.
+
+**Step 7 — Fix what the log complained about.**
+
+Open the canvas. Ghosted processors appear with a warning icon. Replace each one, then re-validate every processor (the ⚠️ icons tell you exactly what is missing).
+
+**Step 8 — Convert variables to Parameter Contexts.**
+
+For each variable you found in Step 3: create a Parameter Context, add the parameter, bind the context to the process group, and change `${myVar}` to `#{myVar}` in the properties. Note the different symbol — `${}` is Expression Language, `#{}` is a parameter.
+
+**Step 9 — Set up a Git Flow Registry Client** (since NiFi Registry is on its way out).
+
+Controller Settings → Registry Clients → Add → **GitHub / GitLab / Git**. Point it at a repo and a branch. From 2.10 onward you can create branches from the UI, which makes flow changes reviewable like code.
+
+**Step 10 — Run both in parallel for a week**, diff the outputs, then decommission 1.28.
+
+### 3.5 What are "Connectors" (new in 2.9/2.10)?
+
+NiFi 2.9 added the first support for **Connectors**, and 2.10 gave them a UI. The idea: package a whole versioned process group as a reusable, shareable unit that someone can drop in and configure without understanding the internals — closer to how Kafka Connect or a SaaS integration works. 2.9 also added a **troubleshooting mode** for Connectors.
+
+**Why you should care during a cost review:** Connectors make the "keep NiFi and standardise it" path more attractive, because they cut the amount of bespoke canvas work. If most of your flows could become five standard Connectors, keeping NiFi may cost less in human time than 40 hand-written Lambdas.
 
 ---
 
@@ -1530,7 +1699,530 @@ ansible-playbook vendorload.yml --limit etl01 -vv   # one host, verbose
 
 ---
 
-## 13. Part 10 — The big translation table
+## 13. Part 10 — Going on-demand: cutting the bill with serverless
+
+This part has one goal: **stop paying for a server that sits idle 23 hours a day.**
+
+### 13.1 Background: where does NiFi's cost actually come from?
+
+NiFi is an "always-on" system by design. It boots a Java virtual machine, loads hundreds of components, opens its repositories, and then waits. Even when zero data is flowing, you are paying for:
+
+| Cost item | Why it exists | Typical monthly cost (us-east-1, approximate) |
+|---|---|---|
+| Compute, 24×7 | The JVM must stay up to hold queues and state | `m5.xlarge` (4 vCPU / 16 GB) ≈ **$0.192/hr ≈ $140/mo** |
+| Cluster ×3 | Most production NiFi runs 3+ nodes for availability | ≈ **$420/mo** |
+| Block storage | Three repositories, ideally on separate volumes | 1.5 TB gp3 @ ~$0.08/GB-mo ≈ **$120/mo** |
+| Load balancer / networking | UI access, cluster traffic, NAT | ≈ **$25–60/mo** |
+| Backups & snapshots | Repos and config | ≈ **$20/mo** |
+| **Infrastructure subtotal** | | **≈ $600–650/mo ≈ $7,500/yr** |
+| **People time** | Upgrades every ~2 months, JVM tuning, disk alarms | Often **larger than the infrastructure bill** |
+
+> ⚠️ These are approximate list prices for illustration. Prices change and vary by region — always confirm with the AWS Pricing Calculator before quoting numbers to your boss.
+
+Now compare that with what the work actually is. A very common real workload:
+
+- 30 files per day
+- 200 MB each
+- Each file takes about 20 seconds of CPU to convert and upload
+
+That is **10 minutes of real compute per day** — about **0.7%** of the day. You are paying 24 hours for 10 minutes of work. **That gap is the entire opportunity.**
+
+### 13.2 The three cost models
+
+Understanding these three shapes tells you where the money goes.
+
+| Model | You pay for | Good when | Bad when |
+|---|---|---|---|
+| **Always-on** (NiFi on EC2, VMs) | Wall-clock time, whether busy or not | Utilisation above ~40%, continuous streaming | Bursty or nightly work |
+| **On-demand / scheduled** (Fargate task, EC2 start/stop, NiFi Stateless) | Only the minutes the job runs | Batch jobs of 5 minutes to several hours | Thousands of tiny events |
+| **Per-event serverless** (Lambda, Step Functions Express) | Per invocation + per GB-second | Many small, short units of work | Long single jobs (>15 min), constant firehose |
+
+**The trick that saves the most money is switching cost model, not switching tool.** Even keeping NiFi but running it on-demand can cut 80%+ of the bill.
+
+### 13.3 The on-demand ladder
+
+Climb this ladder one rung at a time. Each rung is cheaper and more on-demand than the last, but each also asks more of you. **You do not have to reach the top.**
+
+```
+Rung 0  NiFi cluster, 24×7                        ~$600/mo   ← where most teams start
+Rung 1  Shrink + consolidate NiFi                 ~$250/mo   ← 1 hour of work
+Rung 2  NiFi started/stopped on a schedule        ~$90/mo    ← 1 day of work
+Rung 3  NiFi Stateless in a scheduled container   ~$15/mo    ← keeps your flow definition!
+Rung 4  Fargate scheduled task running Python     ~$5/mo
+Rung 5  Lambda, event-driven                      ~$1/mo
+Rung 6  Step Functions + Lambda (multi-step)      ~$2/mo     ← best for branching flows
+```
+
+---
+
+### Rung 1 — Shrink and consolidate (do this today)
+
+**Step 1.** List every flow and its real throughput (Part 4 showed you how).
+**Step 2.** Move all the small flows onto one cluster instead of three separate ones.
+**Step 3.** Right-size the instance. Most NiFi boxes are wildly over-provisioned. Look at the heap graph in **System Diagnostics**; if you never exceed 3 GB, an 8 GB box is enough.
+**Step 4.** Cut provenance retention:
+
+```properties
+# conf/nifi.properties
+nifi.provenance.repository.max.storage.time=24 hours
+nifi.provenance.repository.max.storage.size=10 GB
+nifi.content.repository.archive.max.retention.period=6 hours
+nifi.content.repository.archive.max.usage.percentage=50%
+```
+
+**Step 5.** Move to Graviton (ARM) instances if your NAR set supports it, and to gp3 volumes instead of gp2.
+
+**Typical result: 40–60% off, with no architectural change.** Do this before anything else, because it is reversible and takes an afternoon.
+
+---
+
+### Rung 2 — Run NiFi only when you need it
+
+If a flow runs from 02:00 to 02:30 nightly, the cluster does not need to be awake at noon.
+
+**Step 1 — Make sure it is safe to stop.** NiFi must have empty queues. Add a "drain check" before shutdown.
+
+**Step 2 — Write a small Lambda that starts and stops the instance.**
+
+```python
+# nifi_power.py - EventBridge Scheduler calls this twice a day
+import boto3, os
+ec2 = boto3.client("ec2")
+IDS = os.environ["NIFI_INSTANCE_IDS"].split(",")
+
+def handler(event, _ctx):
+    action = event["action"]            # "start" or "stop"
+    if action == "start":
+        ec2.start_instances(InstanceIds=IDS)
+    else:
+        ec2.stop_instances(InstanceIds=IDS)
+    return {"action": action, "instances": IDS}
+```
+
+**Step 3 — Schedule it.**
+
+```bash
+aws scheduler create-schedule --name nifi-start \
+  --schedule-expression "cron(45 1 * * ? *)" \
+  --schedule-expression-timezone "America/New_York" \
+  --flexible-time-window '{"Mode":"OFF"}' \
+  --target '{"Arn":"arn:aws:lambda:us-east-1:111122223333:function:nifi-power",
+             "RoleArn":"arn:aws:iam::111122223333:role/SchedulerInvokeRole",
+             "Input":"{\"action\":\"start\"}"}'
+
+aws scheduler create-schedule --name nifi-stop \
+  --schedule-expression "cron(30 3 * * ? *)" \
+  --schedule-expression-timezone "America/New_York" \
+  --flexible-time-window '{"Mode":"OFF"}' \
+  --target '{"Arn":"arn:aws:lambda:us-east-1:111122223333:function:nifi-power",
+             "RoleArn":"arn:aws:iam::111122223333:role/SchedulerInvokeRole",
+             "Input":"{\"action\":\"stop\"}"}'
+```
+
+**Step 4 — Make NiFi start its own flow on boot** by leaving the processors in the *running* state when you stop the instance. NiFi restores state on startup.
+
+**What you save:** running 2 hours instead of 24 cuts compute by ~92%. **What you still pay:** EBS volumes are billed even when the instance is stopped. That is the ceiling on this rung.
+
+⚠️ **Do not do this on a cluster handling streaming data**, and never stop a node with a non-empty queue unless you have tested that it recovers.
+
+---
+
+### Rung 3 — NiFi Stateless: keep the flow, drop the server
+
+This is the most under-used option and often the best first serverless step, because **you keep your existing flow definition**.
+
+**What is NiFi Stateless?** A separate, tiny runtime (downloaded as `nifi-stateless-2.11.0-bin.zip`) that runs **one flow definition, once, in one process**, then exits. No canvas, no cluster, no repositories on disk — it keeps data in memory and either finishes the whole flow or fails the whole batch.
+
+| Full NiFi | NiFi Stateless |
+|---|---|
+| Always running | Runs once and exits |
+| Queues persisted to disk | In-memory, all-or-nothing |
+| UI, provenance, clustering | No UI — designed to be embedded/scheduled |
+| Gigabytes of heap | Small footprint, fast start |
+| Great for streaming | Great for scheduled batch |
+
+**Step-by-step:**
+
+**Step 1.** In the NiFi UI, put the flow you want in its own **Process Group** and make sure it starts from a source processor and ends at a sink (no dangling connections).
+
+**Step 2.** Version the group with your Git Flow Registry Client, or export it: right-click → **Download flow definition**.
+
+**Step 3.** Write a stateless properties file:
+
+```properties
+# vendorload.properties
+nifi.stateless.flow.definition.file=/opt/flows/vendorload.json
+nifi.stateless.parameter.VendorLoad:S3_BUCKET=my-bucket
+nifi.stateless.parameter.VendorLoad:SFTP_HOST=sftp.vendor.com
+nifi.stateless.extension.directory=/opt/nifi-stateless/extensions
+nifi.stateless.working.directory=/tmp/stateless
+```
+
+**Step 4.** Run it locally to prove it works:
+
+```bash
+/opt/nifi-stateless/bin/nifi-stateless.sh RunFromRegistry Once \
+  --flowFile /opt/flows/vendorload.json \
+  --propertiesFile /opt/flows/vendorload.properties
+echo "exit code: $?"      # 0 = the whole flow succeeded
+```
+
+**Step 5.** Put it in a container:
+
+```dockerfile
+FROM eclipse-temurin:21-jre
+COPY nifi-stateless/ /opt/nifi-stateless/
+COPY flows/ /opt/flows/
+ENTRYPOINT ["/opt/nifi-stateless/bin/nifi-stateless.sh", "RunFromRegistry", "Once", \
+            "--flowFile", "/opt/flows/vendorload.json", \
+            "--propertiesFile", "/opt/flows/vendorload.properties"]
+```
+
+**Step 6.** Schedule the container as an **ECS Fargate task** triggered by EventBridge Scheduler (see Rung 4 for the exact commands — it is the same mechanism).
+
+**Why this rung is special:** your data team keeps designing flows on a canvas, and operations pays only for the minutes the flow runs. It is often the politically easiest migration, because nobody has to give up NiFi.
+
+**Limits:** no back pressure across a restart, no provenance UI, and the whole batch fails together. Keep batches modest.
+
+---
+
+### Rung 4 — Fargate scheduled task (containers, on demand)
+
+Best when the job takes longer than Lambda's 15 minutes, needs more than 10 GB of temp space, or has heavy dependencies.
+
+**Step 1 — Containerise your Python script:**
+
+```dockerfile
+FROM python:3.13-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY vendorload.py .
+ENTRYPOINT ["python", "vendorload.py"]
+```
+
+**Step 2 — Push it to ECR:**
+
+```bash
+aws ecr create-repository --repository-name vendorload
+aws ecr get-login-password | docker login --username AWS --password-stdin \
+  111122223333.dkr.ecr.us-east-1.amazonaws.com
+docker build -t vendorload . --platform linux/arm64
+docker tag vendorload:latest 111122223333.dkr.ecr.us-east-1.amazonaws.com/vendorload:latest
+docker push 111122223333.dkr.ecr.us-east-1.amazonaws.com/vendorload:latest
+```
+
+**Step 3 — Register a task definition** with 1 vCPU / 2 GB, ARM64, and a task role that can read/write S3.
+
+**Step 4 — Schedule it** with EventBridge Scheduler targeting `ecs:RunTask`:
+
+```bash
+aws scheduler create-schedule --name vendorload-nightly \
+  --schedule-expression "cron(0 2 * * ? *)" \
+  --schedule-expression-timezone "America/New_York" \
+  --flexible-time-window '{"Mode":"FLEXIBLE","MaximumWindowInMinutes":15}' \
+  --target '{
+     "Arn":"arn:aws:ecs:us-east-1:111122223333:cluster/etl",
+     "RoleArn":"arn:aws:iam::111122223333:role/SchedulerEcsRole",
+     "EcsParameters":{
+       "TaskDefinitionArn":"arn:aws:ecs:us-east-1:111122223333:task-definition/vendorload:1",
+       "LaunchType":"FARGATE",
+       "NetworkConfiguration":{"awsvpcConfiguration":{
+          "Subnets":["subnet-abc"],"AssignPublicIp":"ENABLED"}}}}'
+```
+
+> 💡 `FLEXIBLE` time windows let AWS spread your job over 15 minutes. It costs nothing and reduces the "everything fires at 02:00" stampede.
+
+**Cost:** Fargate bills roughly **$0.04048 per vCPU-hour and $0.004445 per GB-hour**. A 1 vCPU / 2 GB task running 10 minutes a night ≈ **$0.25/month**. Use **Fargate Spot** for non-urgent batch and cut that by up to 70%.
+
+---
+
+### Rung 5 — Lambda (already covered in Part 8)
+
+Use it when the trigger is an event and each unit of work is short. See Part 8 for the full handler, SAM template, traps, and limits.
+
+**The one cost rule to remember:** Lambda charges **per GB-second**, so *memory × time*. Raising memory also raises CPU, which often makes the function finish so much faster that the bill goes **down**. Always test 512 MB / 1024 MB / 2048 MB and compare `Billed Duration` in the logs — this is the single easiest saving in serverless.
+
+---
+
+### Rung 6 — AWS Step Functions: the real replacement for a NiFi canvas
+
+This is the closest thing to NiFi's canvas in the serverless world, and the right answer whenever a flow has **branches, joins, retries, waits, or human approval**.
+
+#### What Step Functions gives you that a single Lambda does not
+
+| NiFi feature | Step Functions equivalent |
+|---|---|
+| The canvas | Workflow Studio — a real drag-and-drop graph |
+| Connections / relationships | Transitions between states |
+| `RouteOnAttribute` | `Choice` state |
+| `RetryFlowFile` + penalization | Built-in `Retry` with `IntervalSeconds` and `BackoffRate` |
+| `failure` relationship | `Catch` block routing to an error state |
+| Provenance / lineage | Execution history — every input and output of every step, replayable |
+| Splitting and parallel work | `Map` state (and **Distributed Map** for up to ~10,000 parallel child runs over an S3 listing) |
+| Back pressure | `MaxConcurrency` on the Map state |
+| `Wait` processor | `Wait` state (seconds, or until a timestamp) |
+| Long-running jobs | Calls to Fargate/Batch/Glue, so the 15-minute Lambda limit stops mattering |
+
+#### Two flavours — pick the right one or you will overpay
+
+| | **Standard** | **Express** |
+|---|---|---|
+| Max duration | 1 year | 5 minutes |
+| Billing | **$0.025 per 1,000 state transitions** (first 4,000/month free) | Per request + duration; far cheaper at high volume |
+| Execution history | Full, visible in the console | Sent to CloudWatch Logs |
+| Guarantee | Exactly-once | At-least-once |
+| Use for | Nightly batch, long jobs, human approval | High-volume event streams (thousands/second) |
+
+**Rule:** low volume + long running → **Standard**. High volume + short → **Express**.
+
+#### Step-by-step: convert the vendor flow to a state machine
+
+**Step 1 — Take your 6-box decomposition** (Part 5). Each box becomes one state.
+
+**Step 2 — Split your Lambda into small, single-purpose functions.** This is the key design move: `fetch`, `validate`, `transform`, `load`, `notify`. Small functions are easier to retry independently — you do not re-download a 200 MB file just because the database insert failed.
+
+**Step 3 — Write the state machine** (Amazon States Language):
+
+```json
+{
+  "Comment": "Vendor CSV load - replaces the NiFi flow",
+  "StartAt": "ListNewFiles",
+  "States": {
+    "ListNewFiles": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:111122223333:function:vendor-list",
+      "ResultPath": "$.files",
+      "Retry": [{
+        "ErrorEquals": ["States.TaskFailed"],
+        "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2.0
+      }],
+      "Next": "AnyFiles?"
+    },
+
+    "AnyFiles?": {
+      "Type": "Choice",
+      "Choices": [{ "Variable": "$.files[0]", "IsPresent": true, "Next": "ProcessEachFile" }],
+      "Default": "NothingToDo"
+    },
+
+    "ProcessEachFile": {
+      "Type": "Map",
+      "ItemsPath": "$.files",
+      "MaxConcurrency": 5,
+      "Comment": "MaxConcurrency is your back pressure - protects the database",
+      "ItemProcessor": {
+        "ProcessorConfig": { "Mode": "INLINE" },
+        "StartAt": "Validate",
+        "States": {
+          "Validate": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:us-east-1:111122223333:function:vendor-validate",
+            "Catch": [{
+              "ErrorEquals": ["ValidationError"],
+              "ResultPath": "$.error",
+              "Next": "Quarantine"
+            }],
+            "Next": "Transform"
+          },
+          "Transform": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:us-east-1:111122223333:function:vendor-transform",
+            "Retry": [{
+              "ErrorEquals": ["States.ALL"],
+              "IntervalSeconds": 2, "MaxAttempts": 4, "BackoffRate": 2.0
+            }],
+            "Next": "Load"
+          },
+          "Load": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:us-east-1:111122223333:function:vendor-load",
+            "End": true
+          },
+          "Quarantine": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:us-east-1:111122223333:function:vendor-quarantine",
+            "End": true
+          }
+        }
+      },
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "AlertOnCall" }],
+      "Next": "Summarise"
+    },
+
+    "Summarise": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:111122223333:function:vendor-summary",
+      "End": true
+    },
+
+    "AlertOnCall": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:us-east-1:111122223333:data-oncall",
+        "Message.$": "States.Format('vendorload failed: {}', $.error.Cause)"
+      },
+      "Next": "Failed"
+    },
+
+    "Failed": { "Type": "Fail", "Error": "VendorLoadFailed" },
+    "NothingToDo": { "Type": "Succeed" }
+  }
+}
+```
+
+**Read that JSON next to your NiFi canvas.** `Retry` is `RetryFlowFile`. `Catch` is the `failure` relationship. `Choice` is `RouteOnAttribute`. `Map` with `MaxConcurrency` is back pressure. It is the same six boxes.
+
+**Step 4 — Trigger it** with EventBridge Scheduler (nightly) or an EventBridge rule on S3 events (per file):
+
+```bash
+aws scheduler create-schedule --name vendorload-sfn \
+  --schedule-expression "cron(0 2 * * ? *)" \
+  --schedule-expression-timezone "America/New_York" \
+  --flexible-time-window '{"Mode":"OFF"}' \
+  --target '{"Arn":"arn:aws:states:us-east-1:111122223333:stateMachine:vendorload",
+             "RoleArn":"arn:aws:iam::111122223333:role/SchedulerSfnRole"}'
+```
+
+**Step 5 — For very large fan-out, use Distributed Map.** Point it straight at an S3 prefix and it will list the objects and fan out for you, without a Lambda doing the listing:
+
+```json
+"ProcessEachFile": {
+  "Type": "Map",
+  "ItemReader": {
+    "Resource": "arn:aws:states:::s3:listObjectsV2",
+    "Parameters": { "Bucket": "vendor-incoming", "Prefix": "daily/" }
+  },
+  "ItemProcessor": { "ProcessorConfig": { "Mode": "DISTRIBUTED", "ExecutionType": "EXPRESS" } },
+  "MaxConcurrency": 100,
+  "ToleratedFailurePercentage": 5
+}
+```
+
+`ToleratedFailurePercentage` is something NiFi has no direct equivalent for: "if under 5% of files fail, still call the run a success." Very useful for messy vendor data.
+
+**Step 6 — Watch it run.** The console draws the graph, colours each state green or red, and lets you click any state to see its exact input and output. **This is your provenance replacement, and for many teams it is better than NiFi's**, because you can re-drive a failed execution from the point of failure.
+
+**Cost check:** 30 files/night × ~6 transitions = ~5,400 transitions/month. Minus the 4,000 free = 1,400 billable × $0.025/1,000 ≈ **$0.04/month**.
+
+---
+
+### 13.4 Other options worth knowing
+
+| Option | What it is | Use when | Rough cost shape |
+|---|---|---|---|
+| **AWS Batch** | Runs containers on managed compute, queued | Jobs of hours; heavy CPU/RAM | Pay for underlying EC2/Fargate; Spot-friendly |
+| **AWS Glue** | Managed Spark ETL + a crawler/catalog | Big data transforms, Parquet/Iceberg at TB scale | Per DPU-hour; expensive for small jobs |
+| **Amazon MWAA (managed Airflow)** | Scheduler with a DAG UI | Many interdependent jobs, complex dependencies | Always-on environment fee — **not** cheap for a handful of flows |
+| **Amazon AppFlow** | Point-and-click SaaS connectors | Salesforce/Slack/Zendesk → S3, no code | Per flow run + per GB |
+| **Kinesis Firehose** | Managed stream → S3/Redshift/OpenSearch | Continuous ingestion with buffering | Per GB ingested; very cheap, no servers |
+| **EventBridge Pipes** | Point-to-point source→filter→enrich→target | Simple "queue to queue with a transform" | Per event; replaces small NiFi flows entirely |
+| **dbt + a warehouse** | Transformations run inside Snowflake/BigQuery/Redshift | The work is SQL on data already in the warehouse | Warehouse compute only |
+| **GitHub Actions / GitLab CI scheduled job** | A cron runner you already pay for | Tiny nightly jobs, internal tooling | Often free within existing minutes |
+| **Cloudflare Workers / Azure Functions / Google Cloud Functions** | Same idea as Lambda, other clouds | Not on AWS | Per request + duration |
+
+> 🔎 **Do not skip EventBridge Pipes.** A surprising number of NiFi flows are literally "read from a queue, reshape the JSON, write to another queue." Pipes does that with no code and no servers at all.
+
+### 13.5 The cost worksheet (fill this in before you decide)
+
+**Step 1 — Measure your real workload.** From NiFi's status history over 30 days:
+
+| Measure | Your number |
+|---|---|
+| Total data per day (GB) | |
+| Number of work items (files/messages) per day | |
+| Longest single item processing time (seconds) | |
+| Peak items in one burst | |
+| Hours per day the flow is actually active | |
+| Does anything need to run continuously? (yes/no) | |
+
+**Step 2 — Compute today's cost.**
+
+```
+Current = (instances × hourly rate × 730) + (GB storage × $0.08) + LB + backups + (eng hours × rate)
+```
+
+**Step 3 — Estimate the serverless cost.**
+
+```
+Lambda        = invocations × $0.0000002
+              + (invocations × seconds × memory_GB × $0.0000166667)     # ~20% less on arm64
+Step Functions Standard = (transitions - 4,000 free) × $0.000025
+Fargate       = vCPU-hours × $0.04048 + GB-hours × $0.004445
+EventBridge Scheduler   = first 14M invocations/month free, then $1.00 per million
+S3            = GB stored × $0.023 + requests
+```
+
+**Step 4 — Worked example (the 30-files-a-night job):**
+
+| Line item | Calculation | Monthly |
+|---|---|---|
+| Lambda invocations | 900 × $0.0000002 | $0.0002 |
+| Lambda compute | 900 × 20 s × 1 GB × $0.0000166667 | $0.30 |
+| Step Functions | (5,400 − 4,000) × $0.000025 | $0.04 |
+| S3 storage (180 GB) | 180 × $0.023 | $4.14 |
+| EventBridge Scheduler | 30/month | $0.00 |
+| **Total** | | **≈ $4.50/mo** |
+| **Was** (3-node NiFi) | | **≈ $600/mo** |
+| **Saving** | | **≈ 99%, about $7,100/year** |
+
+**Step 5 — Subtract the honest costs of moving.** Engineering time to rewrite and shadow-run (2–6 weeks for a mid-size estate), plus the loss of the provenance UI, plus retraining. If your flows are simple and numerous, this pays back in months. If you have five gnarly streaming flows, it may never pay back — **and that is a fine answer.**
+
+### 13.6 Cost traps in serverless (things that quietly cost more than NiFi)
+
+| Trap | What happens | Prevention |
+|---|---|---|
+| **NAT Gateway** | Lambda in a VPC needs NAT to reach the internet: ~$32/mo **plus** per-GB data processing | Use VPC endpoints for S3/DynamoDB; keep Lambdas out of the VPC when possible |
+| **Chatty Step Functions** | Every transition costs; a per-record state machine explodes | Batch records; use Express for high volume |
+| **Over-provisioned Lambda memory** | You pay memory × time | Test 512/1024/2048 MB and compare `Billed Duration` |
+| **CloudWatch Logs** | Verbose DEBUG logging can cost more than the compute | Set a retention period (e.g. 14 days); log at INFO |
+| **Runaway retries** | A poison message retried forever | Always configure a DLQ and `MaxAttempts` |
+| **Cross-AZ / cross-region transfer** | Silent per-GB charges | Keep buckets, functions, and databases in one region/AZ |
+| **MWAA or Glue "just for scheduling"** | Always-on environment fees | Use EventBridge Scheduler — it is effectively free at this scale |
+| **Forgetting the old NiFi** | You now pay for both | Put a calendar reminder to decommission after 30 clean days |
+
+### 13.7 Choosing your rung: a decision guide
+
+```
+Do you have a hard requirement for full data lineage / audit UI?
+├── YES → Stay on NiFi. Climb to Rung 1 or 2 for savings.
+└── NO
+    │
+    Is data continuous (Kafka, constant firehose)?
+    ├── YES → NiFi, Kinesis Firehose, or Flink. Do NOT go to cron.
+    └── NO
+        │
+        Do your teams need to keep designing flows on a canvas?
+        ├── YES → Rung 3: NiFi Stateless on scheduled Fargate
+        └── NO
+            │
+            Does one work item take more than 15 minutes?
+            ├── YES → Rung 4: Fargate/Batch, orchestrated by Step Functions
+            └── NO
+                │
+                Does the flow branch, join, retry, or wait?
+                ├── YES → Rung 6: Step Functions + small Lambdas
+                └── NO  → Rung 5: one Lambda
+```
+
+### 13.8 A 30-day plan to cut the bill
+
+| Days | Action | Expected saving |
+|---|---|---|
+| 1–2 | Right-size instances, cut provenance/archive retention, move gp2 → gp3 | 30–50% |
+| 3–5 | Inventory and score every flow (Parts 3 and 4) | — |
+| 6–10 | Move the 3 easiest flows to Lambda or Fargate; shadow-run | — |
+| 11–15 | Convert the biggest branching flow to Step Functions | — |
+| 16–20 | Move remaining canvas-dependent flows to NiFi Stateless on Fargate | — |
+| 21–25 | Put the shrunken NiFi on a start/stop schedule | 80%+ of remaining compute |
+| 26–30 | Verify diffs, set CloudWatch alarms and a budget alert, decommission spare nodes | Final |
+
+**Set an AWS Budget alert on day one.** Serverless bills are small but they are also easy to ignore until something loops.
+
+---
+
+## 14. Part 11 — The big translation table
 
 Print this. It is the fastest way to convert a canvas into code.
 
@@ -1608,7 +2300,7 @@ Print this. It is the fastest way to convert a canvas into code.
 
 ---
 
-## 14. Part 11 — What you lose when you leave NiFi
+## 15. Part 12 — What you lose when you leave NiFi
 
 Be honest about this list before you migrate. Each row is real work.
 
@@ -1633,7 +2325,7 @@ Be honest about this list before you migrate. Each row is real work.
 
 ---
 
-## 15. Part 12 — Safe migration plan
+## 16. Part 13 — Safe migration plan
 
 Never do a big-bang switch. Follow these nine steps.
 
@@ -1668,56 +2360,85 @@ Never do a big-bang switch. Follow these nine steps.
 
 ---
 
-## 16. Pros and cons of every option
+## 17. Pros and cons of every option
 
 ### Side-by-side comparison
 
-| | **NiFi** | **Shell** | **Python** | **Lambda** | **Ansible** |
-|---|---|---|---|---|---|
-| Setup effort | High | None | Low | Medium | Low |
-| Cost at low volume | High ($$$ idle server) | ~Free | ~Free | Pennies | ~Free |
-| Cost at high volume | Good | N/A | Good | Can get expensive | Poor |
-| Visual UI | ⭐ Excellent | None | None | Partial (Step Functions) | AWX gives one |
-| Unit testing | Very hard | Hard | ⭐ Easy | Easy | Medium |
-| Code review / Git diff | Painful (JSON blob) | ⭐ Easy | ⭐ Easy | ⭐ Easy | Easy |
-| Error handling | ⭐ Built in | Manual | Manual (good libs) | ⭐ Built in (DLQ, retries) | Built in (`retries:`) |
-| Data lineage / audit | ⭐ Best in class | Logs only | Logs only | CloudWatch/X-Ray | Logs only |
-| Back pressure | ⭐ Built in | Manual | Manual | Via SQS | None |
-| Streaming/continuous | ⭐ Excellent | Poor | OK | OK (Kinesis/SQS) | ✗ No |
-| Scheduled batch | Good | ⭐ Excellent | ⭐ Excellent | ⭐ Excellent | ⭐ Excellent |
-| Long jobs (> 15 min) | ✅ | ✅ | ✅ | ❌ hard limit | ✅ |
-| Fan-out to many servers | OK | Poor | Medium | N/A | ⭐ Excellent |
-| Non-engineers can maintain | ⭐ Yes | No | No | No | Somewhat |
-| Vendor lock-in | None | None | None | ⭐ AWS only | None |
-| Big-file handling | ⭐ Excellent | ⭐ Excellent | Good | Poor (limits) | Poor |
+| | **NiFi 24×7** | **NiFi Stateless (scheduled)** | **Shell** | **Python** | **Lambda** | **Step Functions** | **Fargate task** | **Ansible** |
+|---|---|---|---|---|---|---|---|---|
+| Setup effort | High | Medium | None | Low | Medium | Medium | Medium | Low |
+| Cost at low volume | ❌ High (idle server) | ⭐ Very low | ~Free | ~Free | ⭐ Pennies | ⭐ Pennies | ⭐ Cents | ~Free |
+| Cost at high volume | Good | Good | N/A | Good | Can get expensive | Use Express | Good | Poor |
+| Pay only when running | ❌ No | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes |
+| Visual UI | ⭐ Excellent | Design in NiFi, run headless | None | None | None | ⭐ Workflow Studio | None | AWX gives one |
+| Unit testing | Very hard | Hard | Hard | ⭐ Easy | Easy | Easy (per Lambda) | Easy | Medium |
+| Code review / Git diff | Painful (JSON blob) | Painful (JSON blob) | ⭐ Easy | ⭐ Easy | ⭐ Easy | Readable (ASL JSON) | ⭐ Easy | Easy |
+| Error handling | ⭐ Built in | All-or-nothing batch | Manual | Manual (good libs) | ⭐ DLQ + retries | ⭐ Retry/Catch per step | Manual | Built in (`retries:`) |
+| Lineage / audit | ⭐ Best in class | Logs only | Logs only | Logs only | CloudWatch/X-Ray | ⭐ Full execution history | Logs only | Logs only |
+| Back pressure | ⭐ Built in | Limited | Manual | Manual | Via SQS | `Map` MaxConcurrency | Manual | None |
+| Streaming/continuous | ⭐ Excellent | ✗ No | Poor | OK | OK (Kinesis/SQS) | Express only | Possible | ✗ No |
+| Scheduled batch | Good | ⭐ Excellent | ⭐ Excellent | ⭐ Excellent | ⭐ Excellent | ⭐ Excellent | ⭐ Excellent | ⭐ Excellent |
+| Long jobs (>15 min) | ✅ | ✅ | ✅ | ✅ | ❌ hard limit | ✅ (calls Fargate/Batch) | ✅ | ✅ |
+| Branching / joins | ⭐ Yes | ⭐ Yes | Awkward | Yes | Awkward | ⭐ Native | Manual | Limited |
+| Fan-out to many servers | OK | Poor | Poor | Medium | N/A | Distributed Map | Scale task count | ⭐ Excellent |
+| Non-engineers can maintain | ⭐ Yes | Partly (canvas design) | No | No | No | Somewhat | No | Somewhat |
+| Vendor lock-in | None | None | None | None | AWS | AWS | AWS/containers | None |
+| Big-file handling | ⭐ Excellent | Good | ⭐ Excellent | Good | Poor (limits) | Delegate to Fargate | ⭐ Excellent | Poor |
+
+### Cost shape at a glance
+
+| Approach | What you pay for | Order-of-magnitude for a nightly 30-file job |
+|---|---|---|
+| NiFi 3-node cluster | Instances + EBS + LB, 24×7 | **~$600/mo** |
+| NiFi, right-sized single node | Same, but smaller | ~$180/mo |
+| NiFi, started/stopped nightly | 2 hours compute + full EBS | ~$90/mo |
+| NiFi Stateless on Fargate | Minutes of vCPU/GB | ~$1–15/mo |
+| Fargate scheduled Python task | Minutes of vCPU/GB | ~$0.25/mo |
+| Lambda | Invocations + GB-seconds | ~$0.30/mo |
+| Step Functions Standard + Lambda | Transitions + GB-seconds | ~$0.35/mo |
+
+*(Illustrative us-east-1 list prices; confirm with the AWS Pricing Calculator.)*
 
 ### Quick decision tree
 
 ```
 Is data continuous/streaming (Kafka, constant firehose)?
-├── YES ──▶ Keep NiFi (or move to Flink / Kafka Connect)
+├── YES ──▶ Keep NiFi (or move to Kinesis Firehose / Flink / Kafka Connect)
+│            → Still cut cost with Rung 1: right-size + trim retention
 └── NO
     │
-    Does one unit of work take more than 15 minutes?
-    ├── YES ──▶ Python on a server (cron/systemd) or AWS Batch / ECS / Step Functions
+    Do you have a hard audit/lineage requirement that needs the provenance UI?
+    ├── YES ──▶ Keep NiFi, climb to Rung 1–2 (right-size, schedule start/stop)
     └── NO
         │
-        Is the trigger an event (file lands, message arrives)?
-        ├── YES ──▶ AWS Lambda
-        └── NO (it's a schedule)
+        Must your team keep designing on a canvas?
+        ├── YES ──▶ NiFi Stateless in a scheduled Fargate task (Rung 3)
+        └── NO
             │
-            Does it need to run across many servers?
-            ├── YES ──▶ Ansible (calling a Python script)
+            Does one unit of work take more than 15 minutes?
+            ├── YES ──▶ Fargate / AWS Batch, orchestrated by Step Functions (Rung 4)
             └── NO
                 │
-                Is there any real logic, parsing, or API calls?
-                ├── YES ──▶ Python + systemd timer
-                └── NO  ──▶ Shell script + cron
+                Does the flow branch, join, wait, or need per-step retries?
+                ├── YES ──▶ Step Functions + small Lambdas (Rung 6)
+                └── NO
+                    │
+                    Is the trigger an event (file lands, message arrives)?
+                    ├── YES ──▶ One Lambda (Rung 5)
+                    └── NO (it's a schedule)
+                        │
+                        Does it need to run across many servers?
+                        ├── YES ──▶ Ansible calling a Python script
+                        └── NO
+                            │
+                            Any real logic, parsing, or API calls?
+                            ├── YES ──▶ Python + systemd timer
+                            └── NO  ──▶ Shell script + cron
 ```
 
 ---
 
-## 17. Best practices checklist
+## 18. Best practices checklist
 
 ### If you keep NiFi
 
@@ -1758,9 +2479,22 @@ Is data continuous/streaming (Kafka, constant firehose)?
 - ❌ Deleting NiFi flows before 30 clean days on the new system.
 - ❌ Forgetting the failure paths because "they never fire." They fire.
 
+### If your goal is cutting cost
+
+- ✅ **Measure before you migrate.** Pull 30 days of status history. Most "big" flows turn out to be tiny.
+- ✅ **Change the cost model before changing the tool.** Right-sizing and start/stop schedules get 50–90% with almost no risk.
+- ✅ **Tune Lambda memory by experiment**, not by guess — compare `Billed Duration` at 512 / 1024 / 2048 MB.
+- ✅ Prefer **arm64 / Graviton** everywhere it works (Lambda, Fargate, EC2): roughly 20% cheaper for the same work.
+- ✅ Use **Fargate Spot** for non-urgent batch.
+- ✅ Set **CloudWatch Logs retention** (14–30 days). Unbounded logs quietly become the biggest line item on small workloads.
+- ✅ Keep Lambdas **out of a VPC** unless they must reach private resources — a NAT Gateway can cost more than the compute.
+- ✅ Set an **AWS Budget alert** on day one of the migration.
+- ✅ **Decommission the old system.** The most common migration failure is paying for both forever.
+- ❌ Don't move to MWAA or Glue purely for scheduling — both carry always-on or per-DPU costs. EventBridge Scheduler is effectively free at this scale.
+
 ---
 
-## 18. Cheat sheet
+## 19. Cheat sheet
 
 ### NiFi operations
 
@@ -1842,3 +2576,7 @@ exec 9>/var/lock/myjob.lock; flock -n 9 || exit 0
 The most important idea in this whole guide is the **6-box decomposition**. NiFi, shell, Python, Lambda, and Ansible are all just different clothing on the same six boxes: *trigger, source, transform, route, sink, guardrails.*
 
 Once you can look at a canvas and say out loud, in six plain sentences, what it does — the tool you use to rebuild it stops being scary. It is just a choice.
+
+The second most important idea is about **cost shape**. NiFi's bill is set by wall-clock time; a serverless bill is set by work actually done. For a flow that runs ten minutes a night, those two numbers differ by about a hundred times. You do not always have to leave NiFi to fix that — right-sizing, scheduled start/stop, and NiFi Stateless all move you toward on-demand while keeping the canvas your team already knows.
+
+Start at Rung 1 this week. Measure, then climb only as far as the savings justify.
