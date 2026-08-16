@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webapp
+  namespace: ${namespace}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webapp
+  template:
+    metadata:
+      labels:
+        app: webapp
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: webapp
+          image: ${image_python}
+          # No Docker build needed: we mount the code from a ConfigMap and
+          # install two libraries at startup. Great for a lab, not for prod.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              pip install --quiet --no-cache-dir --target /tmp/libs flask kafka-python-ng
+              export PYTHONPATH=/tmp/libs
+              exec python /app/app.py
+          env:
+            - name: KAFKA_BOOTSTRAP
+              value: "${kafka_bootstrap}"
+            - name: KAFKA_TOPIC
+              value: "${kafka_topic}"
+            - name: HOME
+              value: "/tmp"
+          ports:
+            - containerPort: 8000
+              name: http
+          volumeMounts:
+            - name: code
+              mountPath: /app
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            failureThreshold: 40
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            periodSeconds: 15
+      volumes:
+        - name: code
+          configMap:
+            name: webapp-code
+        - name: tmp
+          emptyDir: {}

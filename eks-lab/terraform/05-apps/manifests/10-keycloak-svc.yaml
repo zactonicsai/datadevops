@@ -1,0 +1,14 @@
+# Keycloak — the ID card office. Hands out signed tokens so other apps
+# never have to store passwords.
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: ${namespace}
+spec:
+  selector:
+    app: keycloak
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

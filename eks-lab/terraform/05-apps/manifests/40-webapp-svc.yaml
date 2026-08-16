@@ -1,0 +1,13 @@
+# The web app — a text box that publishes what you type to Kafka.
+apiVersion: v1
+kind: Service
+metadata:
+  name: webapp
+  namespace: ${namespace}
+spec:
+  selector:
+    app: webapp
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000

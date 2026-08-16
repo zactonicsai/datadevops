@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: nifi
+  namespace: ${namespace}
+spec:
+  serviceName: nifi
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nifi
+  template:
+    metadata:
+      labels:
+        app: nifi
+    spec:
+      # THIS is the line that gives NiFi its AWS permissions. The service
+      # account is annotated with an IAM role, so the pod can write to S3
+      # with NO access keys stored anywhere.
+      serviceAccountName: nifi
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: nifi
+          image: ${image_nifi}
+          env:
+            - name: NIFI_WEB_HTTPS_PORT
+              value: "8443"
+            - name: SINGLE_USER_CREDENTIALS_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: nifi-single-user
+                  key: username
+            - name: SINGLE_USER_CREDENTIALS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: nifi-single-user
+                  key: password
+            # NiFi rejects requests whose Host header it does not know. This
+            # blocks Host-header injection, but it means you MUST list every
+            # name people will use, or you get a blank page after login.
+            - name: NIFI_WEB_PROXY_HOST
+              value: "localhost:8443,nifi.${namespace}.svc.cluster.local:8443,127.0.0.1:8443"
+            - name: NIFI_JVM_HEAP_INIT
+              value: "512m"
+            - name: NIFI_JVM_HEAP_MAX
+              value: "1g"
+          ports:
+            - containerPort: 8443
+              name: https
+          volumeMounts:
+            - name: data
+              mountPath: /opt/nifi/nifi-current/repositories
+          resources:
+            requests:
+              cpu: 300m
+              memory: 1536Mi
+            limits:
+              cpu: 1500m
+              memory: 3Gi
+          startupProbe:
+            # NiFi takes 60-120s to start. Without a generous startup probe
+            # the liveness probe kills it mid-boot, forever.
+            tcpSocket:
+              port: 8443
+            failureThreshold: 40
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 8443
+            periodSeconds: 15
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: gp3
+        resources:
+          requests:
+            storage: 10Gi
