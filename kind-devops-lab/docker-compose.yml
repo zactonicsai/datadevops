@@ -1,0 +1,51 @@
+# docker-compose.yml
+# Two jobs:
+#   1. "registry" -> a local Docker image registry the kind cluster can pull from.
+#   2. "toolbox"  -> a container holding kind + kubectl + helm that builds the whole
+#                    lab for you, so you don't have to install those tools yourself.
+#
+# Usage:
+#   docker compose up -d registry                    # start the registry
+#   docker compose --profile tools run --rm toolbox  # shell with all the tools
+#
+# Everything shares the docker network called "kind", which is where the kind
+# cluster nodes also live.
+
+services:
+  registry:
+    image: registry:2
+    container_name: kind-registry
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5001:5000"       # push from your laptop to localhost:5001
+    volumes:
+      - registry-data:/var/lib/registry
+    networks:
+      - kind
+
+  toolbox:
+    build:
+      context: ./docker
+      dockerfile: toolbox.Dockerfile
+    profiles: ["tools"]              # only starts when you ask for it
+    container_name: kind-toolbox
+    environment:
+      KIND_EXPERIMENTAL_DOCKER_NETWORK: kind   # put cluster nodes on this network
+      IN_TOOLBOX: "1"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock   # drive the host's Docker
+      - ./:/workspace
+    working_dir: /workspace
+    networks:
+      - kind
+    entrypoint: ["/bin/bash"]
+    stdin_open: true
+    tty: true
+
+volumes:
+  registry-data:
+
+networks:
+  kind:
+    name: kind                       # the exact name kind looks for
+    driver: bridge

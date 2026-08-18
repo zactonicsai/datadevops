@@ -1,0 +1,119 @@
+# Helm values for the official Jenkins chart (jenkins/jenkins, chart 5.x).
+# Jenkins runs INSIDE the kind cluster and starts a throwaway pod for every build.
+
+controller:
+  installLatestPlugins: true
+  installPlugins:
+    - kubernetes:latest              # start agents as pods
+    - workflow-aggregator:latest     # Pipeline / Jenkinsfile support
+    - git:latest
+    - configuration-as-code:latest   # this file configures Jenkins itself
+    - job-dsl:latest                 # lets us create jobs from code
+    - junit:latest                   # test result graphs
+    - xunit:latest                   # CTest / other test formats
+    - warnings-ng:latest             # GCC & Java warning reports
+    - timestamper:latest
+    - ws-cleanup:latest
+    - gitea:latest                   # Gitea server integration + webhooks
+
+  adminUser: "admin"
+  adminPassword: "admin123"          # lab only - use a Secret in real life
+
+  serviceType: NodePort
+  nodePort: 30808
+  jenkinsUrl: "http://localhost:8080"
+
+  resources:
+    requests: { cpu: "500m", memory: "1Gi" }
+    limits:   { cpu: "2",    memory: "3Gi" }
+
+  JCasC:
+    defaultConfig: true
+    configScripts:
+      # ---- point Jenkins at our Gitea server -------------------------------
+      gitea-server: |
+        unclassified:
+          giteaServers:
+            servers:
+              - displayName: "lab-gitea"
+                serverUrl: "http://gitea.devops.svc.cluster.local:3000"
+                manageHooks: false
+      # ---- create the two demo pipeline jobs automatically -----------------
+      seed-jobs: |
+        jobs:
+          - script: |
+              pipelineJob('java-app') {
+                description('Maven build of the sample Java app')
+                definition {
+                  cpsScm {
+                    scm {
+                      git {
+                        remote {
+                          url('http://gitea.devops.svc.cluster.local:3000/jenkins/java-app.git')
+                        }
+                        branch('*/main')
+                      }
+                    }
+                    scriptPath('Jenkinsfile')
+                  }
+                }
+                triggers { scm('H/2 * * * *') }
+              }
+          - script: |
+              pipelineJob('cpp-app') {
+                description('CMake + Ninja build of the sample C++ app')
+                definition {
+                  cpsScm {
+                    scm {
+                      git {
+                        remote {
+                          url('http://gitea.devops.svc.cluster.local:3000/jenkins/cpp-app.git')
+                        }
+                        branch('*/main')
+                      }
+                    }
+                    scriptPath('Jenkinsfile')
+                  }
+                }
+                triggers { scm('H/2 * * * *') }
+              }
+
+persistence:
+  enabled: true
+  size: 8Gi
+
+# Default agent settings. Every agent below inherits these.
+agent:
+  enabled: true
+  namespace: devops
+  idleMinutes: 5                     # keep a pod warm for 5 min, then delete
+  resources:
+    requests: { cpu: "500m", memory: "1Gi" }
+    limits:   { cpu: "2",    memory: "3Gi" }
+
+# Extra agent types. "customJenkinsLabels" is what you write in a Jenkinsfile.
+additionalAgents:
+  javaBuilder:
+    podName: java
+    customJenkinsLabels: java
+    image:
+      repository: localhost:5001/agent-java
+      tag: latest
+    resources:
+      requests: { cpu: "500m", memory: "1Gi" }
+      limits:   { cpu: "2",    memory: "3Gi" }
+  cppBuilder:
+    podName: cpp
+    customJenkinsLabels: cpp
+    image:
+      repository: localhost:5001/agent-cpp
+      tag: latest
+    resources:
+      requests: { cpu: "1",  memory: "2Gi" }
+      limits:   { cpu: "4",  memory: "6Gi" }
+
+rbac:
+  create: true
+serviceAccount:
+  create: true
+  name: jenkins

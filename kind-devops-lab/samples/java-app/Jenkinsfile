@@ -1,0 +1,38 @@
+// Runs on a pod created from the localhost:5001/agent-java image.
+pipeline {
+    agent { label 'java' }
+
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+
+    stages {
+        stage('Tools') {
+            steps {
+                sh 'java -version'
+                sh 'mvn -v'
+            }
+        }
+        stage('Build') {
+            steps { sh 'mvn -B -ntp clean compile' }
+        }
+        stage('Test') {
+            steps { sh 'mvn -B -ntp test' }
+            post { always { junit 'target/surefire-reports/*.xml' } }
+        }
+        stage('Package') {
+            steps { sh 'mvn -B -ntp package -DskipTests' }
+        }
+        stage('Smoke run') {
+            steps { sh 'java -jar target/java-app-1.0.0.jar' }
+        }
+    }
+
+    post {
+        success {
+            archiveArtifacts artifacts: 'target/*.jar', fingerprint: true
+        }
+        cleanup { cleanWs() }
+    }
+}

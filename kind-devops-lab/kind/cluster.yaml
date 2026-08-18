@@ -1,0 +1,34 @@
+# kind/cluster.yaml -- a 3-node Kubernetes cluster that runs inside Docker.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: devops-lab
+
+# Tell containerd (the thing that pulls images inside each node) to read registry
+# rules from /etc/containerd/certs.d. scripts/01-cluster.sh writes the rule that
+# maps localhost:5001 -> the kind-registry container.
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = "/etc/containerd/certs.d"
+
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      # laptop port  <-  cluster NodePort
+      - containerPort: 30808          # Jenkins UI  -> http://localhost:8080
+        hostPort: 8080
+        protocol: TCP
+      - containerPort: 30300          # Gitea UI    -> http://localhost:3000
+        hostPort: 3000
+        protocol: TCP
+      - containerPort: 30022          # Gitea SSH   -> ssh://localhost:2222
+        hostPort: 2222
+        protocol: TCP
+  - role: worker
+  - role: worker

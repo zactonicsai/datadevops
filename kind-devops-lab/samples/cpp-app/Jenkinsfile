@@ -1,0 +1,60 @@
+// Runs on a pod created from the localhost:5001/agent-cpp image.
+pipeline {
+    agent { label 'cpp' }
+
+    environment {
+        BUILD_DIR = 'build'
+        CCACHE_DIR = "${WORKSPACE}/.ccache"
+    }
+
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+
+    stages {
+        stage('Tools') {
+            steps {
+                sh 'g++ --version'
+                sh 'cmake --version'
+                sh 'ninja --version'
+            }
+        }
+        stage('Configure') {
+            steps {
+                sh '''
+                  cmake -S . -B ${BUILD_DIR} -G Ninja \
+                        -DCMAKE_BUILD_TYPE=Release \
+                        -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+                        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+                '''
+            }
+        }
+        stage('Build') {
+            steps { sh 'cmake --build ${BUILD_DIR} -j $(nproc)' }
+        }
+        stage('Test') {
+            steps {
+                sh 'ctest --test-dir ${BUILD_DIR} --output-on-failure --output-junit ctest-results.xml'
+            }
+            post {
+                always { junit "${BUILD_DIR}/ctest-results.xml" }
+            }
+        }
+        stage('Static analysis') {
+            steps {
+                sh 'cppcheck --enable=warning,style --xml --xml-version=2 src include 2> cppcheck.xml || true'
+            }
+        }
+        stage('Smoke run') {
+            steps { sh './${BUILD_DIR}/cpp_app' }
+        }
+    }
+
+    post {
+        success {
+            archiveArtifacts artifacts: 'build/cpp_app', fingerprint: true
+        }
+        cleanup { cleanWs() }
+    }
+}
