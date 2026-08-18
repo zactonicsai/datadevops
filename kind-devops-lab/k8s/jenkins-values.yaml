@@ -16,8 +16,15 @@ controller:
     - ws-cleanup:latest
     - gitea:latest                   # Gitea server integration + webhooks
 
-  adminUser: "admin"
-  adminPassword: "admin123"          # lab only - use a Secret in real life
+  # Chart 5.x moved these under controller.admin
+  # (the old controller.adminUser / controller.adminPassword were removed).
+  admin:
+    username: "admin"
+    password: "admin123"             # lab only - use an existing Secret in real life
+    # To use your own Secret instead, drop username/password above and set:
+    # existingSecret: jenkins-admin
+    # userKey: jenkins-admin-user
+    # passwordKey: jenkins-admin-password
 
   serviceType: NodePort
   nodePort: 30808
