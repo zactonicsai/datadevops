@@ -1,0 +1,57 @@
+###############################################################################
+# Copy to terraform.tfvars (git-ignored) or use environments/<env>.tfvars.
+# Only the two IAM role names are mandatory - everything else has a default.
+###############################################################################
+
+aws_region   = "us-east-1"
+project_name = "keycloak"
+environment  = "dev"
+owner        = "platform-team"
+cost_center  = "CC-1234"
+
+# --- Pre-existing IAM roles (REQUIRED) --------------------------------------
+ecs_task_execution_role_name = "ecsTaskExecutionRole"
+ecs_task_role_name           = "keycloakTaskRole"
+# rds_monitoring_role_name   = "rds-monitoring-role"
+# vpc_flow_logs_role_name    = "vpc-flow-logs-role"
+
+# --- Networking -------------------------------------------------------------
+vpc_cidr           = "10.30.0.0/16"
+az_count           = 2
+enable_nat_gateway = true
+single_nat_gateway = true
+
+# --- Load balancer ----------------------------------------------------------
+# acm_certificate_arn     = "arn:aws:acm:us-east-1:111122223333:certificate/xxxx"
+alb_ingress_cidr_blocks = ["0.0.0.0/0"]
+# keycloak_hostname     = "auth.example.com"
+
+# --- Keycloak ---------------------------------------------------------------
+keycloak_image         = "quay.io/keycloak/keycloak:26.0"
+keycloak_cpu           = 1024
+keycloak_memory        = 2048
+keycloak_desired_count = 2
+
+keycloak_extra_environment = {
+  # KC_FEATURES = "token-exchange,admin-fine-grained-authz"
+}
+
+# --- RDS --------------------------------------------------------------------
+db_engine_version    = "16.4"
+db_instance_class    = "db.t4g.medium"
+db_multi_az          = false
+db_allocated_storage = 20
+
+# --- Resilience -------------------------------------------------------------
+deployment_minimum_healthy_percent = 100
+enable_deployment_circuit_breaker  = true
+enable_az_rebalancing              = true
+enable_container_health_check      = true
+
+enable_alarms         = true
+alarm_email_endpoints = ["you@example.com"]
+
+# secret_replica_regions                 = ["us-west-2"]
+# enable_cross_region_backup_replication = true
+# backup_replication_region              = "us-west-2"
+# backup_replication_kms_key_arn         = "arn:aws:kms:us-west-2:111122223333:key/xxxx"

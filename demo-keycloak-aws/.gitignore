@@ -1,0 +1,25 @@
+# Local state - never commit, it contains generated secrets
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl.bak
+crash.log
+crash.*.log
+
+# Real variable values - commit only the .example and environments/ files
+terraform.tfvars
+*.auto.tfvars
+!*.tfvars.example
+
+# Plan artefacts
+*.tfplan
+tfplan
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store

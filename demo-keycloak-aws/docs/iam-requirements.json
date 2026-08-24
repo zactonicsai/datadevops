@@ -1,0 +1,118 @@
+{
+  "_comment": "Reference policy documents for the pre-existing IAM roles this Terraform project expects. Hand these to whoever manages IAM. Replace REGION, ACCOUNT_ID, PROJECT and ENV.",
+  "ecs_task_execution_role": {
+    "trust_policy": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Principal": { "Service": "ecs-tasks.amazonaws.com" },
+          "Action": "sts:AssumeRole",
+          "Condition": {
+            "ArnLike": { "aws:SourceArn": "arn:aws:ecs:REGION:ACCOUNT_ID:*" },
+            "StringEquals": { "aws:SourceAccount": "ACCOUNT_ID" }
+          }
+        }
+      ]
+    },
+    "managed_policies": [
+      "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+    ],
+    "inline_policy": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "ReadKeycloakSecrets",
+          "Effect": "Allow",
+          "Action": ["secretsmanager:GetSecretValue"],
+          "Resource": [
+            "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:PROJECT-ENV/rds/credentials-*",
+            "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:PROJECT-ENV/keycloak/admin-*"
+          ]
+        },
+        {
+          "Sid": "DecryptSecretsWithCMK",
+          "Effect": "Allow",
+          "Action": ["kms:Decrypt"],
+          "Resource": "arn:aws:kms:REGION:ACCOUNT_ID:key/YOUR-KEY-ID",
+          "Condition": {
+            "StringEquals": { "kms:ViaService": "secretsmanager.REGION.amazonaws.com" }
+          }
+        }
+      ]
+    }
+  },
+  "ecs_task_role": {
+    "trust_policy": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Principal": { "Service": "ecs-tasks.amazonaws.com" },
+          "Action": "sts:AssumeRole"
+        }
+      ]
+    },
+    "inline_policy_only_if_enable_execute_command": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "AllowECSExec",
+          "Effect": "Allow",
+          "Action": [
+            "ssmmessages:CreateControlChannel",
+            "ssmmessages:CreateDataChannel",
+            "ssmmessages:OpenControlChannel",
+            "ssmmessages:OpenDataChannel"
+          ],
+          "Resource": "*"
+        }
+      ]
+    }
+  },
+  "rds_monitoring_role": {
+    "_when": "db_monitoring_interval > 0",
+    "trust_policy": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Principal": { "Service": "monitoring.rds.amazonaws.com" },
+          "Action": "sts:AssumeRole"
+        }
+      ]
+    },
+    "managed_policies": [
+      "arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole"
+    ]
+  },
+  "vpc_flow_logs_role": {
+    "_when": "enable_vpc_flow_logs = true",
+    "trust_policy": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Principal": { "Service": "vpc-flow-logs.amazonaws.com" },
+          "Action": "sts:AssumeRole"
+        }
+      ]
+    },
+    "inline_policy": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Action": [
+            "logs:CreateLogGroup",
+            "logs:CreateLogStream",
+            "logs:PutLogEvents",
+            "logs:DescribeLogGroups",
+            "logs:DescribeLogStreams"
+          ],
+          "Resource": "*"
+        }
+      ]
+    }
+  }
+}
