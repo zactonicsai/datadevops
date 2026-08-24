@@ -1,0 +1,71 @@
+#!/bin/bash
+# Bootstraps a Keycloak host: install Docker, pull credentials from Secrets
+# Manager, run the Keycloak container. Logs go to /var/log/cloud-init-output.log.
+set -euxo pipefail
+
+REGION="${region}"
+
+dnf update -y
+dnf install -y docker jq
+systemctl enable --now docker
+
+# --- Credentials, read at boot with the instance profile --------------------
+DB_SECRET=$(aws secretsmanager get-secret-value \
+  --secret-id "${db_secret_arn}" --query SecretString --output text --region "$REGION")
+ADMIN_SECRET=$(aws secretsmanager get-secret-value \
+  --secret-id "${admin_secret_arn}" --query SecretString --output text --region "$REGION")
+
+DB_PASSWORD=$(echo "$DB_SECRET"    | jq -r .password)
+ADMIN_USER=$(echo  "$ADMIN_SECRET" | jq -r .username)
+ADMIN_PASSWORD=$(echo "$ADMIN_SECRET" | jq -r .password)
+
+# --- Ship container logs to CloudWatch --------------------------------------
+dnf install -y amazon-cloudwatch-agent || true
+
+docker pull "${keycloak_image}"
+
+docker rm -f keycloak 2>/dev/null || true
+docker run -d \
+  --name keycloak \
+  --restart always \
+  -p ${http_port}:8080 \
+  -p ${management_port}:9000 \
+  --log-driver=awslogs \
+  --log-opt awslogs-region="$REGION" \
+  --log-opt awslogs-group="${log_group}" \
+  --log-opt awslogs-stream="$(hostname)" \
+  --log-opt awslogs-create-group=false \
+  -e KC_DB=postgres \
+  -e KC_DB_URL_HOST="${db_host}" \
+  -e KC_DB_URL_PORT="${db_port}" \
+  -e KC_DB_URL_DATABASE="${db_name}" \
+  -e KC_DB_USERNAME="${db_username}" \
+  -e KC_DB_PASSWORD="$DB_PASSWORD" \
+  -e KC_BOOTSTRAP_ADMIN_USERNAME="$ADMIN_USER" \
+  -e KC_BOOTSTRAP_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
+  -e KC_HTTP_ENABLED=true \
+  -e KC_HTTP_PORT=8080 \
+  -e KC_PROXY_HEADERS=xforwarded \
+  -e KC_HOSTNAME="${keycloak_hostname}" \
+  -e KC_HOSTNAME_STRICT=false \
+  -e KC_HEALTH_ENABLED=true \
+  -e KC_METRICS_ENABLED=true \
+  -e KC_CACHE=ispn \
+  -e KC_CACHE_STACK=jdbc-ping \
+  -e KC_LOG=console \
+%{ for k, v in extra_environment ~}
+  -e ${k}="${v}" \
+%{ endfor ~}
+  "${keycloak_image}" start
+
+# --- Wait for readiness so the ASG health check has something to see --------
+for i in $(seq 1 60); do
+  if curl -sf "http://localhost:${management_port}${health_path}" >/dev/null 2>&1; then
+    echo "keycloak is ready"
+    exit 0
+  fi
+  sleep 10
+done
+
+echo "keycloak did not become ready in time" >&2
+exit 1

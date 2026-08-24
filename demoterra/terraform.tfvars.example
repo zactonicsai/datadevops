@@ -1,0 +1,45 @@
+###############################################################################
+# Copy to terraform.tfvars (git-ignored) or use environments/<env>.tfvars.
+# Only instance_profile_name is mandatory - everything else has a default.
+###############################################################################
+
+aws_region   = "us-east-1"
+project_name = "keycloak"
+environment  = "dev"
+owner        = "platform-team"
+cost_center  = "CC-1234"
+
+# --- Pre-existing IAM (REQUIRED) --------------------------------------------
+instance_profile_name = "keycloak-instance-profile"
+# vpc_flow_logs_role_name = "vpc-flow-logs-role"
+
+# --- Networking -------------------------------------------------------------
+vpc_cidr           = "10.30.0.0/16"
+az_count           = 2
+single_nat_gateway = true
+
+# --- Load balancer ----------------------------------------------------------
+# acm_certificate_arn   = "arn:aws:acm:us-east-1:111122223333:certificate/xxxx"
+# keycloak_hostname     = "auth.example.com"
+alb_ingress_cidr_blocks = ["0.0.0.0/0"]
+
+# --- Keycloak hosts ---------------------------------------------------------
+keycloak_image       = "quay.io/keycloak/keycloak:26.0"
+instance_type        = "t3.medium"
+asg_desired_capacity = 2
+asg_min_size         = 2
+asg_max_size         = 4
+
+keycloak_extra_environment = {
+  # KC_FEATURES = "token-exchange"
+}
+
+# --- RDS --------------------------------------------------------------------
+db_engine_version    = "16.4"
+db_instance_class    = "db.t4g.medium"
+db_multi_az          = true
+db_allocated_storage = 20
+
+# --- Alarms -----------------------------------------------------------------
+enable_alarms         = true
+alarm_email_endpoints = ["you@example.com"]
