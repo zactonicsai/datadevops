@@ -1,0 +1,2797 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Terraform AWS Builder — EC2 + Docker, Auto Scaling, ALB, Lambda, Step Functions</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/ibm-plex/6.4.0/css/ibm-plex.min.css" />
+<style>
+  :root { --fs: 16px; --blue: #0f62fe; --ink: #161616; --ink2: #393939; --line: #e0e0e0; --layer: #f4f4f4; }
+  html, body { background: #ffffff; color: var(--ink); }
+  body { font-family: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif; }
+  .scale { font-size: var(--fs); line-height: 1.55; }
+  .t-eyebrow { font-size: .78em; letter-spacing: .08em; text-transform: uppercase; color: var(--blue); font-weight: 600; }
+  .t-title { font-size: 1.9em; line-height: 1.2; font-weight: 300; letter-spacing: -0.01em; }
+  .t-h2 { font-size: 1.45em; line-height: 1.25; font-weight: 400; }
+  .t-h3 { font-size: 1.1em; font-weight: 600; }
+  .t-body { font-size: 1em; }
+  .t-small { font-size: .85em; color: var(--ink2); }
+  .mono, code, pre, input, select, textarea { font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+  pre { font-size: .82em; line-height: 1.5; }
+  .card { border: 1px solid var(--line); background: #fff; }
+  .layer { background: var(--layer); }
+  .rule { border-top: 1px solid var(--line); }
+  /* IBM Carbon uses square corners and a 2px bottom border on fields */
+  .field { background: var(--layer); border: 0; border-bottom: 1px solid #8d8d8d; padding: .5em .6em; width: 100%; color: var(--ink); font-size: .95em; }
+  .field:focus { outline: 2px solid var(--blue); outline-offset: -2px; }
+  .btn { border: 1px solid transparent; padding: .55em 1em; font-size: .95em; cursor: pointer; }
+  .btn-primary { background: var(--blue); color: #fff; }
+  .btn-primary:hover { background: #0353e9; }
+  .btn-ghost { background: #fff; color: var(--blue); border-color: var(--blue); }
+  .btn-ghost:hover { background: #e8f0ff; }
+  .btn-quiet { background: var(--layer); color: var(--ink); border-color: var(--line); }
+  .btn-quiet:hover { background: #e8e8e8; }
+  .btn:focus-visible, a:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+  .tab-on { background: var(--blue); color: #fff; }
+  .file-on { background: #e8f0ff; border-left: 3px solid var(--blue); }
+  .filebtn { border-left: 3px solid transparent; }
+  a.doc { color: var(--blue); text-decoration: underline; text-underline-offset: 3px; }
+  .chip { border: 1px solid var(--line); background: #fff; padding: .15em .5em; font-size: .78em; }
+  details > summary { cursor: pointer; }
+  .stepnum { background: var(--ink); color: #fff; width: 2em; height: 2em; display: inline-flex; align-items: center; justify-content: center; font-size: .9em; }
+  .kbd { border: 1px solid var(--line); background: var(--layer); padding: 0 .35em; font-size: .85em; }
+  @media (prefers-reduced-motion: no-preference) { .fade { transition: opacity .15s ease; } }
+  svg text { font-family: "IBM Plex Sans", Arial, sans-serif; }
+  ::selection { background: #d0e2ff; }
+</style>
+</head>
+<body class="scale">
+
+<!-- ============ HEADER ============ -->
+<header class="sticky top-0 z-40 bg-white border-b" style="border-color:var(--line)">
+  <div class="max-w-7xl mx-auto px-4 py-2 flex flex-wrap items-center gap-3">
+    <div class="flex-1 min-w-0">
+      <div class="t-eyebrow">Infrastructure as Code</div>
+      <div class="t-h3 truncate">Terraform AWS Builder</div>
+    </div>
+    <div class="flex items-center gap-1" role="group" aria-label="Text size">
+      <span class="t-small hidden sm:inline mr-1">Text size</span>
+      <button id="fsDown" class="btn btn-quiet mono" aria-label="Make text smaller">A&minus;</button>
+      <output id="fsVal" class="chip mono" style="min-width:3.6em;text-align:center">16px</output>
+      <button id="fsUp" class="btn btn-quiet mono" aria-label="Make text bigger">A+</button>
+    </div>
+  </div>
+  <nav class="max-w-7xl mx-auto px-4 pb-2 flex gap-4 overflow-x-auto t-small">
+    <a class="doc whitespace-nowrap" href="#start">Start here</a>
+    <a class="doc whitespace-nowrap" href="#choose">1. Choose</a>
+    <a class="doc whitespace-nowrap" href="#diagram">2. Diagram</a>
+    <a class="doc whitespace-nowrap" href="#code">3. Code</a>
+    <a class="doc whitespace-nowrap" href="#export">4. Export</a>
+    <a class="doc whitespace-nowrap" href="#run">5. Run it</a>
+    <a class="doc whitespace-nowrap" href="#learn">Glossary</a>
+  </nav>
+</header>
+
+<main class="max-w-7xl mx-auto px-4 pb-24">
+
+<!-- ============ HERO / START ============ -->
+<section id="start" class="pt-8 pb-6">
+  <h1 class="t-title max-w-3xl">Describe the AWS pieces you want. Get a complete, organized Terraform project you can download and run.</h1>
+  <p class="t-body max-w-3xl mt-4">
+    This page is a generator. You tick a few boxes, type a few names, and it writes the files for you:
+    reusable <strong>modules</strong> (the building blocks) and a separate <strong>infrastructure</strong> folder
+    (where you actually use those blocks). Nothing is sent anywhere &mdash; everything happens inside your browser.
+  </p>
+
+  <div class="grid md:grid-cols-3 gap-4 mt-6">
+    <div class="card p-4">
+      <div class="t-eyebrow">What it builds</div>
+      <p class="t-small mt-2">EC2 servers running Docker images (Keycloak, NiFi, Kafka) behind a load balancer with auto scaling, plus S3 buckets, a Lambda file mover, and a Step Functions workflow.</p>
+    </div>
+    <div class="card p-4">
+      <div class="t-eyebrow">How you steer it</div>
+      <p class="t-small mt-2">Tick services, or paste a plain list of AWS services and let the page read it. Export your choices as a small schema file and import it again later.</p>
+    </div>
+    <div class="card p-4">
+      <div class="t-eyebrow">What you get</div>
+      <p class="t-small mt-2">A ZIP (or a single setup script) containing <span class="mono">modules/</span>, <span class="mono">infrastructure/</span>, <span class="mono">examples/</span>, a README, and a diagram of how it all connects.</p>
+    </div>
+  </div>
+
+  <div class="card layer p-4 mt-6">
+    <p class="t-h3">First time here? Read this paragraph.</p>
+    <p class="t-body mt-2">
+      Imagine you want to build a LEGO castle. You could snap bricks together by hand every time (that is clicking around
+      the AWS website), or you could write down the instructions once and hand them to a robot (that is Terraform).
+      The instructions are plain text files ending in <span class="mono">.tf</span>. The robot reads them, calls AWS, and
+      builds exactly what the instructions say. If you change the instructions and run the robot again, it changes only
+      the parts that need changing. If you say "undo", it takes the castle apart.
+      <button class="doc" data-modal="terraform">What is Terraform, in more detail?</button>
+    </p>
+  </div>
+
+  <div class="card p-4 mt-4 border-l-4" style="border-left-color:#da1e28">
+    <p class="t-h3">Money and safety warning, in plain words</p>
+    <p class="t-small mt-2">
+      Everything on this page creates <em>real</em> AWS resources that cost <em>real</em> money once you run it.
+      Load balancers, NAT gateways, and EC2 servers charge by the hour whether you use them or not.
+      The generated code is a <strong>learning and starting-point</strong> project: it uses demo passwords, single-node
+      Kafka, and Keycloak in dev mode. Do not put real customer data in it until a security-minded adult reviews it.
+      When you are done experimenting, run <span class="mono kbd">terraform destroy</span>.
+    </p>
+  </div>
+</section>
+
+<!-- ============ STEP 1: CHOOSE ============ -->
+<section id="choose" class="pt-8">
+  <div class="flex items-center gap-3">
+    <span class="stepnum">1</span>
+    <h2 class="t-h2">Choose your services</h2>
+  </div>
+  <p class="t-body mt-3 max-w-3xl">
+    Tick what you want. Each tick adds one module folder and wires it into the infrastructure folder.
+    The <button class="doc" data-modal="vpc">network (VPC)</button> is always included because every other
+    resource needs somewhere to live.
+  </p>
+
+  <div class="grid lg:grid-cols-3 gap-6 mt-5">
+
+    <!-- services -->
+    <div class="lg:col-span-2 card p-4">
+      <div class="t-eyebrow">Services to generate</div>
+      <div id="svcGrid" class="grid sm:grid-cols-2 gap-3 mt-3"></div>
+    </div>
+
+    <!-- schema import -->
+    <div class="card p-4">
+      <div class="t-eyebrow">Import a schema</div>
+      <p class="t-small mt-2">Paste a simple list of AWS services (one per line) or a JSON schema. The page reads it and ticks the boxes for you.</p>
+      <textarea id="schemaBox" class="field mt-3" rows="8" spellcheck="false" aria-label="Schema input"></textarea>
+      <div class="flex flex-wrap gap-2 mt-3">
+        <button id="schemaApply" class="btn btn-primary">Read list</button>
+        <button id="schemaSample" class="btn btn-ghost">Load example list</button>
+        <button id="schemaExport" class="btn btn-quiet">Save schema file</button>
+        <label class="btn btn-quiet cursor-pointer">Open file<input id="schemaFile" type="file" accept=".json,.txt,.yaml,.yml" class="hidden"></label>
+      </div>
+      <p id="schemaMsg" class="t-small mt-3" role="status" aria-live="polite">Words it understands: vpc, alb, nlb, asg, ec2, keycloak, nifi, kafka, s3, lambda, stepfunctions, cloudwatch.</p>
+    </div>
+  </div>
+
+  <!-- settings -->
+  <div class="card p-4 mt-6">
+    <div class="flex flex-wrap items-baseline justify-between gap-2">
+      <div class="t-eyebrow">Settings</div>
+      <button class="doc t-small" data-modal="settings">What do these mean?</button>
+    </div>
+    <div id="cfgGrid" class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-3"></div>
+  </div>
+</section>
+
+<!-- ============ STEP 2: DIAGRAM ============ -->
+<section id="diagram" class="pt-10">
+  <div class="flex items-center gap-3">
+    <span class="stepnum">2</span>
+    <h2 class="t-h2">See how it connects</h2>
+  </div>
+  <p class="t-body mt-3 max-w-3xl">
+    This picture redraws itself as you change your choices. Follow the arrows: a request from a person on the internet
+    goes left-to-top-down; a file moving between buckets goes down the right-hand side.
+  </p>
+  <div class="card mt-4 p-2 overflow-x-auto">
+    <div id="svgWrap" class="min-w-[680px]"></div>
+  </div>
+  <div class="flex flex-wrap gap-2 mt-3">
+    <button id="svgDownload" class="btn btn-quiet">Save diagram as SVG</button>
+    <button class="btn btn-quiet" data-modal="flow">Walk me through the flow</button>
+  </div>
+</section>
+
+<!-- ============ STEP 3: CODE ============ -->
+<section id="code" class="pt-10">
+  <div class="flex items-center gap-3">
+    <span class="stepnum">3</span>
+    <h2 class="t-h2">Read the generated files</h2>
+  </div>
+  <p class="t-body mt-3 max-w-3xl">
+    Two folders matter. <span class="mono">modules/</span> holds the reusable building blocks &mdash; one folder per base
+    AWS service, written once and used many times. <span class="mono">infrastructure/</span> is where you <em>use</em>
+    those blocks to build one real environment.
+    <button class="doc" data-modal="layout">Why split them up?</button>
+  </p>
+
+  <div class="grid lg:grid-cols-3 gap-4 mt-5">
+    <div class="card p-0 lg:max-h-[36em] overflow-auto">
+      <div class="t-eyebrow px-4 py-3 border-b" style="border-color:var(--line)">Project files (<span id="fileCount">0</span>)</div>
+      <div id="fileTree"></div>
+    </div>
+    <div class="lg:col-span-2 card overflow-hidden">
+      <div class="flex flex-wrap items-center gap-2 px-4 py-3 border-b" style="border-color:var(--line)">
+        <span id="activePath" class="mono t-small flex-1 truncate">&nbsp;</span>
+        <button id="copyFile" class="btn btn-quiet">Copy</button>
+        <button id="dlFile" class="btn btn-quiet">Download</button>
+      </div>
+      <pre class="p-4 overflow-auto lg:max-h-[32em] layer"><code id="codeView"></code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- ============ STEP 4: EXPORT ============ -->
+<section id="export" class="pt-10">
+  <div class="flex items-center gap-3">
+    <span class="stepnum">4</span>
+    <h2 class="t-h2">Export the project</h2>
+  </div>
+  <p class="t-body mt-3 max-w-3xl">Pick whichever suits your computer. The ZIP keeps the folder structure. The setup script rebuilds the same folders on Mac or Linux if you cannot unzip.</p>
+  <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-4">
+    <button id="dlZip" class="btn btn-primary">Download ZIP</button>
+    <button id="dlSh" class="btn btn-ghost">Download setup script</button>
+    <button id="dlBundle" class="btn btn-quiet">Download one text file</button>
+    <button id="copyAll" class="btn btn-quiet">Copy everything</button>
+  </div>
+  <p id="exportMsg" class="t-small mt-3" role="status" aria-live="polite">&nbsp;</p>
+</section>
+
+<!-- ============ STEP 5: RUN ============ -->
+<section id="run" class="pt-10">
+  <div class="flex items-center gap-3">
+    <span class="stepnum">5</span>
+    <h2 class="t-h2">Run it, step by step</h2>
+  </div>
+  <div id="runSteps" class="mt-4 grid md:grid-cols-2 gap-4"></div>
+</section>
+
+<!-- ============ LEARN ============ -->
+<section id="learn" class="pt-10">
+  <h2 class="t-h2">Glossary and official documentation</h2>
+  <p class="t-body mt-2 max-w-3xl">Every card opens a short explanation plus links to the official docs. Official docs are always more up to date than this page.</p>
+  <div id="learnGrid" class="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-4"></div>
+</section>
+
+<footer class="rule mt-14 pt-6 t-small">
+  <p>Generated Terraform is a starting point, not a production system. Review security groups, passwords, encryption, and backups before real use. Terraform is a trademark of HashiCorp; AWS is a trademark of Amazon; this page is not affiliated with either.</p>
+</footer>
+</main>
+
+<!-- ============ MODAL ============ -->
+<div id="modal" class="fixed inset-0 z-50 hidden items-end sm:items-center justify-center p-0 sm:p-4" style="background:rgba(22,22,22,.55)">
+  <div class="bg-white w-full sm:max-w-2xl max-h-[88vh] overflow-auto" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="flex items-start gap-3 p-4 border-b sticky top-0 bg-white" style="border-color:var(--line)">
+      <h3 id="modalTitle" class="t-h3 flex-1"></h3>
+      <button id="modalClose" class="btn btn-quiet" aria-label="Close">Close</button>
+    </div>
+    <div id="modalBody" class="p-4 t-body"></div>
+    <div id="modalLinks" class="p-4 pt-0"></div>
+  </div>
+</div>
+
+<script>
+/* =========================================================================
+   1. TEXT SIZE CONTROL (14px - 36px)
+   ========================================================================= */
+let fontSize = 16;
+const fsVal = document.getElementById('fsVal');
+function applyFont(n){
+  fontSize = Math.min(36, Math.max(14, n));
+  document.body.style.setProperty('--fs', fontSize + 'px');
+  fsVal.textContent = fontSize + 'px';
+  try { localStorage.setItem('tfb-fs', fontSize); } catch(e){}
+}
+document.getElementById('fsUp').onclick = () => applyFont(fontSize + 2);
+document.getElementById('fsDown').onclick = () => applyFont(fontSize - 2);
+try { const s = localStorage.getItem('tfb-fs'); applyFont(s ? +s : 16); } catch(e){ applyFont(16); }
+
+/* =========================================================================
+   2. SERVICE CATALOG + CONFIG
+   ========================================================================= */
+const SERVICES = [
+  { key:'alb',      name:'Application Load Balancer',  info:'alb',   desc:'Front door for web traffic. Sends /keycloak and /nifi to the right servers.' },
+  { key:'keycloak', name:'EC2 + Keycloak (Docker)',    info:'keycloak', desc:'Login and identity server. Runs in a container on port 8080.' },
+  { key:'nifi',     name:'EC2 + Apache NiFi (Docker)', info:'nifi',  desc:'Drag-and-drop data movement tool. Container on port 8080.' },
+  { key:'kafka',    name:'EC2 + Apache Kafka (Docker)',info:'kafka', desc:'Message queue. Not web traffic, so it gets a network load balancer on port 9092.' },
+  { key:'s3',       name:'S3 buckets (source + destination)', info:'s3', desc:'Two buckets: files land in one, get renamed into the other.' },
+  { key:'lambda',   name:'Lambda file mover',          info:'lambda',   desc:'Small function that counts files and copies them with new names.' },
+  { key:'sfn',      name:'Step Functions workflow',    info:'sfn',   desc:'Flowchart that runs the counter, checks the result, then runs the mover.' },
+  { key:'cw',       name:'CloudWatch alarms + logs',   info:'cloudwatch', desc:'Keeps the logs and shouts if CPU gets too high.' }
+];
+
+const selected = { alb:true, keycloak:true, nifi:true, kafka:true, s3:true, lambda:true, sfn:true, cw:true };
+
+const CFG_FIELDS = [
+  { key:'project',   label:'Project name',        val:'acme',            hint:'lowercase, used in every resource name' },
+  { key:'env',       label:'Environment',         val:'dev',             hint:'dev, test or prod' },
+  { key:'region',    label:'AWS region',          val:'us-east-1',       hint:'where the servers physically sit' },
+  { key:'vpc_cidr',  label:'VPC address range',   val:'10.20.0.0/16',    hint:'private IP range for the network' },
+  { key:'az_count',  label:'Availability zones',  val:'2',               hint:'2 is the safe minimum' },
+  { key:'instance_type', label:'EC2 instance type', val:'t3.medium',     hint:'t3.small is cheaper, t3.medium is safer for NiFi/Kafka' },
+  { key:'asg_min',   label:'Auto scaling minimum', val:'1',              hint:'never fewer servers than this' },
+  { key:'asg_desired', label:'Auto scaling desired', val:'2',            hint:'normal number of servers' },
+  { key:'asg_max',   label:'Auto scaling maximum', val:'4',              hint:'never more servers than this' },
+  { key:'keycloak_image', label:'Keycloak image',  val:'quay.io/keycloak/keycloak:26.0', hint:'Docker image tag' },
+  { key:'nifi_image', label:'NiFi image',          val:'apache/nifi:1.28.1', hint:'Docker image tag' },
+  { key:'kafka_image', label:'Kafka image',        val:'apache/kafka:3.8.0', hint:'Docker image tag' },
+  { key:'src_bucket', label:'Source bucket name',  val:'acme-landing-zone', hint:'must be globally unique' },
+  { key:'dst_bucket', label:'Destination bucket',  val:'acme-archive-zone', hint:'must be globally unique' },
+  { key:'rename_prefix', label:'New file name prefix', val:'record',     hint:'record_0003_of_0042.csv' },
+  { key:'pad_width', label:'Number padding',       val:'4',              hint:'4 means 0003 instead of 3' },
+  { key:'schedule',  label:'Workflow schedule',    val:'rate(1 hour)',   hint:'how often Step Functions runs' }
+];
+const cfg = {};
+CFG_FIELDS.forEach(f => cfg[f.key] = f.val);
+
+/* ---- build the service checkboxes ---- */
+const svcGrid = document.getElementById('svcGrid');
+SERVICES.forEach(s => {
+  const wrap = document.createElement('label');
+  wrap.className = 'card p-3 flex gap-3 items-start cursor-pointer';
+  wrap.innerHTML = `<input type="checkbox" class="mt-1" data-svc="${s.key}" ${selected[s.key]?'checked':''} style="accent-color:var(--blue);width:1.1em;height:1.1em">
+    <span class="flex-1"><span class="t-h3 block">${s.name}</span>
+    <span class="t-small block mt-1">${s.desc}</span>
+    <button type="button" class="doc t-small mt-1" data-modal="${s.info}">More info</button></span>`;
+  svcGrid.appendChild(wrap);
+});
+svcGrid.addEventListener('change', e => {
+  if (e.target.dataset.svc) { selected[e.target.dataset.svc] = e.target.checked; refresh(); }
+});
+
+/* ---- build the settings fields ---- */
+const cfgGrid = document.getElementById('cfgGrid');
+CFG_FIELDS.forEach(f => {
+  const d = document.createElement('div');
+  d.innerHTML = `<label class="t-small block mb-1" for="cfg-${f.key}">${f.label}</label>
+    <input id="cfg-${f.key}" class="field" value="${f.val}" data-cfg="${f.key}" spellcheck="false">
+    <span class="t-small block mt-1" style="opacity:.75">${f.hint}</span>`;
+  cfgGrid.appendChild(d);
+});
+cfgGrid.addEventListener('input', e => {
+  if (e.target.dataset.cfg) { cfg[e.target.dataset.cfg] = e.target.value.trim(); refresh(); }
+});
+
+/* =========================================================================
+   3. SCHEMA IMPORT / EXPORT
+   ========================================================================= */
+const ALIASES = {
+  vpc:'vpc', network:'vpc', 'amazon vpc':'vpc', subnet:'vpc', nat:'vpc',
+  alb:'alb', elb:'alb', 'elastic load balancing':'alb', loadbalancer:'alb', 'load balancer':'alb', 'application load balancer':'alb', targetgroup:'alb', 'target group':'alb',
+  nlb:'kafka', 'network load balancer':'kafka',
+  ec2:'ec2any', asg:'ec2any', autoscaling:'ec2any', 'auto scaling':'ec2any', 'ec2 auto scaling':'ec2any', docker:'ec2any',
+  keycloak:'keycloak', iam_keycloak:'keycloak', sso:'keycloak',
+  nifi:'nifi', 'apache nifi':'nifi',
+  kafka:'kafka', 'apache kafka':'kafka', msk:'kafka',
+  s3:'s3', 'amazon s3':'s3', bucket:'s3', storage:'s3',
+  lambda:'lambda', 'aws lambda':'lambda', function:'lambda',
+  stepfunctions:'sfn', 'step functions':'sfn', 'aws step functions':'sfn', sfn:'sfn', statemachine:'sfn', 'state machine':'sfn',
+  cloudwatch:'cw', logs:'cw', monitoring:'cw', alarms:'cw'
+};
+ALIASES['amazon s3'] = 's3';
+
+const SAMPLE_SCHEMA = `# One AWS service per line. Comments start with #
+vpc
+application load balancer
+ec2 auto scaling
+keycloak
+nifi
+kafka
+s3
+lambda
+step functions
+cloudwatch`;
+
+function applySchema(text){
+  const msg = document.getElementById('schemaMsg');
+  let words = [];
+  const trimmed = text.trim();
+  if (!trimmed) { msg.textContent = 'Nothing to read — paste a list first.'; return; }
+  try {
+    const j = JSON.parse(trimmed);
+    const arr = Array.isArray(j) ? j : (j.services || j.resources || j.aws || []);
+    words = arr.map(x => typeof x === 'string' ? x : (x.type || x.service || x.name || ''));
+    if (j.settings && typeof j.settings === 'object') {
+      Object.keys(j.settings).forEach(k => {
+        if (k in cfg) { cfg[k] = String(j.settings[k]); const el = document.getElementById('cfg-'+k); if (el) el.value = cfg[k]; }
+      });
+    }
+  } catch(e) {
+    words = trimmed.split(/[\n,;]+/);
+  }
+  const found = new Set();
+  words.forEach(w => {
+    const clean = String(w).replace(/#.*$/,'').replace(/^[-*\s]+/,'').trim().toLowerCase().replace(/[_]/g,' ');
+    if (!clean) return;
+    const hit = ALIASES[clean] || ALIASES[clean.replace(/\s+/g,'')] || null;
+    if (hit) found.add(hit);
+  });
+  if (found.size === 0) { msg.textContent = 'No known services found. Try words like s3, lambda, kafka, alb.'; return; }
+  Object.keys(selected).forEach(k => selected[k] = false);
+  if (found.has('ec2any') && !found.has('keycloak') && !found.has('nifi') && !found.has('kafka')) selected.keycloak = true;
+  found.forEach(k => { if (k !== 'vpc' && k !== 'ec2any') selected[k] = true; });
+  if (selected.lambda && !found.has('s3')) selected.s3 = true;
+  document.querySelectorAll('[data-svc]').forEach(cb => cb.checked = !!selected[cb.dataset.svc]);
+  msg.textContent = 'Read ' + found.size + ' service type(s): ' + [...found].join(', ') + '. Boxes updated.';
+  refresh();
+}
+document.getElementById('schemaApply').onclick = () => applySchema(document.getElementById('schemaBox').value);
+document.getElementById('schemaSample').onclick = () => { document.getElementById('schemaBox').value = SAMPLE_SCHEMA; };
+document.getElementById('schemaExport').onclick = () => {
+  const doc = { version: 1, services: Object.keys(selected).filter(k => selected[k]), settings: {...cfg} };
+  download('aws-schema.json', JSON.stringify(doc, null, 2), 'application/json');
+};
+document.getElementById('schemaFile').onchange = e => {
+  const f = e.target.files[0]; if (!f) return;
+  const r = new FileReader();
+  r.onload = () => { document.getElementById('schemaBox').value = r.result; applySchema(r.result); };
+  r.readAsText(f);
+};
+
+/* =========================================================================
+   4. TERRAFORM GENERATION
+   Note: inside these JS template strings, \${...} is written with a backslash
+   so it survives into the .tf file as a real Terraform interpolation.
+   ========================================================================= */
+const httpServices = () => [
+  selected.keycloak && { key:'keycloak', port:8080, image: cfg.keycloak_image, path:'/keycloak', health:'/realms/master' },
+  selected.nifi && { key:'nifi', port:8080, image: cfg.nifi_image, path:'/nifi', health:'/nifi/' }
+].filter(Boolean);
+const anyEc2 = () => selected.keycloak || selected.nifi || selected.kafka;
+const useAlb = () => selected.alb && httpServices().length > 0;
+
+/* Terraform wants one argument per line. This rewrites any compact
+   single-line block into proper HCL before the file is shown or exported. */
+function normalizeHcl(src){
+  return src.replace(/^((?:variable|output|module)\s+"[^"]+"\s*)\{(.+)\}[ \t]*$/gm, (whole, head, body) => {
+    const parts = body.trim().split(/\s+(?=[A-Za-z_][A-Za-z0-9_]*\s*=)/);
+    if (parts.length < 2) return whole;
+    const pairs = parts.map(p => { const i = p.indexOf('='); return [p.slice(0,i).trim(), p.slice(i+1).trim()]; });
+    if (pairs.some(p => !p[0] || !p[1])) return whole;
+    const w = Math.max(...pairs.map(p => p[0].length));
+    return head.trimEnd() + ' {\n' + pairs.map(p => '  ' + p[0].padEnd(w) + ' = ' + p[1]).join('\n') + '\n}';
+  });
+}
+
+function files(){
+  const F = [];
+  const add = (path, content) => {
+    let body = content.replace(/^\n/, '');
+    if (path.endsWith('.tf')) body = normalizeHcl(body);
+    F.push({ path, content: body });
+  };
+  const P = cfg.project, E = cfg.env;
+
+  /* ---------------- README ---------------- */
+  add('README.md', `
+# ${P} — AWS infrastructure as code
+
+Generated by the Terraform AWS Builder page. Everything here is plain text; you can read and edit all of it.
+
+## Folder map
+
+    modules/                  reusable building blocks (one folder per base AWS service)
+      network/                VPC, subnets, internet gateway, NAT gateway, route tables
+      security/               security groups (the firewalls)
+${useAlb() ? '      alb/                    application load balancer + HTTP listener\n' : ''}${selected.kafka ? '      nlb/                    network load balancer for Kafka (TCP)\n' : ''}${anyEc2() ? '      service-asg/            launch template + auto scaling group + target group\n' : ''}${(selected.s3 || selected.lambda) ? '      s3/                     source and destination buckets\n' : ''}${selected.lambda ? '      lambda-s3-mover/        the file mover function and its permissions\n' : ''}${selected.sfn ? '      step-functions/         the workflow that calls the function\n' : ''}    infrastructure/
+      envs/${E}/               THE PLACE YOU RUN TERRAFORM — uses the modules above
+    examples/                 tiny copy-paste examples, one per module
+
+## Quick start
+
+    cd infrastructure/envs/${E}
+    terraform init
+    terraform plan
+    terraform apply
+    # when finished experimenting
+    terraform destroy
+
+## What gets built
+
+${useAlb() ? `- An internet-facing load balancer sending ${httpServices().map(s=>s.path).join(' and ')} to EC2 servers.\n` : ''}${selected.keycloak ? `- Keycloak (${cfg.keycloak_image}) in Docker on EC2, auto scaled ${cfg.asg_min}–${cfg.asg_max}.\n` : ''}${selected.nifi ? `- Apache NiFi (${cfg.nifi_image}) in Docker on EC2, auto scaled.\n` : ''}${selected.kafka ? `- Apache Kafka (${cfg.kafka_image}) in Docker on EC2 behind a network load balancer on 9092.\n` : ''}${selected.s3 ? `- Buckets ${cfg.src_bucket} (source) and ${cfg.dst_bucket} (destination).\n` : ''}${selected.lambda ? `- A Lambda function that counts objects in the source bucket and copies each one to the destination bucket renamed as ${cfg.rename_prefix}_0001_of_NNNN.ext\n` : ''}${selected.sfn ? `- A Step Functions state machine running that function on schedule: ${cfg.schedule}\n` : ''}
+## Health warning
+
+This project is for learning. Passwords are demo values held in variables, Keycloak runs in dev mode,
+and Kafka is a single node with no replication. Harden it before real use.
+`);
+
+  add('.gitignore', `
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+*.tfvars.secret
+.terraform.lock.hcl
+builds/
+`);
+
+  add('schema.json', JSON.stringify({ version:1, services:Object.keys(selected).filter(k=>selected[k]), settings:{...cfg} }, null, 2) + '\n');
+
+  /* ---------------- MODULE: network ---------------- */
+  add('modules/network/main.tf', `
+# ---------------------------------------------------------------------------
+# Base module: the network (Amazon VPC)
+# A VPC is a private slice of the AWS cloud. Public subnets can talk to the
+# internet directly; private subnets reach the internet through a NAT gateway
+# but nothing on the internet can start a conversation with them.
+# ---------------------------------------------------------------------------
+
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+resource "aws_vpc" "this" {
+  cidr_block           = var.vpc_cidr
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+  tags                 = merge(var.tags, { Name = "\${var.name}-vpc" })
+}
+
+resource "aws_internet_gateway" "this" {
+  vpc_id = aws_vpc.this.id
+  tags   = merge(var.tags, { Name = "\${var.name}-igw" })
+}
+
+resource "aws_subnet" "public" {
+  count                   = var.az_count
+  vpc_id                  = aws_vpc.this.id
+  cidr_block              = cidrsubnet(var.vpc_cidr, 4, count.index)
+  availability_zone       = data.aws_availability_zones.available.names[count.index]
+  map_public_ip_on_launch = true
+  tags                    = merge(var.tags, { Name = "\${var.name}-public-\${count.index + 1}", Tier = "public" })
+}
+
+resource "aws_subnet" "private" {
+  count             = var.az_count
+  vpc_id            = aws_vpc.this.id
+  cidr_block        = cidrsubnet(var.vpc_cidr, 4, count.index + 8)
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+  tags              = merge(var.tags, { Name = "\${var.name}-private-\${count.index + 1}", Tier = "private" })
+}
+
+resource "aws_eip" "nat" {
+  count  = var.enable_nat_gateway ? 1 : 0
+  domain = "vpc"
+  tags   = merge(var.tags, { Name = "\${var.name}-nat-eip" })
+}
+
+resource "aws_nat_gateway" "this" {
+  count         = var.enable_nat_gateway ? 1 : 0
+  allocation_id = aws_eip.nat[0].id
+  subnet_id     = aws_subnet.public[0].id
+  depends_on    = [aws_internet_gateway.this]
+  tags          = merge(var.tags, { Name = "\${var.name}-nat" })
+}
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.this.id
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.this.id
+  }
+  tags = merge(var.tags, { Name = "\${var.name}-rt-public" })
+}
+
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.this.id
+  dynamic "route" {
+    for_each = var.enable_nat_gateway ? [1] : []
+    content {
+      cidr_block     = "0.0.0.0/0"
+      nat_gateway_id = aws_nat_gateway.this[0].id
+    }
+  }
+  tags = merge(var.tags, { Name = "\${var.name}-rt-private" })
+}
+
+resource "aws_route_table_association" "public" {
+  count          = var.az_count
+  subnet_id      = aws_subnet.public[count.index].id
+  route_table_id = aws_route_table.public.id
+}
+
+resource "aws_route_table_association" "private" {
+  count          = var.az_count
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private.id
+}
+
+# Lets EC2 reach S3 without paying NAT charges for the traffic.
+resource "aws_vpc_endpoint" "s3" {
+  vpc_id            = aws_vpc.this.id
+  service_name      = "com.amazonaws.\${var.region}.s3"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = [aws_route_table.private.id, aws_route_table.public.id]
+  tags              = merge(var.tags, { Name = "\${var.name}-s3-endpoint" })
+}
+`);
+
+  add('modules/network/variables.tf', `
+variable "name"     {
+  type        = string
+  description = "Prefix used in every resource name"
+}
+variable "region"   {
+  type        = string
+  description = "AWS region, e.g. us-east-1"
+}
+variable "vpc_cidr" {
+  type    = string
+  default = "10.20.0.0/16"
+}
+variable "az_count" {
+  type    = number
+  default = 2
+}
+variable "enable_nat_gateway" {
+  type        = bool
+  default     = true
+  description = "NAT gateways cost roughly a dollar a day. Set false to save money in a lab."
+}
+variable "tags" { type = map(string) default = {} }
+`);
+
+  add('modules/network/outputs.tf', `
+output "vpc_id"             { value = aws_vpc.this.id }
+output "vpc_cidr"           { value = aws_vpc.this.cidr_block }
+output "public_subnet_ids"  { value = aws_subnet.public[*].id }
+output "private_subnet_ids" { value = aws_subnet.private[*].id }
+`);
+
+  /* ---------------- MODULE: security ---------------- */
+  add('modules/security/main.tf', `
+# ---------------------------------------------------------------------------
+# Base module: security groups
+# A security group is a firewall around a resource. Default answer is "no".
+# Every rule below is an explicit "yes, this one thing is allowed".
+# ---------------------------------------------------------------------------
+
+resource "aws_security_group" "alb" {
+  name        = "\${var.name}-alb-sg"
+  description = "Allows web traffic from the internet into the load balancer"
+  vpc_id      = var.vpc_id
+
+  ingress {
+    description = "HTTP from allowed clients"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = var.allowed_web_cidrs
+  }
+
+  ingress {
+    description = "HTTPS from allowed clients"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = var.allowed_web_cidrs
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = merge(var.tags, { Name = "\${var.name}-alb-sg" })
+}
+
+resource "aws_security_group" "app" {
+  name        = "\${var.name}-app-sg"
+  description = "Allows the load balancer and other app servers to reach the containers"
+  vpc_id      = var.vpc_id
+
+  dynamic "ingress" {
+    for_each = var.app_ports
+    content {
+      description     = "From load balancer on port \${ingress.value}"
+      from_port       = ingress.value
+      to_port         = ingress.value
+      protocol        = "tcp"
+      security_groups = [aws_security_group.alb.id]
+    }
+  }
+
+  # Network load balancers keep the client IP, so TCP services also accept
+  # traffic from inside the VPC.
+  dynamic "ingress" {
+    for_each = var.vpc_internal_ports
+    content {
+      description = "From inside the VPC on port \${ingress.value}"
+      from_port   = ingress.value
+      to_port     = ingress.value
+      protocol    = "tcp"
+      cidr_blocks = [var.vpc_cidr]
+    }
+  }
+
+  ingress {
+    description = "Servers in this group can talk to each other"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    self        = true
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = merge(var.tags, { Name = "\${var.name}-app-sg" })
+}
+`);
+
+  add('modules/security/variables.tf', `
+variable "name"     { type = string }
+variable "vpc_id"   { type = string }
+variable "vpc_cidr" { type = string }
+variable "app_ports" {
+  type        = list(number)
+  default     = [8080]
+  description = "Container ports the load balancer is allowed to reach"
+}
+variable "vpc_internal_ports" {
+  type        = list(number)
+  default     = []
+  description = "Ports reachable from anywhere inside the VPC, e.g. 9092 for Kafka"
+}
+variable "allowed_web_cidrs" {
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+  description = "Narrow this to your office IP for anything real"
+}
+variable "tags" { type = map(string) default = {} }
+`);
+
+  add('modules/security/outputs.tf', `
+output "alb_security_group_id" { value = aws_security_group.alb.id }
+output "app_security_group_id" { value = aws_security_group.app.id }
+`);
+
+  /* ---------------- MODULE: alb ---------------- */
+  if (useAlb()) add('modules/alb/main.tf', `
+# ---------------------------------------------------------------------------
+# Base module: Application Load Balancer
+# One public address that receives every web request and forwards it to a
+# healthy server. Path rules are added by the service-asg module.
+# ---------------------------------------------------------------------------
+
+resource "aws_lb" "this" {
+  name               = substr("\${var.name}-alb", 0, 32)
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [var.security_group_id]
+  subnets            = var.public_subnet_ids
+
+  enable_deletion_protection = var.enable_deletion_protection
+  idle_timeout               = 120
+
+  tags = merge(var.tags, { Name = "\${var.name}-alb" })
+}
+
+# Default answer when no path rule matches.
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.this.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "No service is registered at this path."
+      status_code  = "404"
+    }
+  }
+}
+
+# Add a certificate in ACM, then switch this on for real HTTPS.
+# resource "aws_lb_listener" "https" {
+#   load_balancer_arn = aws_lb.this.arn
+#   port              = 443
+#   protocol          = "HTTPS"
+#   ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+#   certificate_arn   = var.certificate_arn
+#   default_action { type = "fixed-response" fixed_response { content_type = "text/plain" message_body = "404" status_code = "404" } }
+# }
+`);
+
+  if (useAlb()) add('modules/alb/variables.tf', `
+variable "name"              { type = string }
+variable "public_subnet_ids" { type = list(string) }
+variable "security_group_id" { type = string }
+variable "enable_deletion_protection" {
+  type    = bool
+  default = false
+}
+variable "tags" { type = map(string) default = {} }
+`);
+
+  if (useAlb()) add('modules/alb/outputs.tf', `
+output "alb_arn"      { value = aws_lb.this.arn }
+output "listener_arn" { value = aws_lb_listener.http.arn }
+output "dns_name"     { value = aws_lb.this.dns_name }
+output "url"          { value = "http://\${aws_lb.this.dns_name}" }
+`);
+
+  /* ---------------- MODULE: nlb ---------------- */
+  if (selected.kafka) add('modules/nlb/main.tf', `
+# ---------------------------------------------------------------------------
+# Base module: Network Load Balancer
+# Kafka does not speak HTTP, so it needs a load balancer that works at the
+# plain TCP level. This one is internal: only things inside the VPC reach it.
+# ---------------------------------------------------------------------------
+
+resource "aws_lb" "this" {
+  name                             = substr("\${var.name}-nlb", 0, 32)
+  internal                         = var.internal
+  load_balancer_type               = "network"
+  subnets                          = var.subnet_ids
+  enable_cross_zone_load_balancing = true
+
+  tags = merge(var.tags, { Name = "\${var.name}-nlb" })
+}
+`);
+
+  if (selected.kafka) add('modules/nlb/variables.tf', `
+variable "name"       { type = string }
+variable "subnet_ids" { type = list(string) }
+variable "internal"   {
+  type    = bool
+  default = true
+}
+variable "tags"       { type = map(string) default = {} }
+`);
+
+  if (selected.kafka) add('modules/nlb/outputs.tf', `
+output "nlb_arn"  { value = aws_lb.this.arn }
+output "dns_name" { value = aws_lb.this.dns_name }
+`);
+
+  /* ---------------- MODULE: service-asg ---------------- */
+  if (anyEc2()) {
+    add('modules/service-asg/main.tf', `
+# ---------------------------------------------------------------------------
+# Base module: one containerised service on EC2
+#
+# It creates, in order:
+#   1. an IAM role so the server can be managed without SSH keys
+#   2. a launch template - the recipe for building one server
+#   3. a target group   - the list of servers the load balancer may use
+#   4. an auto scaling group - keeps the right number of servers alive
+#   5. a listener rule  - which URL path or port reaches this service
+#   6. a scaling policy - add servers when CPU is busy, remove when idle
+# ---------------------------------------------------------------------------
+
+data "aws_ami" "al2023" {
+  most_recent = true
+  owners      = ["amazon"]
+  filter {
+    name   = "name"
+    values = ["al2023-ami-2023.*-x86_64"]
+  }
+}
+
+resource "aws_iam_role" "instance" {
+  name = "\${var.name}-instance-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ec2.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+  tags = var.tags
+}
+
+# Lets you open a shell through the AWS console instead of opening port 22.
+resource "aws_iam_role_policy_attachment" "ssm" {
+  role       = aws_iam_role.instance.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_role_policy_attachment" "extra" {
+  for_each   = toset(var.extra_policy_arns)
+  role       = aws_iam_role.instance.name
+  policy_arn = each.value
+}
+
+resource "aws_iam_instance_profile" "this" {
+  name = "\${var.name}-instance-profile"
+  role = aws_iam_role.instance.name
+}
+
+resource "aws_launch_template" "this" {
+  name_prefix   = "\${var.name}-lt-"
+  image_id      = var.ami_id != "" ? var.ami_id : data.aws_ami.al2023.id
+  instance_type = var.instance_type
+
+  iam_instance_profile { arn = aws_iam_instance_profile.this.arn }
+
+  network_interfaces {
+    associate_public_ip_address = false
+    security_groups             = [var.security_group_id]
+  }
+
+  block_device_mappings {
+    device_name = "/dev/xvda"
+    ebs {
+      volume_size = var.root_volume_gb
+      volume_type = "gp3"
+      encrypted   = true
+    }
+  }
+
+  metadata_options {
+    http_tokens                 = "required"   # IMDSv2 only
+    http_endpoint               = "enabled"
+    http_put_response_hop_limit = 2            # 2 so Docker containers can reach it
+  }
+
+  user_data = base64encode(templatefile("\${path.module}/user_data.sh.tftpl", {
+    container_name  = var.name
+    docker_image    = var.docker_image
+    host_port       = var.host_port
+    container_port  = var.container_port
+    env_vars        = var.container_env
+    docker_command  = var.docker_command
+    extra_user_data = var.extra_user_data
+  }))
+
+  tag_specifications {
+    resource_type = "instance"
+    tags          = merge(var.tags, { Name = var.name })
+  }
+
+  lifecycle { create_before_destroy = true }
+}
+
+resource "aws_lb_target_group" "this" {
+  name        = substr("\${var.name}-tg", 0, 32)
+  port        = var.host_port
+  protocol    = var.target_protocol            # HTTP for web, TCP for Kafka
+  vpc_id      = var.vpc_id
+  target_type = "instance"
+
+  health_check {
+    enabled             = true
+    protocol            = var.health_check_protocol
+    path                = var.health_check_protocol == "HTTP" ? var.health_check_path : null
+    matcher             = var.health_check_protocol == "HTTP" ? var.health_check_matcher : null
+    interval            = 30
+    timeout             = var.health_check_protocol == "HTTP" ? 10 : 10
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+  }
+
+  deregistration_delay = 30
+  tags                 = merge(var.tags, { Name = "\${var.name}-tg" })
+
+  lifecycle { create_before_destroy = true }
+}
+
+resource "aws_autoscaling_group" "this" {
+  name                      = "\${var.name}-asg"
+  min_size                  = var.min_size
+  max_size                  = var.max_size
+  desired_capacity          = var.desired_capacity
+  vpc_zone_identifier       = var.subnet_ids
+  target_group_arns         = [aws_lb_target_group.this.arn]
+  health_check_type         = var.health_check_protocol == "HTTP" ? "ELB" : "EC2"
+  health_check_grace_period = var.health_check_grace_period
+
+  launch_template {
+    id      = aws_launch_template.this.id
+    version = "\$Latest"
+  }
+
+  # Replace servers gradually when the template changes.
+  instance_refresh {
+    strategy = "Rolling"
+    preferences { min_healthy_percentage = 50 }
+  }
+
+  dynamic "tag" {
+    for_each = merge(var.tags, { Name = var.name })
+    content {
+      key                 = tag.key
+      value               = tag.value
+      propagate_at_launch = true
+    }
+  }
+
+  lifecycle { create_before_destroy = true }
+}
+
+# Add or remove servers to keep average CPU near the target.
+resource "aws_autoscaling_policy" "cpu" {
+  name                   = "\${var.name}-cpu-target"
+  autoscaling_group_name = aws_autoscaling_group.this.name
+  policy_type            = "TargetTrackingScaling"
+
+  target_tracking_configuration {
+    predefined_metric_specification { predefined_metric_type = "ASGAverageCPUUtilization" }
+    target_value = var.cpu_target
+  }
+}
+
+# Web services: route a URL path to this target group.
+resource "aws_lb_listener_rule" "path" {
+  count        = var.listener_arn != "" ? 1 : 0
+  listener_arn = var.listener_arn
+  priority     = var.listener_priority
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.this.arn
+  }
+
+  condition {
+    path_pattern { values = var.path_patterns }
+  }
+}
+
+# TCP services: give the network load balancer its own listener port.
+resource "aws_lb_listener" "tcp" {
+  count             = var.nlb_arn != "" ? 1 : 0
+  load_balancer_arn = var.nlb_arn
+  port              = var.host_port
+  protocol          = "TCP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.this.arn
+  }
+}
+`);
+
+    add('modules/service-asg/user_data.sh.tftpl', `
+#!/bin/bash
+# This script runs once, automatically, the first time a server boots.
+set -euxo pipefail
+
+dnf update -y
+dnf install -y docker
+systemctl enable --now docker
+
+# Ask the server for its own private address (IMDSv2 needs a token first).
+TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+PRIVATE_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
+echo "private ip is $PRIVATE_IP"
+
+ENV_ARGS=""
+%{ for key, value in env_vars ~}
+ENV_ARGS="$ENV_ARGS -e \${key}=\${value}"
+%{ endfor ~}
+
+docker pull \${docker_image}
+
+docker run -d \\
+  --name \${container_name} \\
+  --restart unless-stopped \\
+  -p \${host_port}:\${container_port} \\
+  $ENV_ARGS \\
+  \${docker_image} \${docker_command}
+
+\${extra_user_data}
+
+echo "container \${container_name} started on port \${host_port}"
+`);
+
+    add('modules/service-asg/variables.tf', `
+variable "name"              {
+  type        = string
+  description = "Service name, e.g. acme-dev-keycloak"
+}
+variable "vpc_id"            { type = string }
+variable "subnet_ids"        {
+  type        = list(string)
+  description = "Usually the private subnets"
+}
+variable "security_group_id" { type = string }
+
+variable "instance_type"  {
+  type    = string
+  default = "t3.medium"
+}
+variable "ami_id"         {
+  type        = string
+  default     = ""
+  description = "Leave empty to use the newest Amazon Linux 2023"
+}
+variable "root_volume_gb" {
+  type    = number
+  default = 30
+}
+
+variable "docker_image"   {
+  type        = string
+  description = "e.g. quay.io/keycloak/keycloak:26.0"
+}
+variable "docker_command" {
+  type        = string
+  default     = ""
+  description = "Arguments passed to the container, e.g. start-dev"
+}
+variable "container_env"  { type = map(string) default = {} }
+variable "host_port"      {
+  type    = number
+  default = 8080
+}
+variable "container_port" {
+  type    = number
+  default = 8080
+}
+variable "extra_user_data" {
+  type    = string
+  default = ""
+}
+
+variable "min_size"         {
+  type    = number
+  default = 1
+}
+variable "max_size"         {
+  type    = number
+  default = 4
+}
+variable "desired_capacity" {
+  type    = number
+  default = 2
+}
+variable "cpu_target"       {
+  type    = number
+  default = 60
+}
+variable "health_check_grace_period" {
+  type    = number
+  default = 300
+}
+
+variable "target_protocol"       {
+  type        = string
+  default     = "HTTP"
+  description = "HTTP for web apps, TCP for Kafka"
+}
+variable "health_check_protocol" {
+  type    = string
+  default = "HTTP"
+}
+variable "health_check_path"     {
+  type    = string
+  default = "/"
+}
+variable "health_check_matcher"  {
+  type    = string
+  default = "200-399"
+}
+
+variable "listener_arn"      {
+  type        = string
+  default     = ""
+  description = "ALB listener to attach a path rule to"
+}
+variable "path_patterns"     {
+  type    = list(string)
+  default = ["/*"]
+}
+variable "listener_priority" {
+  type    = number
+  default = 100
+}
+variable "nlb_arn"           {
+  type        = string
+  default     = ""
+  description = "Network load balancer for TCP services"
+}
+
+variable "extra_policy_arns" {
+  type    = list(string)
+  default = []
+}
+variable "tags"              { type = map(string) default = {} }
+`);
+
+    add('modules/service-asg/outputs.tf', `
+output "asg_name"          { value = aws_autoscaling_group.this.name }
+output "target_group_arn"  { value = aws_lb_target_group.this.arn }
+output "instance_role_arn" { value = aws_iam_role.instance.arn }
+output "instance_role_name"{ value = aws_iam_role.instance.name }
+`);
+  }
+
+  /* ---------------- MODULE: s3 ---------------- */
+  if (selected.s3 || selected.lambda) {
+    add('modules/s3/main.tf', `
+# ---------------------------------------------------------------------------
+# Base module: two S3 buckets
+# S3 is a giant filing cabinet. A "bucket" is one drawer with a globally
+# unique name; a "key" is the full file name inside it.
+# ---------------------------------------------------------------------------
+
+resource "aws_s3_bucket" "source" {
+  bucket        = var.source_bucket_name
+  force_destroy = var.force_destroy
+  tags          = merge(var.tags, { Name = var.source_bucket_name, Role = "source" })
+}
+
+resource "aws_s3_bucket" "destination" {
+  bucket        = var.destination_bucket_name
+  force_destroy = var.force_destroy
+  tags          = merge(var.tags, { Name = var.destination_bucket_name, Role = "destination" })
+}
+
+# Keep old copies of a file when it is overwritten or deleted.
+resource "aws_s3_bucket_versioning" "source" {
+  bucket = aws_s3_bucket.source.id
+  versioning_configuration { status = var.versioning ? "Enabled" : "Suspended" }
+}
+
+resource "aws_s3_bucket_versioning" "destination" {
+  bucket = aws_s3_bucket.destination.id
+  versioning_configuration { status = var.versioning ? "Enabled" : "Suspended" }
+}
+
+# Encrypt everything at rest.
+resource "aws_s3_bucket_server_side_encryption_configuration" "source" {
+  bucket = aws_s3_bucket.source.id
+  rule {
+    apply_server_side_encryption_by_default { sse_algorithm = "AES256" }
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "destination" {
+  bucket = aws_s3_bucket.destination.id
+  rule {
+    apply_server_side_encryption_by_default { sse_algorithm = "AES256" }
+  }
+}
+
+# Nothing here should ever be public.
+resource "aws_s3_bucket_public_access_block" "source" {
+  bucket                  = aws_s3_bucket.source.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_public_access_block" "destination" {
+  bucket                  = aws_s3_bucket.destination.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+`);
+
+    add('modules/s3/variables.tf', `
+variable "source_bucket_name"      { type = string }
+variable "destination_bucket_name" { type = string }
+variable "versioning"    {
+  type    = bool
+  default = true
+}
+variable "force_destroy" {
+  type        = bool
+  default     = false
+  description = "true lets terraform destroy delete non-empty buckets. Handy in a lab, dangerous elsewhere."
+}
+variable "tags"          { type = map(string) default = {} }
+`);
+
+    add('modules/s3/outputs.tf', `
+output "source_bucket_name"      { value = aws_s3_bucket.source.id }
+output "source_bucket_arn"       { value = aws_s3_bucket.source.arn }
+output "destination_bucket_name" { value = aws_s3_bucket.destination.id }
+output "destination_bucket_arn"  { value = aws_s3_bucket.destination.arn }
+`);
+  }
+
+  /* ---------------- MODULE: lambda ---------------- */
+  if (selected.lambda) {
+    add('modules/lambda-s3-mover/src/index.py', `
+"""
+Move files from one S3 bucket to another and rename them.
+
+Two jobs, chosen by the "action" field of the event:
+
+  {"action": "count"}  -> just report how many objects are in the source bucket
+  {"action": "move"}   -> copy every object across, renaming it
+
+The new name records the position and the total, so a folder of 42 files
+becomes:  record_0001_of_0042.csv ... record_0042_of_0042.csv
+"""
+
+import os
+import boto3
+from botocore.exceptions import ClientError
+
+s3 = boto3.client("s3")
+
+SOURCE_BUCKET = os.environ["SOURCE_BUCKET"]
+DESTINATION_BUCKET = os.environ["DESTINATION_BUCKET"]
+SOURCE_PREFIX = os.environ.get("SOURCE_PREFIX", "")
+DESTINATION_PREFIX = os.environ.get("DESTINATION_PREFIX", "")
+RENAME_PREFIX = os.environ.get("RENAME_PREFIX", "record")
+PAD_WIDTH = int(os.environ.get("PAD_WIDTH", "4"))
+DELETE_AFTER_COPY = os.environ.get("DELETE_AFTER_COPY", "false").lower() == "true"
+
+
+def list_objects(bucket, prefix):
+    """Return every object key, page by page. S3 answers 1000 at a time."""
+    keys = []
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for item in page.get("Contents", []):
+            if not item["Key"].endswith("/"):        # skip folder markers
+                keys.append(item["Key"])
+    return sorted(keys)
+
+
+def split_extension(key):
+    name = key.rsplit("/", 1)[-1]
+    if "." in name:
+        return name.rsplit(".", 1)[1].lower()
+    return ""
+
+
+def build_new_key(index, total, old_key):
+    extension = split_extension(old_key)
+    number = str(index).zfill(PAD_WIDTH)
+    total_text = str(total).zfill(PAD_WIDTH)
+    filename = RENAME_PREFIX + "_" + number + "_of_" + total_text
+    if extension:
+        filename = filename + "." + extension
+    return DESTINATION_PREFIX + filename
+
+
+def handler(event, context):
+    action = (event or {}).get("action", "move")
+    keys = list_objects(SOURCE_BUCKET, SOURCE_PREFIX)
+    total = len(keys)
+
+    if action == "count":
+        return {"action": "count", "source_bucket": SOURCE_BUCKET, "object_count": total}
+
+    moved = []
+    failed = []
+
+    for position, old_key in enumerate(keys, start=1):
+        new_key = build_new_key(position, total, old_key)
+        try:
+            s3.copy_object(
+                Bucket=DESTINATION_BUCKET,
+                Key=new_key,
+                CopySource={"Bucket": SOURCE_BUCKET, "Key": old_key},
+                MetadataDirective="COPY",
+            )
+            if DELETE_AFTER_COPY:
+                s3.delete_object(Bucket=SOURCE_BUCKET, Key=old_key)
+            moved.append({"from": old_key, "to": new_key, "position": position, "of": total})
+            print("copied " + old_key + " -> " + new_key)
+        except ClientError as error:
+            failed.append({"key": old_key, "error": str(error)})
+            print("FAILED " + old_key + ": " + str(error))
+
+    return {
+        "action": "move",
+        "source_bucket": SOURCE_BUCKET,
+        "destination_bucket": DESTINATION_BUCKET,
+        "object_count": total,
+        "moved_count": len(moved),
+        "failed_count": len(failed),
+        "moved": moved[:50],
+        "failed": failed[:50],
+    }
+`);
+
+    add('modules/lambda-s3-mover/main.tf', `
+# ---------------------------------------------------------------------------
+# Base module: the S3 file mover (AWS Lambda)
+# Lambda runs a small program on demand. No servers to patch, and you only
+# pay for the milliseconds it runs.
+# ---------------------------------------------------------------------------
+
+# Terraform zips the src folder for you every time the code changes.
+data "archive_file" "lambda" {
+  type        = "zip"
+  source_dir  = "\${path.module}/src"
+  output_path = "\${path.module}/builds/\${var.name}.zip"
+}
+
+resource "aws_iam_role" "lambda" {
+  name = "\${var.name}-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+  tags = var.tags
+}
+
+# Permission to write its own log lines.
+resource "aws_iam_role_policy_attachment" "logs" {
+  role       = aws_iam_role.lambda.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+# Permission to read the source bucket and write the destination bucket -
+# and nothing else anywhere.
+resource "aws_iam_role_policy" "s3" {
+  name = "\${var.name}-s3-access"
+  role = aws_iam_role.lambda.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = concat([
+      {
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket", "s3:GetBucketLocation"]
+        Resource = [var.source_bucket_arn, var.destination_bucket_arn]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:GetObjectVersion"]
+        Resource = ["\${var.source_bucket_arn}/*"]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:PutObject"]
+        Resource = ["\${var.destination_bucket_arn}/*"]
+      }
+      ],
+      var.delete_after_copy ? [{
+        Effect   = "Allow"
+        Action   = ["s3:DeleteObject"]
+        Resource = ["\${var.source_bucket_arn}/*"]
+    }] : [])
+  })
+}
+
+resource "aws_cloudwatch_log_group" "lambda" {
+  name              = "/aws/lambda/\${var.name}"
+  retention_in_days = var.log_retention_days
+  tags              = var.tags
+}
+
+resource "aws_lambda_function" "this" {
+  function_name    = var.name
+  role             = aws_iam_role.lambda.arn
+  handler          = "index.handler"
+  runtime          = "python3.12"
+  filename         = data.archive_file.lambda.output_path
+  source_code_hash = data.archive_file.lambda.output_base64sha256
+  timeout          = var.timeout_seconds
+  memory_size      = var.memory_mb
+
+  environment {
+    variables = {
+      SOURCE_BUCKET      = var.source_bucket_name
+      DESTINATION_BUCKET = var.destination_bucket_name
+      SOURCE_PREFIX      = var.source_prefix
+      DESTINATION_PREFIX = var.destination_prefix
+      RENAME_PREFIX      = var.rename_prefix
+      PAD_WIDTH          = tostring(var.pad_width)
+      DELETE_AFTER_COPY  = tostring(var.delete_after_copy)
+    }
+  }
+
+  depends_on = [aws_cloudwatch_log_group.lambda]
+  tags       = var.tags
+}
+`);
+
+    add('modules/lambda-s3-mover/variables.tf', `
+variable "name" { type = string }
+variable "source_bucket_name"      { type = string }
+variable "source_bucket_arn"       { type = string }
+variable "destination_bucket_name" { type = string }
+variable "destination_bucket_arn"  { type = string }
+variable "source_prefix"      {
+  type        = string
+  default     = ""
+  description = "Only move files under this folder"
+}
+variable "destination_prefix" {
+  type    = string
+  default = ""
+}
+variable "rename_prefix"      {
+  type    = string
+  default = "record"
+}
+variable "pad_width"          {
+  type    = number
+  default = 4
+}
+variable "delete_after_copy"  {
+  type        = bool
+  default     = false
+  description = "true = move, false = copy"
+}
+variable "timeout_seconds"    {
+  type    = number
+  default = 300
+}
+variable "memory_mb"          {
+  type    = number
+  default = 512
+}
+variable "log_retention_days" {
+  type    = number
+  default = 14
+}
+variable "tags"               { type = map(string) default = {} }
+`);
+
+    add('modules/lambda-s3-mover/outputs.tf', `
+output "function_arn"  { value = aws_lambda_function.this.arn }
+output "function_name" { value = aws_lambda_function.this.function_name }
+output "role_arn"      { value = aws_iam_role.lambda.arn }
+`);
+  }
+
+  /* ---------------- MODULE: step functions ---------------- */
+  if (selected.sfn) {
+    add('modules/step-functions/main.tf', `
+# ---------------------------------------------------------------------------
+# Base module: Step Functions state machine
+# A state machine is a flowchart AWS runs for you. Each box is a "state".
+# This one counts the files, decides whether there is anything to do, and
+# only then runs the mover.
+# ---------------------------------------------------------------------------
+
+resource "aws_iam_role" "sfn" {
+  name = "\${var.name}-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "states.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+  tags = var.tags
+}
+
+resource "aws_iam_role_policy" "invoke_lambda" {
+  name = "\${var.name}-invoke-lambda"
+  role = aws_iam_role.sfn.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["lambda:InvokeFunction"]
+      Resource = [var.mover_function_arn, "\${var.mover_function_arn}:*"]
+    }]
+  })
+}
+
+resource "aws_cloudwatch_log_group" "sfn" {
+  name              = "/aws/vendedlogs/states/\${var.name}"
+  retention_in_days = var.log_retention_days
+  tags              = var.tags
+}
+
+resource "aws_iam_role_policy" "logging" {
+  name = "\${var.name}-logging"
+  role = aws_iam_role.sfn.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "logs:CreateLogDelivery", "logs:GetLogDelivery", "logs:UpdateLogDelivery",
+        "logs:DeleteLogDelivery", "logs:ListLogDeliveries", "logs:PutResourcePolicy",
+        "logs:DescribeResourcePolicies", "logs:DescribeLogGroups"
+      ]
+      Resource = ["*"]
+    }]
+  })
+}
+
+resource "aws_sfn_state_machine" "this" {
+  name     = var.name
+  role_arn = aws_iam_role.sfn.arn
+
+  definition = jsonencode({
+    Comment = "Count the files in the source bucket, then move and rename them"
+    StartAt = "CountObjects"
+    States = {
+      CountObjects = {
+        Type       = "Task"
+        Resource   = "arn:aws:states:::lambda:invoke"
+        Parameters = {
+          FunctionName = var.mover_function_arn
+          Payload      = { action = "count" }
+        }
+        ResultSelector = { "objectCount.$" = "$.Payload.object_count" }
+        ResultPath     = "$.counted"
+        Retry = [{
+          ErrorEquals     = ["Lambda.ServiceException", "Lambda.TooManyRequestsException", "States.TaskFailed"]
+          IntervalSeconds = 5
+          MaxAttempts     = 3
+          BackoffRate     = 2
+        }]
+        Next = "AnyFilesToMove"
+      }
+
+      AnyFilesToMove = {
+        Type    = "Choice"
+        Choices = [{
+          Variable           = "$.counted.objectCount"
+          NumericGreaterThan = 0
+          Next               = "MoveAndRename"
+        }]
+        Default = "NothingToDo"
+      }
+
+      MoveAndRename = {
+        Type       = "Task"
+        Resource   = "arn:aws:states:::lambda:invoke"
+        Parameters = {
+          FunctionName = var.mover_function_arn
+          Payload      = { action = "move" }
+        }
+        ResultSelector = {
+          "movedCount.$"  = "$.Payload.moved_count"
+          "objectCount.$" = "$.Payload.object_count"
+          "failedCount.$" = "$.Payload.failed_count"
+        }
+        ResultPath = "$.result"
+        Retry = [{
+          ErrorEquals     = ["States.TaskFailed"]
+          IntervalSeconds = 10
+          MaxAttempts     = 2
+          BackoffRate     = 2
+        }]
+        Catch = [{
+          ErrorEquals = ["States.ALL"]
+          ResultPath  = "$.error"
+          Next        = "MoveFailed"
+        }]
+        Next = "Done"
+      }
+
+      NothingToDo = { Type = "Succeed" }
+      Done        = { Type = "Succeed" }
+      MoveFailed  = { Type = "Fail", Error = "MoveFailed", Cause = "The mover function raised an error. Check its CloudWatch logs." }
+    }
+  })
+
+  logging_configuration {
+    log_destination        = "\${aws_cloudwatch_log_group.sfn.arn}:*"
+    include_execution_data = true
+    level                  = "ALL"
+  }
+
+  tags = var.tags
+}
+
+# ---- optional timer that starts the workflow on a schedule ----
+resource "aws_iam_role" "events" {
+  count = var.schedule_expression == "" ? 0 : 1
+  name  = "\${var.name}-events-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "events.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+  tags = var.tags
+}
+
+resource "aws_iam_role_policy" "events_start" {
+  count = var.schedule_expression == "" ? 0 : 1
+  name  = "\${var.name}-events-start"
+  role  = aws_iam_role.events[0].id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["states:StartExecution"]
+      Resource = [aws_sfn_state_machine.this.arn]
+    }]
+  })
+}
+
+resource "aws_cloudwatch_event_rule" "schedule" {
+  count               = var.schedule_expression == "" ? 0 : 1
+  name                = "\${var.name}-schedule"
+  description         = "Starts the file mover workflow"
+  schedule_expression = var.schedule_expression
+  tags                = var.tags
+}
+
+resource "aws_cloudwatch_event_target" "schedule" {
+  count     = var.schedule_expression == "" ? 0 : 1
+  rule      = aws_cloudwatch_event_rule.schedule[0].name
+  target_id = "start-state-machine"
+  arn       = aws_sfn_state_machine.this.arn
+  role_arn  = aws_iam_role.events[0].arn
+}
+`);
+
+    add('modules/step-functions/variables.tf', `
+variable "name"               { type = string }
+variable "mover_function_arn" { type = string }
+variable "schedule_expression" {
+  type        = string
+  default     = ""
+  description = "e.g. rate(1 hour) or cron(0 3 * * ? *). Empty means manual runs only."
+}
+variable "log_retention_days" {
+  type    = number
+  default = 14
+}
+variable "tags"               { type = map(string) default = {} }
+`);
+
+    add('modules/step-functions/outputs.tf', `
+output "state_machine_arn"  { value = aws_sfn_state_machine.this.arn }
+output "state_machine_name" { value = aws_sfn_state_machine.this.name }
+`);
+  }
+
+  /* ---------------- INFRASTRUCTURE ENV ---------------- */
+  const envDir = `infrastructure/envs/${E}`;
+
+  add(envDir + '/providers.tf', `
+terraform {
+  required_version = ">= 1.6.0"
+
+  required_providers {
+    aws     = { source = "hashicorp/aws", version = "~> 5.60" }
+    archive = { source = "hashicorp/archive", version = "~> 2.4" }
+  }
+}
+
+provider "aws" {
+  region = var.region
+
+  # Every resource gets these tags automatically - it makes the bill readable.
+  default_tags {
+    tags = {
+      Project     = var.project
+      Environment = var.environment
+      ManagedBy   = "terraform"
+    }
+  }
+}
+`);
+
+  add(envDir + '/backend.tf', `
+# Terraform records what it built in a "state file". By default that file sits
+# on your laptop, which is fine alone and bad in a team. When you are ready,
+# create an S3 bucket for state, then uncomment this block and run
+# terraform init -migrate-state
+#
+# terraform {
+#   backend "s3" {
+#     bucket       = "${P}-terraform-state"
+#     key          = "${E}/terraform.tfstate"
+#     region       = "${cfg.region}"
+#     encrypt      = true
+#     use_lockfile = true
+#   }
+# }
+`);
+
+  const svcBlocks = [];
+  const alb_ports = [];
+  httpServices().forEach(s => alb_ports.push(s.port));
+
+  let mainTf = `
+# ---------------------------------------------------------------------------
+# ${P} / ${E}
+# This is the "use the modules" layer. Run terraform from THIS folder.
+# ---------------------------------------------------------------------------
+
+locals {
+  name = "\${var.project}-\${var.environment}"
+  tags = {
+    Project     = var.project
+    Environment = var.environment
+  }
+}
+
+module "network" {
+  source = "../../../modules/network"
+
+  name               = local.name
+  region             = var.region
+  vpc_cidr           = var.vpc_cidr
+  az_count           = var.az_count
+  enable_nat_gateway = var.enable_nat_gateway
+  tags               = local.tags
+}
+
+module "security" {
+  source = "../../../modules/security"
+
+  name               = local.name
+  vpc_id             = module.network.vpc_id
+  vpc_cidr           = module.network.vpc_cidr
+  app_ports          = ${JSON.stringify([...new Set(alb_ports)].length ? [...new Set(alb_ports)] : [8080])}
+  vpc_internal_ports = ${selected.kafka ? '[9092]' : '[]'}
+  allowed_web_cidrs  = var.allowed_web_cidrs
+  tags               = local.tags
+}
+`;
+
+  if (useAlb()) mainTf += `
+module "alb" {
+  source = "../../../modules/alb"
+
+  name              = local.name
+  public_subnet_ids = module.network.public_subnet_ids
+  security_group_id = module.security.alb_security_group_id
+  tags              = local.tags
+}
+`;
+
+  if (selected.kafka) mainTf += `
+module "nlb" {
+  source = "../../../modules/nlb"
+
+  name       = "\${local.name}-kafka"
+  subnet_ids = module.network.private_subnet_ids
+  internal   = true
+  tags       = local.tags
+}
+`;
+
+  if (selected.keycloak) mainTf += `
+# --- Keycloak: identity and single sign-on -------------------------------
+module "keycloak" {
+  source = "../../../modules/service-asg"
+
+  name              = "\${local.name}-keycloak"
+  vpc_id            = module.network.vpc_id
+  subnet_ids        = module.network.private_subnet_ids
+  security_group_id = module.security.app_security_group_id
+
+  instance_type  = var.instance_type
+  docker_image   = var.keycloak_image
+  docker_command = "start-dev"
+  host_port      = 8080
+  container_port = 8080
+
+  container_env = {
+    KC_BOOTSTRAP_ADMIN_USERNAME = var.keycloak_admin_user
+    KC_BOOTSTRAP_ADMIN_PASSWORD = var.keycloak_admin_password
+    KC_HTTP_ENABLED             = "true"
+    KC_HOSTNAME_STRICT          = "false"
+    KC_PROXY_HEADERS            = "xforwarded"
+    KC_HTTP_RELATIVE_PATH       = "/keycloak"
+  }
+
+  min_size         = var.asg_min_size
+  max_size         = var.asg_max_size
+  desired_capacity = var.asg_desired_capacity
+
+  health_check_path = "/keycloak/realms/master"
+  listener_arn      = ${useAlb() ? 'module.alb.listener_arn' : '""'}
+  path_patterns     = ["/keycloak", "/keycloak/*"]
+  listener_priority = 10
+
+  tags = local.tags
+}
+`;
+
+  if (selected.nifi) mainTf += `
+# --- Apache NiFi: moving and reshaping data ------------------------------
+module "nifi" {
+  source = "../../../modules/service-asg"
+
+  name              = "\${local.name}-nifi"
+  vpc_id            = module.network.vpc_id
+  subnet_ids        = module.network.private_subnet_ids
+  security_group_id = module.security.app_security_group_id
+
+  instance_type  = var.instance_type
+  docker_image   = var.nifi_image
+  host_port      = 8080
+  container_port = 8080
+
+  container_env = {
+    NIFI_WEB_HTTP_PORT = "8080"
+    NIFI_WEB_PROXY_CONTEXT_PATH = "/nifi"
+    NIFI_JVM_HEAP_INIT = "1g"
+    NIFI_JVM_HEAP_MAX  = "2g"
+  }
+
+  # NiFi takes a couple of minutes to start; give it time before health checks bite.
+  health_check_grace_period = 420
+  health_check_path         = "/nifi/"
+  health_check_matcher      = "200-399"
+
+  min_size         = 1
+  max_size         = 2
+  desired_capacity = 1
+
+  listener_arn      = ${useAlb() ? 'module.alb.listener_arn' : '""'}
+  path_patterns     = ["/nifi", "/nifi/*"]
+  listener_priority = 20
+
+  tags = local.tags
+}
+`;
+
+  if (selected.kafka) mainTf += `
+# --- Apache Kafka: the message queue -------------------------------------
+# Single-node KRaft mode. Good for learning, not for production.
+module "kafka" {
+  source = "../../../modules/service-asg"
+
+  name              = "\${local.name}-kafka"
+  vpc_id            = module.network.vpc_id
+  subnet_ids        = module.network.private_subnet_ids
+  security_group_id = module.security.app_security_group_id
+
+  instance_type  = var.instance_type
+  docker_image   = var.kafka_image
+  host_port      = 9092
+  container_port = 9092
+
+  container_env = {
+    KAFKA_NODE_ID                                  = "1"
+    KAFKA_PROCESS_ROLES                            = "broker,controller"
+    KAFKA_LISTENERS                                = "PLAINTEXT://:9092,CONTROLLER://:9093"
+    KAFKA_ADVERTISED_LISTENERS                     = "PLAINTEXT://$PRIVATE_IP:9092"
+    KAFKA_CONTROLLER_QUORUM_VOTERS                 = "1@localhost:9093"
+    KAFKA_CONTROLLER_LISTENER_NAMES                = "CONTROLLER"
+    KAFKA_LISTENER_SECURITY_PROTOCOL_MAP           = "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+    KAFKA_INTER_BROKER_LISTENER_NAME               = "PLAINTEXT"
+    KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR         = "1"
+    KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR = "1"
+    KAFKA_TRANSACTION_STATE_LOG_MIN_ISR            = "1"
+    CLUSTER_ID                                     = "kafka-\${var.environment}-cluster"
+  }
+
+  # Kafka speaks plain TCP, so it uses the network load balancer.
+  target_protocol       = "TCP"
+  health_check_protocol = "TCP"
+  nlb_arn               = module.nlb.nlb_arn
+
+  min_size         = 1
+  max_size         = 1
+  desired_capacity = 1
+
+  tags = local.tags
+}
+`;
+
+  if (selected.s3 || selected.lambda) mainTf += `
+# --- Storage --------------------------------------------------------------
+module "storage" {
+  source = "../../../modules/s3"
+
+  source_bucket_name      = var.source_bucket_name
+  destination_bucket_name = var.destination_bucket_name
+  force_destroy           = var.bucket_force_destroy
+  tags                    = local.tags
+}
+`;
+
+  if (selected.lambda) mainTf += `
+# --- The file mover -------------------------------------------------------
+module "file_mover" {
+  source = "../../../modules/lambda-s3-mover"
+
+  name                    = "\${local.name}-s3-file-mover"
+  source_bucket_name      = module.storage.source_bucket_name
+  source_bucket_arn       = module.storage.source_bucket_arn
+  destination_bucket_name = module.storage.destination_bucket_name
+  destination_bucket_arn  = module.storage.destination_bucket_arn
+
+  rename_prefix     = var.rename_prefix
+  pad_width         = var.pad_width
+  delete_after_copy = var.delete_after_copy
+
+  tags = local.tags
+}
+`;
+
+  if (selected.sfn && selected.lambda) mainTf += `
+# --- The workflow that runs it -------------------------------------------
+module "file_workflow" {
+  source = "../../../modules/step-functions"
+
+  name                = "\${local.name}-file-workflow"
+  mover_function_arn  = module.file_mover.function_arn
+  schedule_expression = var.schedule_expression
+
+  tags = local.tags
+}
+`;
+
+  if (selected.cw && anyEc2()) mainTf += `
+# --- Monitoring -----------------------------------------------------------
+resource "aws_cloudwatch_metric_alarm" "high_cpu" {
+  for_each = {
+${[selected.keycloak && '    keycloak = module.keycloak.asg_name', selected.nifi && '    nifi     = module.nifi.asg_name', selected.kafka && '    kafka    = module.kafka.asg_name'].filter(Boolean).join('\n')}
+  }
+
+  alarm_name          = "\${local.name}-\${each.key}-high-cpu"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 300
+  statistic           = "Average"
+  threshold           = 85
+  alarm_description   = "Average CPU above 85 percent for ten minutes"
+  dimensions          = { AutoScalingGroupName = each.value }
+  tags                = local.tags
+}
+`;
+
+  add(envDir + '/main.tf', mainTf);
+
+  add(envDir + '/variables.tf', `
+variable "project"     { type = string  default = "${P}" }
+variable "environment" { type = string  default = "${E}" }
+variable "region"      { type = string  default = "${cfg.region}" }
+
+variable "vpc_cidr"           { type = string default = "${cfg.vpc_cidr}" }
+variable "az_count"           { type = number default = ${cfg.az_count} }
+variable "enable_nat_gateway" {
+  type    = bool
+  default = true
+}
+variable "allowed_web_cidrs" {
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+  description = "Change to [\\"YOUR.IP.ADDRESS/32\\"] so only you can reach the load balancer"
+}
+
+variable "instance_type"        { type = string default = "${cfg.instance_type}" }
+variable "asg_min_size"         { type = number default = ${cfg.asg_min} }
+variable "asg_desired_capacity" { type = number default = ${cfg.asg_desired} }
+variable "asg_max_size"         { type = number default = ${cfg.asg_max} }
+
+variable "keycloak_image" { type = string default = "${cfg.keycloak_image}" }
+variable "nifi_image"     { type = string default = "${cfg.nifi_image}" }
+variable "kafka_image"    { type = string default = "${cfg.kafka_image}" }
+
+variable "keycloak_admin_user" {
+  type    = string
+  default = "admin"
+}
+variable "keycloak_admin_password" {
+  type        = string
+  sensitive   = true
+  default     = "ChangeMe-please-1234"
+  description = "Move this to AWS Secrets Manager before anyone real uses it"
+}
+
+variable "source_bucket_name"      { type = string default = "${cfg.src_bucket}" }
+variable "destination_bucket_name" { type = string default = "${cfg.dst_bucket}" }
+variable "bucket_force_destroy"    {
+  type    = bool
+  default = true
+}
+
+variable "rename_prefix"       { type = string default = "${cfg.rename_prefix}" }
+variable "pad_width"           { type = number default = ${cfg.pad_width} }
+variable "delete_after_copy"   {
+  type    = bool
+  default = false
+}
+variable "schedule_expression" { type = string default = "${cfg.schedule}" }
+`);
+
+  add(envDir + '/terraform.tfvars', `
+# Values for this environment. Edit here rather than in the modules.
+project     = "${P}"
+environment = "${E}"
+region      = "${cfg.region}"
+
+vpc_cidr = "${cfg.vpc_cidr}"
+az_count = ${cfg.az_count}
+
+instance_type        = "${cfg.instance_type}"
+asg_min_size         = ${cfg.asg_min}
+asg_desired_capacity = ${cfg.asg_desired}
+asg_max_size         = ${cfg.asg_max}
+
+source_bucket_name      = "${cfg.src_bucket}"
+destination_bucket_name = "${cfg.dst_bucket}"
+rename_prefix           = "${cfg.rename_prefix}"
+pad_width               = ${cfg.pad_width}
+delete_after_copy       = false
+schedule_expression     = "${cfg.schedule}"
+
+# Recommended: lock the front door to your own address
+# allowed_web_cidrs = ["203.0.113.10/32"]
+`);
+
+  let outs = `
+output "vpc_id" { value = module.network.vpc_id }
+`;
+  if (useAlb()) outs += `
+output "load_balancer_url" {
+  value       = module.alb.url
+  description = "Open this in a browser once the targets are healthy"
+}
+${selected.keycloak ? 'output "keycloak_url" { value = "\${module.alb.url}/keycloak" }\n' : ''}${selected.nifi ? 'output "nifi_url" { value = "\${module.alb.url}/nifi" }\n' : ''}`;
+  if (selected.kafka) outs += `
+output "kafka_bootstrap_server" {
+  value       = "\${module.nlb.dns_name}:9092"
+  description = "Use this from inside the VPC only"
+}
+`;
+  if (selected.s3 || selected.lambda) outs += `
+output "source_bucket"      { value = module.storage.source_bucket_name }
+output "destination_bucket" { value = module.storage.destination_bucket_name }
+`;
+  if (selected.lambda) outs += `output "file_mover_function" { value = module.file_mover.function_name }\n`;
+  if (selected.sfn && selected.lambda) outs += `output "workflow_arn" { value = module.file_workflow.state_machine_arn }\n`;
+  add(envDir + '/outputs.tf', outs);
+
+  /* ---------------- EXAMPLES ---------------- */
+  if (selected.keycloak) add('examples/keycloak/main.tf', `
+# Example: one Keycloak service, nothing else.
+# Run: terraform init && terraform apply
+
+module "network" {
+  source   = "../../modules/network"
+  name     = "example-keycloak"
+  region   = "${cfg.region}"
+  az_count = 2
+}
+
+module "security" {
+  source    = "../../modules/security"
+  name      = "example-keycloak"
+  vpc_id    = module.network.vpc_id
+  vpc_cidr  = module.network.vpc_cidr
+  app_ports = [8080]
+}
+
+module "alb" {
+  source            = "../../modules/alb"
+  name              = "example-keycloak"
+  public_subnet_ids = module.network.public_subnet_ids
+  security_group_id = module.security.alb_security_group_id
+}
+
+module "keycloak" {
+  source            = "../../modules/service-asg"
+  name              = "example-keycloak"
+  vpc_id            = module.network.vpc_id
+  subnet_ids        = module.network.private_subnet_ids
+  security_group_id = module.security.app_security_group_id
+
+  docker_image   = "${cfg.keycloak_image}"
+  docker_command = "start-dev"
+  host_port      = 8080
+  container_port = 8080
+
+  container_env = {
+    KC_BOOTSTRAP_ADMIN_USERNAME = "admin"
+    KC_BOOTSTRAP_ADMIN_PASSWORD = "ChangeMe-please-1234"
+    KC_HTTP_ENABLED             = "true"
+    KC_HOSTNAME_STRICT          = "false"
+    KC_PROXY_HEADERS            = "xforwarded"
+  }
+
+  health_check_path = "/realms/master"
+  listener_arn      = module.alb.listener_arn
+  path_patterns     = ["/*"]
+  listener_priority = 10
+}
+
+output "url" { value = module.alb.url }
+`);
+
+  if (selected.nifi) add('examples/nifi/main.tf', `
+# Example: a single NiFi server behind a load balancer.
+
+module "network"  { source = "../../modules/network" name = "example-nifi" region = "${cfg.region}" }
+module "security" {
+  source    = "../../modules/security"
+  name      = "example-nifi"
+  vpc_id    = module.network.vpc_id
+  vpc_cidr  = module.network.vpc_cidr
+  app_ports = [8080]
+}
+module "alb"      {
+  source            = "../../modules/alb"
+  name              = "example-nifi"
+  public_subnet_ids = module.network.public_subnet_ids
+  security_group_id = module.security.alb_security_group_id
+}
+
+module "nifi" {
+  source            = "../../modules/service-asg"
+  name              = "example-nifi"
+  vpc_id            = module.network.vpc_id
+  subnet_ids        = module.network.private_subnet_ids
+  security_group_id = module.security.app_security_group_id
+
+  docker_image   = "${cfg.nifi_image}"
+  host_port      = 8080
+  container_port = 8080
+  container_env  = { NIFI_WEB_HTTP_PORT = "8080" }
+
+  min_size                  = 1
+  max_size                  = 1
+  desired_capacity          = 1
+  health_check_grace_period = 420
+  health_check_path         = "/nifi/"
+
+  listener_arn      = module.alb.listener_arn
+  path_patterns     = ["/*"]
+  listener_priority = 10
+}
+
+output "url" { value = "\${module.alb.url}/nifi" }
+`);
+
+  if (selected.kafka) add('examples/kafka/main.tf', `
+# Example: a single Kafka broker reachable inside the VPC on port 9092.
+
+module "network"  { source = "../../modules/network" name = "example-kafka" region = "${cfg.region}" }
+module "security" {
+  source             = "../../modules/security"
+  name               = "example-kafka"
+  vpc_id             = module.network.vpc_id
+  vpc_cidr           = module.network.vpc_cidr
+  app_ports          = []
+  vpc_internal_ports = [9092]
+}
+module "nlb"      {
+  source     = "../../modules/nlb"
+  name       = "example-kafka"
+  subnet_ids = module.network.private_subnet_ids
+  internal   = true
+}
+
+module "kafka" {
+  source            = "../../modules/service-asg"
+  name              = "example-kafka"
+  vpc_id            = module.network.vpc_id
+  subnet_ids        = module.network.private_subnet_ids
+  security_group_id = module.security.app_security_group_id
+
+  docker_image   = "${cfg.kafka_image}"
+  host_port      = 9092
+  container_port = 9092
+
+  container_env = {
+    KAFKA_NODE_ID                        = "1"
+    KAFKA_PROCESS_ROLES                  = "broker,controller"
+    KAFKA_LISTENERS                      = "PLAINTEXT://:9092,CONTROLLER://:9093"
+    KAFKA_ADVERTISED_LISTENERS           = "PLAINTEXT://$PRIVATE_IP:9092"
+    KAFKA_CONTROLLER_QUORUM_VOTERS       = "1@localhost:9093"
+    KAFKA_CONTROLLER_LISTENER_NAMES      = "CONTROLLER"
+    KAFKA_LISTENER_SECURITY_PROTOCOL_MAP = "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+    KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR = "1"
+  }
+
+  target_protocol       = "TCP"
+  health_check_protocol = "TCP"
+  nlb_arn               = module.nlb.nlb_arn
+
+  min_size         = 1
+  max_size         = 1
+  desired_capacity = 1
+}
+
+output "bootstrap_server" { value = "\${module.nlb.dns_name}:9092" }
+`);
+
+  if (selected.lambda) add('examples/file-mover/main.tf', `
+# Example: just the buckets, the mover function${selected.sfn ? ' and the workflow' : ''}.
+
+module "storage" {
+  source                  = "../../modules/s3"
+  source_bucket_name      = "${cfg.src_bucket}-example"
+  destination_bucket_name = "${cfg.dst_bucket}-example"
+  force_destroy           = true
+}
+
+module "file_mover" {
+  source                  = "../../modules/lambda-s3-mover"
+  name                    = "example-s3-file-mover"
+  source_bucket_name      = module.storage.source_bucket_name
+  source_bucket_arn       = module.storage.source_bucket_arn
+  destination_bucket_name = module.storage.destination_bucket_name
+  destination_bucket_arn  = module.storage.destination_bucket_arn
+  rename_prefix           = "${cfg.rename_prefix}"
+  pad_width               = ${cfg.pad_width}
+  delete_after_copy       = false
+}
+${selected.sfn ? `
+module "workflow" {
+  source              = "../../modules/step-functions"
+  name                = "example-file-workflow"
+  mover_function_arn  = module.file_mover.function_arn
+  schedule_expression = "${cfg.schedule}"
+}
+` : ''}
+# Try it by hand:
+#   aws s3 cp ./photo.jpg s3://${cfg.src_bucket}-example/
+#   aws lambda invoke --function-name example-s3-file-mover \\
+#     --payload '{"action":"move"}' --cli-binary-format raw-in-base64-out out.json
+#   cat out.json
+`.replace(/\\\\/g,'\\'));
+
+  return F;
+}
+
+/* =========================================================================
+   5. SVG DIAGRAM
+   ========================================================================= */
+const C = { blue:'#0f62fe', ink:'#161616', line:'#8d8d8d', soft:'#f4f4f4', edge:'#e0e0e0', teal:'#007d79', purple:'#8a3ffc', red:'#da1e28' };
+
+function box(x,y,w,h,title,sub,accent,fill){
+  const lines = (sub||'').split('|');
+  let t = `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${fill||'#fff'}" stroke="${accent||C.line}" stroke-width="1.5"/>`;
+  t += `<rect x="${x}" y="${y}" width="4" height="${h}" fill="${accent||C.blue}"/>`;
+  t += `<text x="${x+14}" y="${y+21}" font-size="13" font-weight="600" fill="${C.ink}">${title}</text>`;
+  lines.forEach((l,i) => { if(l) t += `<text x="${x+14}" y="${y+39+i*15}" font-size="11" fill="#525252">${l}</text>`; });
+  return t;
+}
+function arrow(x1,y1,x2,y2,label,color){
+  const c = color||C.blue;
+  let t = `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${c}" stroke-width="1.6" marker-end="url(#ah)"/>`;
+  if (label) t += `<text x="${(x1+x2)/2+6}" y="${(y1+y2)/2-4}" font-size="10.5" fill="#525252">${label}</text>`;
+  return t;
+}
+function zone(x,y,w,h,label,dash){
+  return `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="none" stroke="${C.edge}" stroke-width="1.2" ${dash?'stroke-dasharray="6 4"':''}/>
+  <text x="${x+10}" y="${y+16}" font-size="10.5" fill="#6f6f6f" letter-spacing="0.06em">${label.toUpperCase()}</text>`;
+}
+
+function buildSvg(){
+  const http = httpServices();
+  const H = 760, W = 980;
+  let s = `<svg viewBox="0 0 ${W} ${H}" width="100%" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Architecture diagram of the generated AWS infrastructure">
+  <defs><marker id="ah" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="${C.blue}"/></marker></defs>
+  <rect width="${W}" height="${H}" fill="#ffffff"/>`;
+
+  // ---- left column: web path ----
+  s += `<text x="24" y="26" font-size="12" font-weight="600" fill="${C.ink}" letter-spacing="0.06em">REQUEST PATH — ${cfg.project}-${cfg.env}</text>`;
+  s += box(24, 40, 200, 52, 'People / browsers', 'the public internet', C.ink);
+
+  s += zone(24, 118, 470, 560, 'AWS region ' + cfg.region + ' · VPC ' + cfg.vpc_cidr, false);
+  s += zone(40, 140, 438, 110, 'public subnets × ' + cfg.az_count, true);
+
+  let y = 168;
+  if (useAlb()) {
+    s += box(56, y, 406, 66, 'Application Load Balancer (port 80)', 'path rules: ' + http.map(h=>h.path).join('  ·  ') + '|health checks remove sick servers', C.blue);
+    s += arrow(124, 92, 124, y-2, 'HTTP', C.blue);
+    y += 96;
+  } else {
+    s += box(56, y, 406, 52, 'No load balancer selected', 'traffic would reach instances directly', C.red);
+    y += 82;
+  }
+
+  s += zone(40, 262, 438, 400, 'private subnets × ' + cfg.az_count + ' (no direct internet)', true);
+
+  let ty = 290;
+  if (useAlb() && http.length) {
+    const w = Math.floor(406 / http.length) - 10;
+    http.forEach((h, i) => {
+      s += box(56 + i*(w+10), ty, w, 44, 'Target group', h.key + ' :' + h.port, C.teal, C.soft);
+      s += arrow(56 + i*(w+10) + w/2, 234, 56 + i*(w+10) + w/2, ty-2, '', C.blue);
+    });
+    ty += 74;
+  }
+
+  const ec2 = [ selected.keycloak && {k:'Keycloak', p:'8080', img:cfg.keycloak_image},
+                selected.nifi && {k:'Apache NiFi', p:'8080', img:cfg.nifi_image},
+                selected.kafka && {k:'Apache Kafka', p:'9092', img:cfg.kafka_image} ].filter(Boolean);
+
+  if (ec2.length) {
+    const gh = 130;
+    s += `<rect x="56" y="${ty}" width="406" height="${gh}" fill="#f4f4f4" stroke="${C.blue}" stroke-width="1.2" stroke-dasharray="5 4"/>
+      <text x="68" y="${ty+18}" font-size="11" fill="${C.blue}" font-weight="600">AUTO SCALING GROUPS — min ${cfg.asg_min} · desired ${cfg.asg_desired} · max ${cfg.asg_max}</text>`;
+    const bw = Math.floor(390 / ec2.length) - 8;
+    ec2.forEach((e,i) => {
+      s += box(64 + i*(bw+8), ty+28, bw, 88, e.k, 'EC2 + Docker|port ' + e.p + '|' + (e.img.length>22 ? e.img.slice(0,22)+'…' : e.img), C.ink, '#fff');
+      if (useAlb() && (e.k === 'Keycloak' || e.k === 'Apache NiFi')) s += arrow(64 + i*(bw+8) + bw/2, ty-38, 64 + i*(bw+8) + bw/2, ty+26, '', C.teal);
+    });
+    ty += gh + 24;
+  }
+
+  if (selected.kafka) {
+    s += box(56, ty, 406, 54, 'Network Load Balancer (internal, TCP 9092)', 'producers and consumers inside the VPC connect here', C.purple);
+    s += arrow(462, ty+27, 500, ty+27, '', C.purple);
+    ty += 78;
+  }
+
+  s += box(56, ty, 406, 46, 'NAT gateway + S3 gateway endpoint', 'lets private servers pull Docker images and reach S3', C.line, C.soft);
+
+  // ---- right column: data pipeline ----
+  s += `<text x="516" y="26" font-size="12" font-weight="600" fill="${C.ink}" letter-spacing="0.06em">FILE PIPELINE</text>`;
+  let ry = 40;
+  if (selected.s3 || selected.lambda) {
+    s += box(516, ry, 440, 56, 'S3 source bucket', cfg.src_bucket + '|files arrive here', C.teal); ry += 56;
+  }
+  if (selected.sfn) {
+    s += arrow(736, ry, 736, ry+30, '', C.blue); ry += 32;
+    s += box(516, ry, 440, 52, 'EventBridge schedule', cfg.schedule, C.line, C.soft); ry += 52;
+    s += arrow(736, ry, 736, ry+30, 'starts', C.blue); ry += 32;
+    s += box(516, ry, 440, 108, 'Step Functions state machine',
+      '1 · CountObjects — how many files are in the bucket?|2 · AnyFilesToMove — Choice: is the count above zero?|3 · MoveAndRename — retries twice, then fails loudly', C.purple);
+    ry += 108;
+    s += arrow(736, ry, 736, ry+30, 'invoke', C.blue); ry += 32;
+  }
+  if (selected.lambda) {
+    s += box(516, ry, 440, 72, 'Lambda: s3-file-mover (python 3.12)',
+      'lists · counts · copies with a new name|' + cfg.rename_prefix + '_0003_of_0042.csv', C.blue);
+    ry += 72;
+    s += arrow(736, ry, 736, ry+30, 'copy_object', C.blue); ry += 32;
+  }
+  if (selected.s3 || selected.lambda) {
+    s += box(516, ry, 440, 56, 'S3 destination bucket', cfg.dst_bucket + '|renamed, numbered, counted', C.teal); ry += 76;
+  }
+  if (selected.cw) {
+    s += box(516, ry, 440, 60, 'CloudWatch logs, metrics and alarms',
+      'container output, Lambda logs, workflow history|alarm when average CPU stays above 85%', C.red);
+  }
+
+  s += `<text x="516" y="740" font-size="10.5" fill="#6f6f6f">Solid arrows show the direction data travels. Dashed rectangles are network boundaries, not resources.</text>`;
+  s += '</svg>';
+  return s;
+}
+
+/* =========================================================================
+   6. RENDER FILES + DIAGRAM
+   ========================================================================= */
+let FILES = [], activeIndex = 0;
+const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+function renderTree(){
+  const tree = document.getElementById('fileTree');
+  tree.innerHTML = '';
+  let lastDir = null;
+  FILES.forEach((f, i) => {
+    const dir = f.path.includes('/') ? f.path.slice(0, f.path.lastIndexOf('/')) : '(root)';
+    if (dir !== lastDir) {
+      const d = document.createElement('div');
+      d.className = 'mono t-small px-4 pt-3 pb-1';
+      d.style.color = '#6f6f6f';
+      d.textContent = dir + '/';
+      tree.appendChild(d);
+      lastDir = dir;
+    }
+    const b = document.createElement('button');
+    b.className = 'filebtn block w-full text-left px-4 py-2 mono t-small hover:bg-gray-100 ' + (i === activeIndex ? 'file-on' : '');
+    b.textContent = f.path.split('/').pop();
+    b.onclick = () => { activeIndex = i; renderTree(); showFile(); };
+    tree.appendChild(b);
+  });
+  document.getElementById('fileCount').textContent = FILES.length;
+}
+function showFile(){
+  const f = FILES[activeIndex]; if (!f) return;
+  document.getElementById('activePath').textContent = f.path;
+  document.getElementById('codeView').textContent = f.content;
+}
+function refresh(){
+  const prev = FILES[activeIndex] ? FILES[activeIndex].path : null;
+  FILES = files();
+  const idx = FILES.findIndex(f => f.path === prev);
+  activeIndex = idx >= 0 ? idx : 0;
+  renderTree(); showFile();
+  document.getElementById('svgWrap').innerHTML = buildSvg();
+}
+
+/* ---- download helpers ---- */
+function download(name, text, type){
+  const blob = new Blob([text], { type: type || 'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+function say(msg){ document.getElementById('exportMsg').textContent = msg; }
+async function copyText(text, okMsg){
+  try { await navigator.clipboard.writeText(text); say(okMsg); }
+  catch(e){
+    const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta);
+    ta.select(); try { document.execCommand('copy'); say(okMsg); } catch(_) { say('Copy blocked by the browser. Use a download button instead.'); }
+    ta.remove();
+  }
+}
+document.getElementById('copyFile').onclick = () => copyText(FILES[activeIndex].content, 'Copied ' + FILES[activeIndex].path);
+document.getElementById('dlFile').onclick = () => download(FILES[activeIndex].path.split('/').pop(), FILES[activeIndex].content);
+document.getElementById('svgDownload').onclick = () => download(cfg.project + '-architecture.svg', buildSvg(), 'image/svg+xml');
+
+document.getElementById('dlZip').onclick = async () => {
+  if (typeof JSZip === 'undefined') { say('The ZIP library did not load. Use the setup script instead.'); return; }
+  say('Building ZIP…');
+  const zip = new JSZip();
+  const root = cfg.project + '-terraform';
+  FILES.forEach(f => zip.file(root + '/' + f.path, f.content));
+  const blob = await zip.generateAsync({ type: 'blob' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = root + '.zip';
+  document.body.appendChild(a); a.click(); a.remove();
+  say('Downloaded ' + root + '.zip with ' + FILES.length + ' files.');
+};
+document.getElementById('dlSh').onclick = () => {
+  const root = cfg.project + '-terraform';
+  let sh = '#!/usr/bin/env bash\n# Recreates the Terraform project in a folder called ' + root + '\nset -euo pipefail\nmkdir -p "' + root + '"\ncd "' + root + '"\n\n';
+  FILES.forEach(f => {
+    const dir = f.path.includes('/') ? f.path.slice(0, f.path.lastIndexOf('/')) : '.';
+    sh += 'mkdir -p "' + dir + '"\n';
+    sh += "cat > '" + f.path + "' <<'TFB_EOF'\n" + f.content.replace(/\n?$/, '\n') + 'TFB_EOF\n\n';
+  });
+  sh += 'echo "Done. Next: cd ' + root + '/infrastructure/envs/' + cfg.env + ' && terraform init"\n';
+  download(root + '-setup.sh', sh, 'text/x-shellscript');
+  say('Downloaded the setup script. Run: bash ' + root + '-setup.sh');
+};
+function bundleText(){
+  return FILES.map(f => '='.repeat(72) + '\nFILE: ' + f.path + '\n' + '='.repeat(72) + '\n' + f.content).join('\n\n');
+}
+document.getElementById('dlBundle').onclick = () => { download(cfg.project + '-terraform.txt', bundleText()); say('Downloaded one text file containing every generated file.'); };
+document.getElementById('copyAll').onclick = () => copyText(bundleText(), 'Copied all ' + FILES.length + ' files to the clipboard.');
+
+/* =========================================================================
+   7. RUN STEPS
+   ========================================================================= */
+const RUN_STEPS = [
+  { n:'A', title:'Install the two tools', body:'You need <strong>Terraform</strong> (the robot) and the <strong>AWS CLI</strong> (the way your computer proves who you are). Install both, then check them with <span class="mono kbd">terraform -version</span> and <span class="mono kbd">aws --version</span>.', modal:'install' },
+  { n:'B', title:'Log in to AWS', body:'Run <span class="mono kbd">aws configure</span> and paste an access key from an IAM user, or use <span class="mono kbd">aws sso login</span> if your school or company gave you SSO. Test it with <span class="mono kbd">aws sts get-caller-identity</span> — it should print your account number.', modal:'credentials' },
+  { n:'C', title:'Unpack and enter the project', body:'Unzip the download, then move into the environment folder: <span class="mono kbd">cd '+'PROJECT/infrastructure/envs/ENV</span>. This folder is the only place you run Terraform.', modal:'layout' },
+  { n:'D', title:'terraform init', body:'Downloads the AWS plugin and links up the modules. Run it once per folder, and again whenever you add a module.', modal:'terraform' },
+  { n:'E', title:'terraform plan', body:'A dry run. It prints a list of everything it <em>would</em> create, change or destroy. Read this list. Nothing has happened yet.', modal:'plan' },
+  { n:'F', title:'terraform apply', body:'Builds it for real. Type <span class="mono kbd">yes</span> when asked. Takes about 5–10 minutes, mostly waiting for the load balancer and NAT gateway.', modal:'plan' },
+  { n:'G', title:'Check that it works', body:'Terraform prints the outputs. Open the load balancer URL in a browser. Health checks take a couple of minutes to go green — a 503 right after apply usually means "still starting".', modal:'troubleshoot' },
+  { n:'H', title:'Try the file mover', body:'Upload a few files to the source bucket, then start the workflow in the Step Functions console (or run the Lambda directly). Watch the files reappear in the destination bucket renamed like <span class="mono">record_0002_of_0007.csv</span>.', modal:'lambda' },
+  { n:'I', title:'terraform destroy', body:'Deletes everything it created, so the bill stops. Do this the moment you finish practising. Buckets must be empty unless <span class="mono">force_destroy</span> is true.', modal:'cost' }
+];
+const runWrap = document.getElementById('runSteps');
+RUN_STEPS.forEach(s => {
+  const d = document.createElement('div');
+  d.className = 'card p-4';
+  d.innerHTML = `<div class="flex items-center gap-3"><span class="stepnum">${s.n}</span><span class="t-h3">${s.title}</span></div>
+    <p class="t-body mt-2">${s.body}</p>
+    <button class="doc t-small mt-2" data-modal="${s.modal}">More detail</button>`;
+  runWrap.appendChild(d);
+});
+
+/* =========================================================================
+   8. INFO MODALS + OFFICIAL DOCS
+   ========================================================================= */
+const INFO = {
+  terraform: { title:'Terraform, from scratch', body:`
+    <p>Terraform reads files ending in <span class="mono">.tf</span> and makes AWS match what they say. Three ideas cover almost everything:</p>
+    <ul class="list-disc pl-6 mt-2 space-y-1">
+      <li><strong>Resource</strong> — one real thing, like a server or a bucket.</li>
+      <li><strong>Module</strong> — a folder of resources you can reuse, like a recipe you keep in a drawer.</li>
+      <li><strong>State</strong> — a file where Terraform writes down what it built, so next time it knows what already exists.</li>
+    </ul>
+    <p class="mt-3">The loop is always the same: <span class="mono kbd">init</span> (get ready), <span class="mono kbd">plan</span> (what would change?), <span class="mono kbd">apply</span> (do it), <span class="mono kbd">destroy</span> (undo it).</p>`,
+    links:[['Terraform documentation','https://developer.hashicorp.com/terraform/docs'],['AWS provider reference','https://registry.terraform.io/providers/hashicorp/aws/latest/docs'],['Modules explained','https://developer.hashicorp.com/terraform/language/modules']] },
+
+  layout: { title:'Why modules and infrastructure live apart', body:`
+    <p>A <strong>module</strong> answers "how do we build a thing like this?" It has no opinion about your company, region or environment — everything specific comes in as a variable.</p>
+    <p class="mt-2">The <strong>infrastructure</strong> folder answers "what do we actually want, right now, in dev?" It calls modules and fills in the blanks.</p>
+    <p class="mt-2">Keeping them apart means you can build a second environment (test, prod) by copying one small folder instead of copying hundreds of lines of resources. It also means a fix in a module improves every environment at once.</p>
+    <p class="mt-2 mono t-small">modules/service-asg  →  used by keycloak, nifi and kafka, three times, with different variables.</p>`,
+    links:[['Standard module structure','https://developer.hashicorp.com/terraform/language/modules/develop/structure'],['Terraform best practices','https://developer.hashicorp.com/terraform/language/style']] },
+
+  vpc: { title:'VPC — your private corner of AWS', body:`
+    <p>Think of a school building. The VPC is the building. <strong>Subnets</strong> are rooms. Public subnet rooms have a door onto the street (the internet gateway). Private subnet rooms do not — but staff inside can still send letters out through the post room (the NAT gateway).</p>
+    <p class="mt-2">The generated network puts the load balancer in public subnets and every server in private subnets. That way nobody on the internet can reach a server directly; they can only knock on the load balancer.</p>
+    <p class="mt-2"><strong>Availability zones</strong> are separate data centres. Spreading across two means one can catch fire and your site keeps working.</p>
+    <p class="mt-2 t-small">Cost note: NAT gateways charge per hour plus per gigabyte. Setting <span class="mono">enable_nat_gateway = false</span> saves money but breaks Docker image pulls.</p>`,
+    links:[['Amazon VPC user guide','https://docs.aws.amazon.com/vpc/latest/userguide/what-is-amazon-vpc.html'],['Subnets','https://docs.aws.amazon.com/vpc/latest/userguide/configure-subnets.html'],['NAT gateways','https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat-gateway.html']] },
+
+  alb: { title:'Load balancer and target groups', body:`
+    <p>A load balancer is the receptionist. Every visitor talks to reception; reception decides which desk is free and sends them there. If a desk stops answering, reception stops sending people to it.</p>
+    <p class="mt-2">A <strong>target group</strong> is a list of desks plus the question reception asks to check they are alive (the <strong>health check</strong>). This project makes one target group per service.</p>
+    <p class="mt-2">A <strong>listener</strong> is reception's phone line — port 80 here. <strong>Listener rules</strong> read the URL path: <span class="mono">/keycloak/*</span> goes to the Keycloak group, <span class="mono">/nifi/*</span> to the NiFi group.</p>
+    <p class="mt-2">Kafka does not speak HTTP, so it gets a <strong>Network Load Balancer</strong> instead, which forwards raw TCP on port 9092.</p>`,
+    links:[['Application Load Balancer guide','https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html'],['Target groups','https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-target-groups.html'],['Network Load Balancer','https://docs.aws.amazon.com/elasticloadbalancing/latest/network/introduction.html'],['aws_lb resource','https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lb']] },
+
+  asg: { title:'Auto Scaling groups', body:`
+    <p>An Auto Scaling group is a rule that says "always keep between MIN and MAX servers alive, and normally DESIRED of them". If a server dies, it builds a replacement without waking anyone up.</p>
+    <p class="mt-2">The recipe for building one server is the <strong>launch template</strong>: which machine image, which size, which firewall, and the <strong>user data</strong> script that installs Docker and starts the container.</p>
+    <p class="mt-2">The <strong>target tracking policy</strong> watches average CPU. Above the target it adds servers; below it removes them. This project targets 60%.</p>
+    <p class="mt-2 t-small">Careful with Kafka and NiFi: they keep data on local disks, so scaling them out is not as simple as scaling a stateless web app. That is why the generated code pins them to one instance.</p>`,
+    links:[['EC2 Auto Scaling guide','https://docs.aws.amazon.com/autoscaling/ec2/userguide/what-is-amazon-ec2-auto-scaling.html'],['Launch templates','https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-launch-templates.html'],['Target tracking scaling','https://docs.aws.amazon.com/autoscaling/ec2/userguide/as-scaling-target-tracking.html']] },
+
+  keycloak: { title:'Keycloak on EC2 with Docker', body:`
+    <p>Keycloak handles logging in. Instead of every app storing passwords, apps ask Keycloak "is this person who they claim to be?" It speaks the standard languages: OpenID Connect and SAML.</p>
+    <p class="mt-2">The generated server installs Docker in its boot script, then runs the official image with <span class="mono">start-dev</span>. Dev mode skips HTTPS and uses an in-memory database — perfect for learning, wrong for production.</p>
+    <p class="mt-2"><strong>To make it real:</strong> put a certificate on the load balancer, run <span class="mono">start</span> instead of <span class="mono">start-dev</span>, point <span class="mono">KC_DB</span> at an RDS PostgreSQL database, and move the admin password into Secrets Manager.</p>`,
+    links:[['Keycloak documentation','https://www.keycloak.org/documentation'],['Running Keycloak in a container','https://www.keycloak.org/server/containers'],['Keycloak behind a proxy','https://www.keycloak.org/server/reverseproxy']] },
+
+  nifi: { title:'Apache NiFi on EC2 with Docker', body:`
+    <p>NiFi is a visual tool for moving data. You drag boxes called <strong>processors</strong> onto a canvas and connect them with arrows: read from here, change this, write to there. Each piece of data travelling through is a <strong>FlowFile</strong>.</p>
+    <p class="mt-2">It is a natural partner for the rest of this stack: read files from S3, publish messages to Kafka, or call an API and drop the result in a bucket.</p>
+    <p class="mt-2 t-small">NiFi keeps its repositories on disk and takes a few minutes to start, which is why the health check grace period is set to seven minutes and the group stays at one instance. For a real cluster you would attach EBS volumes and configure NiFi clustering.</p>`,
+    links:[['Apache NiFi documentation','https://nifi.apache.org/documentation/'],['NiFi user guide','https://nifi.apache.org/docs/nifi-docs/html/user-guide.html'],['NiFi Docker image','https://hub.docker.com/r/apache/nifi']] },
+
+  kafka: { title:'Apache Kafka on EC2 with Docker', body:`
+    <p>Kafka is a very long, very fast notebook. Programs called <strong>producers</strong> write lines into a <strong>topic</strong>; programs called <strong>consumers</strong> read them at their own pace. Nothing is deleted when it is read, so ten different consumers can read the same line.</p>
+    <p class="mt-2">The generated broker uses KRaft mode, which means it does not need ZooKeeper. It advertises its own private IP address so clients inside the VPC can find it.</p>
+    <p class="mt-2 t-small">Single node, replication factor 1: if the instance dies, the messages die with it. For anything serious use three brokers across three zones, or let AWS run it for you with Amazon MSK.</p>`,
+    links:[['Apache Kafka documentation','https://kafka.apache.org/documentation/'],['Kafka quickstart','https://kafka.apache.org/quickstart'],['Amazon MSK','https://docs.aws.amazon.com/msk/latest/developerguide/what-is-msk.html']] },
+
+  s3: { title:'S3 buckets', body:`
+    <p>S3 stores files, called <strong>objects</strong>, in <strong>buckets</strong>. Bucket names are unique across the entire planet, so <span class="mono">my-bucket</span> is long gone — put your project name in front.</p>
+    <p class="mt-2">There are no real folders. A key like <span class="mono">2026/08/report.csv</span> is one long name; the console just draws slashes as folders.</p>
+    <p class="mt-2">The generated buckets block all public access, encrypt everything at rest, and keep old versions. The mover Lambda only gets permission to read one bucket and write the other — nothing else.</p>`,
+    links:[['Amazon S3 user guide','https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html'],['Bucket naming rules','https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html'],['Blocking public access','https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html']] },
+
+  lambda: { title:'The Lambda file mover', body:`
+    <p>Lambda runs your code when something asks it to, then goes back to sleep. No server to patch, and you pay per millisecond.</p>
+    <p class="mt-2">The generated function does two jobs, chosen by the event you send it:</p>
+    <ul class="list-disc pl-6 mt-2 space-y-1">
+      <li><span class="mono">{"action":"count"}</span> — pages through the source bucket and reports how many objects it holds.</li>
+      <li><span class="mono">{"action":"move"}</span> — copies each object to the destination, renamed <span class="mono">prefix_POSITION_of_TOTAL.ext</span>, so file three of forty-two becomes <span class="mono">record_0003_of_0042.csv</span>.</li>
+    </ul>
+    <p class="mt-2">Copying, then optionally deleting the original, is how "move" works in S3 — there is no rename button under the hood.</p>
+    <p class="mt-2 t-small">Limits worth knowing: 15 minutes maximum run time, and copy_object handles objects up to 5 GB. For bigger jobs, switch to S3 Batch Operations or a multipart copy.</p>`,
+    links:[['AWS Lambda developer guide','https://docs.aws.amazon.com/lambda/latest/dg/welcome.html'],['boto3 copy_object','https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/s3/client/copy_object.html'],['Python runtime','https://docs.aws.amazon.com/lambda/latest/dg/lambda-python.html']] },
+
+  sfn: { title:'Step Functions — the flowchart', body:`
+    <p>Step Functions runs a flowchart you describe in JSON. Each box is a <strong>state</strong>. AWS remembers where the flowchart got to, retries failures for you, and draws the whole run as a picture you can click through.</p>
+    <p class="mt-2">The generated workflow has three useful states:</p>
+    <ol class="list-decimal pl-6 mt-2 space-y-1">
+      <li><strong>CountObjects</strong> — a Task that calls the Lambda with <span class="mono">action: count</span>.</li>
+      <li><strong>AnyFilesToMove</strong> — a Choice that compares the count to zero, so you never run a pointless move.</li>
+      <li><strong>MoveAndRename</strong> — a Task with Retry and Catch, ending in Succeed or a clear Fail.</li>
+    </ol>
+    <p class="mt-2">An EventBridge rule starts the whole thing on your schedule (<span class="mono">${'rate(1 hour)'}</span> by default).</p>`,
+    links:[['Step Functions developer guide','https://docs.aws.amazon.com/step-functions/latest/dg/welcome.html'],['States language reference','https://docs.aws.amazon.com/step-functions/latest/dg/concepts-amazon-states-language.html'],['Error handling and retries','https://docs.aws.amazon.com/step-functions/latest/dg/concepts-error-handling.html'],['EventBridge schedule expressions','https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-create-rule-schedule.html']] },
+
+  cloudwatch: { title:'CloudWatch — logs and alarms', body:`
+    <p>CloudWatch is the flight recorder. Lambda writes every <span class="mono">print</span> there. Step Functions writes each execution. EC2 reports CPU, network and disk numbers every minute.</p>
+    <p class="mt-2">An <strong>alarm</strong> watches one number and changes state when it crosses a line. The generated alarm fires when average CPU stays above 85% for ten minutes. Add an SNS topic to turn that into an email or text message.</p>
+    <p class="mt-2 t-small">Log groups here keep 14 days by default. Logs are cheap but not free; retention keeps the bill honest.</p>`,
+    links:[['CloudWatch user guide','https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html'],['CloudWatch Logs','https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/WhatIsCloudWatchLogs.html'],['Alarms','https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/AlarmThatSendsEmail.html']] },
+
+  iam: { title:'IAM — who is allowed to do what', body:`
+    <p>Every AWS action asks one question first: are you allowed? IAM holds the answer.</p>
+    <p class="mt-2">A <strong>role</strong> is a costume a service puts on. The EC2 servers wear a role that lets them be managed remotely. The Lambda wears a role that can read one bucket and write another. The state machine wears a role that can call exactly one function.</p>
+    <p class="mt-2">This is <strong>least privilege</strong>: give the smallest set of permissions that still works. It is the single easiest security habit to build.</p>`,
+    links:[['IAM user guide','https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction.html'],['Roles','https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles.html'],['Policy best practices','https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html']] },
+
+  docker: { title:'Docker on EC2', body:`
+    <p>A Docker <strong>image</strong> is a frozen, complete copy of an application and everything it needs. A <strong>container</strong> is that image running. Because the image includes the dependencies, "it worked on my laptop" stops being a problem.</p>
+    <p class="mt-2">The boot script on each server installs Docker, pulls the image you named, and runs it with <span class="mono">--restart unless-stopped</span> so it comes back after a reboot. Ports are mapped host:container, for example <span class="mono">8080:8080</span>.</p>
+    <p class="mt-2 t-small">Next step when you outgrow this: run the same images on ECS or EKS so AWS handles placement, restarts and rolling updates.</p>`,
+    links:[['Docker documentation','https://docs.docker.com/'],['docker run reference','https://docs.docker.com/reference/cli/docker/container/run/'],['Amazon ECS','https://docs.aws.amazon.com/AmazonECS/latest/developerguide/Welcome.html']] },
+
+  settings: { title:'What each setting does', body:`
+    <ul class="list-disc pl-6 space-y-1">
+      <li><strong>Project name / environment</strong> — glued together into every resource name, e.g. <span class="mono">acme-dev-keycloak</span>.</li>
+      <li><strong>Region</strong> — which part of the world hosts it. Closer usually means faster; prices differ slightly.</li>
+      <li><strong>VPC address range</strong> — the private IP block. <span class="mono">10.20.0.0/16</span> gives you 65,536 addresses, split automatically into subnets.</li>
+      <li><strong>Availability zones</strong> — 2 is the sensible minimum for a load balancer.</li>
+      <li><strong>Instance type</strong> — server size. <span class="mono">t3.small</span> is cheaper; NiFi and Kafka are happier on <span class="mono">t3.medium</span> or larger.</li>
+      <li><strong>Min / desired / max</strong> — the floor, the normal, and the ceiling for how many servers run.</li>
+      <li><strong>Bucket names</strong> — must be unique worldwide, lowercase, no underscores.</li>
+      <li><strong>New file name prefix and padding</strong> — controls the renamed output, e.g. <span class="mono">record_0003_of_0042.csv</span>.</li>
+      <li><strong>Workflow schedule</strong> — <span class="mono">rate(1 hour)</span>, <span class="mono">rate(15 minutes)</span> or a cron expression. Empty means manual only.</li>
+    </ul>`,
+    links:[['AWS regions','https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/using-regions-availability-zones.html'],['EC2 instance types','https://docs.aws.amazon.com/ec2/latest/instancetypes/instance-types.html'],['CIDR explained','https://docs.aws.amazon.com/vpc/latest/userguide/subnet-sizing.html']] },
+
+  flow: { title:'Following the arrows', body:`
+    <p><strong>Left side — a person visiting a page:</strong></p>
+    <ol class="list-decimal pl-6 mt-1 space-y-1">
+      <li>The browser looks up the load balancer's DNS name and sends an HTTP request.</li>
+      <li>The load balancer sits in a public subnet. Its listener on port 80 checks the path.</li>
+      <li>The path rule picks a target group: <span class="mono">/keycloak/*</span> or <span class="mono">/nifi/*</span>.</li>
+      <li>The target group forwards to a healthy EC2 instance in a private subnet.</li>
+      <li>On that instance, Docker is listening on port 8080 and answers.</li>
+      <li>The Auto Scaling group quietly replaces any instance that fails its health check.</li>
+    </ol>
+    <p class="mt-3"><strong>Right side — a file being moved:</strong></p>
+    <ol class="list-decimal pl-6 mt-1 space-y-1">
+      <li>Someone or something drops files into the source bucket.</li>
+      <li>On schedule, EventBridge starts the state machine.</li>
+      <li>CountObjects asks the Lambda how many files there are.</li>
+      <li>The Choice state stops early if the answer is zero.</li>
+      <li>MoveAndRename copies each file across with its position and the total in the name.</li>
+      <li>Everything that happened is written to CloudWatch.</li>
+    </ol>`,
+    links:[['Well-Architected Framework','https://docs.aws.amazon.com/wellarchitected/latest/framework/welcome.html'],['AWS architecture icons','https://aws.amazon.com/architecture/icons/']] },
+
+  install: { title:'Installing the tools', body:`
+    <p><strong>Terraform:</strong> download the binary from HashiCorp, or use a package manager — <span class="mono kbd">brew install terraform</span> on macOS, <span class="mono kbd">winget install Hashicorp.Terraform</span> on Windows.</p>
+    <p class="mt-2"><strong>AWS CLI v2:</strong> installers for every platform are on the AWS docs page. Check with <span class="mono kbd">aws --version</span>.</p>
+    <p class="mt-2">Optional but pleasant: <span class="mono">tflint</span> for catching mistakes, and the Terraform extension for VS Code, which colours the files and autocompletes resource names.</p>`,
+    links:[['Install Terraform','https://developer.hashicorp.com/terraform/install'],['Install AWS CLI','https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html'],['VS Code extension','https://marketplace.visualstudio.com/items?itemName=HashiCorp.terraform']] },
+
+  credentials: { title:'Proving who you are', body:`
+    <p>Terraform borrows your AWS identity from the same place the CLI keeps it. Three common ways:</p>
+    <ul class="list-disc pl-6 mt-2 space-y-1">
+      <li><span class="mono kbd">aws configure</span> — paste an access key and secret. Simplest; keep the secret private and rotate it.</li>
+      <li><span class="mono kbd">aws configure sso</span> then <span class="mono kbd">aws sso login</span> — short-lived credentials, much safer, common at work.</li>
+      <li>An IAM role on an EC2 instance or in a CI pipeline — no keys at all, which is the ideal.</li>
+    </ul>
+    <p class="mt-2">Never commit keys to Git. The generated <span class="mono">.gitignore</span> already blocks state files, which can contain secrets too.</p>`,
+    links:[['CLI configuration','https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-configure.html'],['IAM Identity Center','https://docs.aws.amazon.com/singlesignon/latest/userguide/what-is.html'],['Security best practices','https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html']] },
+
+  plan: { title:'plan and apply, and what state means', body:`
+    <p><span class="mono kbd">terraform plan</span> compares three things: what your files say, what the state file remembers, and what AWS actually has. It prints the difference with <span class="mono">+</span> for create, <span class="mono">~</span> for change and <span class="mono">-</span> for destroy.</p>
+    <p class="mt-2">Read the minus signs carefully. A change that forces replacement of a database is exactly the sort of thing plan exists to warn you about.</p>
+    <p class="mt-2"><span class="mono kbd">terraform apply</span> does it. Save the plan first with <span class="mono kbd">terraform plan -out=tf.plan</span> and apply that exact file if you want zero surprises.</p>
+    <p class="mt-2">The state file is precious. Alone on a laptop it is fine; in a team, move it to S3 with locking — the commented block in <span class="mono">backend.tf</span> shows how.</p>`,
+    links:[['The plan command','https://developer.hashicorp.com/terraform/cli/commands/plan'],['State','https://developer.hashicorp.com/terraform/language/state'],['S3 backend','https://developer.hashicorp.com/terraform/language/backend/s3']] },
+
+  troubleshoot: { title:'When something does not work', body:`
+    <ul class="list-disc pl-6 space-y-2">
+      <li><strong>503 from the load balancer</strong> — no healthy targets yet. Wait two or three minutes, then check the target group health tab. NiFi genuinely takes several minutes.</li>
+      <li><strong>Target unhealthy forever</strong> — the health check path is wrong, or the container never started. Connect with Session Manager and run <span class="mono kbd">sudo docker ps -a</span> and <span class="mono kbd">sudo docker logs NAME</span>.</li>
+      <li><strong>Docker cannot pull the image</strong> — the private subnet has no route out. Check the NAT gateway exists and <span class="mono">enable_nat_gateway</span> is true.</li>
+      <li><strong>BucketAlreadyExists</strong> — bucket names are global. Add something unique to the name.</li>
+      <li><strong>AccessDenied in the Lambda</strong> — the role is missing a permission, or you pointed it at a bucket the policy does not list.</li>
+      <li><strong>Name too long</strong> — load balancer and target group names cap at 32 characters. Shorten the project name.</li>
+    </ul>`,
+    links:[['Troubleshoot your load balancer','https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-troubleshooting.html'],['Session Manager','https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager.html'],['Lambda troubleshooting','https://docs.aws.amazon.com/lambda/latest/dg/lambda-troubleshooting.html']] },
+
+  cost: { title:'What this costs, and how to stop paying', body:`
+    <p>The three things that quietly add up, charged per hour whether or not anyone uses them:</p>
+    <ul class="list-disc pl-6 mt-2 space-y-1">
+      <li>NAT gateway — the usual biggest surprise on a lab account.</li>
+      <li>Load balancers — one ALB plus one NLB if Kafka is on.</li>
+      <li>EC2 instances — multiplied by the desired count, times three services.</li>
+    </ul>
+    <p class="mt-2">S3, Lambda and Step Functions are pay-per-use and usually pennies while learning.</p>
+    <p class="mt-2"><strong>To stop paying:</strong> <span class="mono kbd">terraform destroy</span> from the environment folder. Then check the AWS console for anything left behind, and set a billing alarm before your next experiment.</p>`,
+    links:[['AWS Pricing Calculator','https://calculator.aws/'],['Billing alarms','https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/monitor_estimated_charges_with_cloudwatch.html'],['Free Tier','https://aws.amazon.com/free/']] }
+};
+
+const GLOSSARY_ORDER = ['terraform','layout','vpc','alb','asg','docker','keycloak','nifi','kafka','s3','lambda','sfn','iam','cloudwatch','plan','troubleshoot','cost','install'];
+const learnGrid = document.getElementById('learnGrid');
+GLOSSARY_ORDER.forEach(k => {
+  const b = document.createElement('button');
+  b.className = 'card p-3 text-left hover:bg-gray-50';
+  b.dataset.modal = k;
+  b.innerHTML = `<span class="t-h3 block">${INFO[k].title.split('—')[0].trim()}</span>
+    <span class="t-small block mt-1">${INFO[k].links.length} official links</span>`;
+  learnGrid.appendChild(b);
+});
+
+const modal = document.getElementById('modal');
+let lastFocus = null;
+function openModal(key){
+  const info = INFO[key]; if (!info) return;
+  lastFocus = document.activeElement;
+  document.getElementById('modalTitle').textContent = info.title;
+  document.getElementById('modalBody').innerHTML = info.body;
+  document.getElementById('modalLinks').innerHTML =
+    '<div class="t-eyebrow mb-2">Official documentation</div>' +
+    info.links.map(l => `<a class="doc block t-small py-1" href="${l[1]}" target="_blank" rel="noopener">${l[0]} &nearr;</a>`).join('');
+  modal.classList.remove('hidden'); modal.classList.add('flex');
+  document.getElementById('modalClose').focus();
+}
+function closeModal(){
+  modal.classList.add('hidden'); modal.classList.remove('flex');
+  if (lastFocus) lastFocus.focus();
+}
+document.addEventListener('click', e => {
+  const t = e.target.closest('[data-modal]');
+  if (t) { e.preventDefault(); openModal(t.dataset.modal); }
+});
+document.getElementById('modalClose').onclick = closeModal;
+modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !modal.classList.contains('hidden')) closeModal(); });
+
+/* =========================================================================
+   9. GO
+   ========================================================================= */
+document.getElementById('schemaBox').value = SAMPLE_SCHEMA;
+refresh();
+</script>
+</body>
+</html>
