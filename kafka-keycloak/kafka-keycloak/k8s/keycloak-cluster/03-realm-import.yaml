@@ -1,0 +1,40 @@
+# Declarative realm import (runs once per realm; edit in the console afterwards or bump and re-apply).
+apiVersion: k8s.keycloak.org/v2alpha1
+kind: KeycloakRealmImport
+metadata:
+  name: kafka-realm
+  namespace: keycloak
+spec:
+  keycloakCRName: keycloak
+  realm:
+    realm: kafka
+    enabled: true
+    sslRequired: external
+    roles:
+      realm:
+        - { name: kafka-admin,  description: Full access in Kafka UI }
+        - { name: kafka-viewer, description: Read-only access in Kafka UI }
+    clients:
+      - clientId: kafka-ui
+        name: Kafka UI
+        enabled: true
+        protocol: openid-connect
+        publicClient: false
+        clientAuthenticatorType: client-secret
+        secret: "${KAFKA_UI_CLIENT_SECRET}"     # placeholder substituted from the operator's env, see docs
+        standardFlowEnabled: true
+        directAccessGrantsEnabled: false
+        redirectUris: ["https://kafka-ui.example.com/*"]
+        webOrigins: ["https://kafka-ui.example.com"]
+        defaultClientScopes: [openid, profile, email, roles]
+        protocolMappers:
+          - name: realm roles -> roles claim
+            protocol: openid-connect
+            protocolMapper: oidc-usermodel-realm-role-mapper
+            config:
+              claim.name: roles
+              jsonType.label: String
+              multivalued: "true"
+              id.token.claim: "true"
+              access.token.claim: "true"
+              userinfo.token.claim: "true"

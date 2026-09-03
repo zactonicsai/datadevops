@@ -1,0 +1,157 @@
+# Kafka (KRaft, no ZooKeeper) + Kafbat Kafka UI (login via Keycloak OIDC) + topic bootstrap
+#
+# Before first run, add this line to your hosts file so your browser AND the containers
+# resolve Keycloak under the same name (required for OIDC issuer/redirect checks):
+#   127.0.0.1  keycloak
+#
+# URLs:
+#   Kafka UI   -> http://localhost:8080   (login: alice / alice123)
+#   Keycloak   -> http://keycloak:8180    (admin console: admin / admin)
+#   Kafka      -> localhost:29092         (from your machine)  |  kafka:9092 (inside docker)
+
+services:
+  kafka:
+    image: apache/kafka:3.9.1
+    container_name: kafka
+    ports:
+      - "29092:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  # One-shot job: creates the demo topics, then exits.
+  kafka-init:
+    image: apache/kafka:3.9.1
+    container_name: kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        BS=kafka:9092
+        T=/opt/kafka/bin/kafka-topics.sh
+        $$T --bootstrap-server $$BS --create --if-not-exists --topic orders        --partitions 3 --replication-factor 1
+        $$T --bootstrap-server $$BS --create --if-not-exists --topic payments      --partitions 3 --replication-factor 1
+        $$T --bootstrap-server $$BS --create --if-not-exists --topic user-events   --partitions 6 --replication-factor 1
+        $$T --bootstrap-server $$BS --create --if-not-exists --topic audit-log     --partitions 1 --replication-factor 1 \
+            --config retention.ms=604800000 --config cleanup.policy=delete
+        echo "Topics now in the cluster:"
+        $$T --bootstrap-server $$BS --list
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.3
+    container_name: keycloak
+    command: ["start-dev", "--import-realm", "--http-port=8180"]
+    ports:
+      - "8180:8180"
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HOSTNAME: http://keycloak:8180
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ./keycloak/realm-kafka.json:/opt/keycloak/data/import/realm-kafka.json:ro
+    healthcheck:
+      # The image has no curl; use bash's /dev/tcp against the management port (9000).
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '\"status\": *\"UP\"' <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8080:8080"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    restart: unless-stopped
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      DYNAMIC_CONFIG_ENABLED: "true"
+
+      # --- Keycloak OIDC login ---
+      AUTH_TYPE: OAUTH2
+      AUTH_OAUTH2_CLIENT_KEYCLOAK_CLIENTID: kafka-ui
+      AUTH_OAUTH2_CLIENT_KEYCLOAK_CLIENTSECRET: kafka-ui-secret-change-me
+      AUTH_OAUTH2_CLIENT_KEYCLOAK_SCOPE: openid
+      AUTH_OAUTH2_CLIENT_KEYCLOAK_ISSUER_URI: http://keycloak:8180/realms/kafka
+      AUTH_OAUTH2_CLIENT_KEYCLOAK_USER_NAME_ATTRIBUTE: preferred_username
+      AUTH_OAUTH2_CLIENT_KEYCLOAK_CLIENT_NAME: Keycloak
+      AUTH_OAUTH2_CLIENT_KEYCLOAK_PROVIDER: keycloak
+      AUTH_OAUTH2_CLIENT_KEYCLOAK_CUSTOM_PARAMS_TYPE: oauth
+      AUTH_OAUTH2_CLIENT_KEYCLOAK_CUSTOM_PARAMS_ROLES_FIELD: roles
+
+      # --- RBAC: map Keycloak realm roles -> Kafka UI permissions ---
+      RBAC_ROLES_0_NAME: admins
+      RBAC_ROLES_0_CLUSTERS_0: local
+      RBAC_ROLES_0_SUBJECTS_0_PROVIDER: oauth
+      RBAC_ROLES_0_SUBJECTS_0_TYPE: role
+      RBAC_ROLES_0_SUBJECTS_0_VALUE: kafka-admin
+      RBAC_ROLES_0_PERMISSIONS_0_RESOURCE: applicationconfig
+      RBAC_ROLES_0_PERMISSIONS_0_ACTIONS: all
+      RBAC_ROLES_0_PERMISSIONS_1_RESOURCE: clusterconfig
+      RBAC_ROLES_0_PERMISSIONS_1_ACTIONS: all
+      RBAC_ROLES_0_PERMISSIONS_2_RESOURCE: topic
+      RBAC_ROLES_0_PERMISSIONS_2_VALUE: ".*"
+      RBAC_ROLES_0_PERMISSIONS_2_ACTIONS: all
+      RBAC_ROLES_0_PERMISSIONS_3_RESOURCE: consumer
+      RBAC_ROLES_0_PERMISSIONS_3_VALUE: ".*"
+      RBAC_ROLES_0_PERMISSIONS_3_ACTIONS: all
+      RBAC_ROLES_0_PERMISSIONS_4_RESOURCE: schema
+      RBAC_ROLES_0_PERMISSIONS_4_VALUE: ".*"
+      RBAC_ROLES_0_PERMISSIONS_4_ACTIONS: all
+      RBAC_ROLES_0_PERMISSIONS_5_RESOURCE: connect
+      RBAC_ROLES_0_PERMISSIONS_5_VALUE: ".*"
+      RBAC_ROLES_0_PERMISSIONS_5_ACTIONS: all
+      RBAC_ROLES_0_PERMISSIONS_6_RESOURCE: acl
+      RBAC_ROLES_0_PERMISSIONS_6_ACTIONS: all
+      RBAC_ROLES_0_PERMISSIONS_7_RESOURCE: audit
+      RBAC_ROLES_0_PERMISSIONS_7_ACTIONS: all
+
+      RBAC_ROLES_1_NAME: viewers
+      RBAC_ROLES_1_CLUSTERS_0: local
+      RBAC_ROLES_1_SUBJECTS_0_PROVIDER: oauth
+      RBAC_ROLES_1_SUBJECTS_0_TYPE: role
+      RBAC_ROLES_1_SUBJECTS_0_VALUE: kafka-viewer
+      RBAC_ROLES_1_PERMISSIONS_0_RESOURCE: clusterconfig
+      RBAC_ROLES_1_PERMISSIONS_0_ACTIONS: view
+      RBAC_ROLES_1_PERMISSIONS_1_RESOURCE: topic
+      RBAC_ROLES_1_PERMISSIONS_1_VALUE: ".*"
+      RBAC_ROLES_1_PERMISSIONS_1_ACTIONS_0: VIEW
+      RBAC_ROLES_1_PERMISSIONS_1_ACTIONS_1: MESSAGES_READ
+      RBAC_ROLES_1_PERMISSIONS_2_RESOURCE: consumer
+      RBAC_ROLES_1_PERMISSIONS_2_VALUE: ".*"
+      RBAC_ROLES_1_PERMISSIONS_2_ACTIONS: view
+
+volumes:
+  kafka-data:

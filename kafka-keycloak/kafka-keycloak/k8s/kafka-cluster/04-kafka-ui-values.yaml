@@ -1,0 +1,75 @@
+# Helm values for Kafka UI.
+#   helm repo add kafbat-ui https://ui.charts.kafbat.io
+#   helm upgrade --install kafka-ui kafbat-ui/kafka-ui -n kafka -f 04-kafka-ui-values.yaml
+replicaCount: 2
+
+existingSecret: kafka-ui-keycloak        # provides AUTH_OAUTH2_CLIENT_KEYCLOAK_CLIENTSECRET
+
+yamlApplicationConfig:
+  kafka:
+    clusters:
+      - name: eks-prod
+        bootstrapServers: my-cluster-kafka-bootstrap.kafka.svc.cluster.local:9092
+
+  auth:
+    type: OAUTH2
+    oauth2:
+      client:
+        keycloak:
+          clientId: kafka-ui
+          # clientSecret comes from the env var in existingSecret
+          scope: openid
+          issuer-uri: https://auth.example.com/realms/kafka     # PUBLIC HTTPS URL of external Keycloak
+          user-name-attribute: preferred_username
+          client-name: Keycloak
+          provider: keycloak
+          custom-params:
+            type: oauth
+            roles-field: roles
+
+  rbac:
+    roles:
+      - name: admins
+        clusters: [ eks-prod ]
+        subjects:
+          - { provider: oauth, type: role, value: kafka-admin }
+        permissions:
+          - { resource: applicationconfig, actions: all }
+          - { resource: clusterconfig,     actions: all }
+          - { resource: topic,    value: ".*", actions: all }
+          - { resource: consumer, value: ".*", actions: all }
+          - { resource: schema,   value: ".*", actions: all }
+          - { resource: connect,  value: ".*", actions: all }
+          - { resource: acl,   actions: all }
+          - { resource: audit, actions: all }
+      - name: viewers
+        clusters: [ eks-prod ]
+        subjects:
+          - { provider: oauth, type: role, value: kafka-viewer }
+        permissions:
+          - { resource: clusterconfig, actions: [ view ] }
+          - { resource: topic,    value: ".*", actions: [ view, messages_read ] }
+          - { resource: consumer, value: ".*", actions: [ view ] }
+
+  # Kafka UI sits behind an ALB that terminates TLS; trust X-Forwarded-* so redirect URIs are https://
+  server:
+    forward-headers-strategy: framework
+
+resources:
+  requests: { cpu: 250m, memory: 512Mi }
+  limits:   { cpu: "1",  memory: 1Gi }
+
+ingress:
+  enabled: true
+  ingressClassName: alb
+  host: kafka-ui.example.com
+  path: /
+  pathType: Prefix
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internal            # or internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:123456789012:certificate/REPLACE
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/healthcheck-path: /actuator/health
+    external-dns.alpha.kubernetes.io/hostname: kafka-ui.example.com
