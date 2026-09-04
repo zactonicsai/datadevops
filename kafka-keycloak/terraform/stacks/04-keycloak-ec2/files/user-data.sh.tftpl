@@ -1,0 +1,45 @@
+#!/bin/bash
+# Keycloak ${keycloak_version} on Amazon Linux 2023 via Docker (production mode, behind an ALB)
+set -euxo pipefail
+dnf install -y docker
+systemctl enable --now docker
+
+mkdir -p /opt/keycloak/import
+echo '${realm_json_b64}' | base64 -d > /opt/keycloak/import/realm.json
+
+cat > /opt/keycloak/keycloak.env << 'ENV'
+KC_BOOTSTRAP_ADMIN_USERNAME=${admin_user}
+KC_BOOTSTRAP_ADMIN_PASSWORD=${admin_password}
+KC_DB=postgres
+KC_DB_URL=jdbc:postgresql://${db_host}:${db_port}/${db_name}
+KC_DB_USERNAME=${db_user}
+KC_DB_PASSWORD=${db_password}
+KC_HOSTNAME=${hostname_url}
+KC_HOSTNAME_STRICT=true
+KC_HTTP_ENABLED=true
+KC_PROXY_HEADERS=xforwarded
+KC_HEALTH_ENABLED=true
+KC_METRICS_ENABLED=true
+KC_CACHE=ispn
+KC_CACHE_STACK=jdbc-ping
+ENV
+chmod 600 /opt/keycloak/keycloak.env
+
+cat > /etc/systemd/system/keycloak.service << 'UNIT'
+[Unit]
+Description=Keycloak
+After=docker.service
+Requires=docker.service
+[Service]
+Restart=always
+ExecStartPre=-/usr/bin/docker rm -f keycloak
+ExecStart=/usr/bin/docker run --name keycloak --net=host \
+  --env-file /opt/keycloak/keycloak.env \
+  -v /opt/keycloak/import:/opt/keycloak/data/import:ro \
+  quay.io/keycloak/keycloak:${keycloak_version} start --import-realm
+ExecStop=/usr/bin/docker stop keycloak
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now keycloak

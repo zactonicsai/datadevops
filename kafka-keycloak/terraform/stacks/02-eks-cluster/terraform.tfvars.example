@@ -1,0 +1,16 @@
+region       = "us-east-1"
+state_bucket = "my-terraform-state"
+state_region = "us-east-1"
+
+cluster = {
+  name                   = "kafka-keycloak-data"
+  kubernetes_version     = "1.31"
+  endpoint_public_access = true
+  public_access_cidrs    = ["203.0.113.0/24"]   # your office/VPN
+}
+
+# Use an existing control-plane role instead of creating one:
+# cluster_role = { create = false, existing_role_name = "shared-eks-cluster-role" }
+
+# Attach to an EXISTING cluster (no cluster created; IRSA provider + addons still managed):
+# cluster = { create = false, existing_cluster_name = "my-existing-cluster", name = "my-existing-cluster" }

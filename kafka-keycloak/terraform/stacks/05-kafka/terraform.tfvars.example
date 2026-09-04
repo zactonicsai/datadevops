@@ -1,0 +1,23 @@
+region       = "us-east-1"
+state_bucket = "my-terraform-state"
+state_region = "us-east-1"
+
+namespace     = "kafka"
+cluster_name  = "my-cluster"
+kafka_version = "3.9.0"
+
+controllers = { replicas = 3, storage_size = "20Gi" }
+brokers = {
+  replicas      = 3
+  storage_size  = "100Gi"
+  memory        = "4Gi"
+  node_selector = { workload = "kafka" }                                             # matches node group labels in stack 03
+  tolerations   = [{ key = "workload", value = "kafka", effect = "NoSchedule" }]     # matches node group taints
+}
+
+topics = {
+  orders      = { partitions = 6 }
+  payments    = { partitions = 6 }
+  user-events = { partitions = 12 }
+  audit-log   = { partitions = 3, config = { "retention.ms" = "604800000", "cleanup.policy" = "delete" } }
+}

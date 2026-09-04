@@ -1,0 +1,38 @@
+#!/bin/bash
+# Keycloak on Amazon Linux 2023 via Docker, behind an ALB (TLS ends at the ALB).
+set -euxo pipefail
+dnf install -y docker awscli-2 jq
+systemctl enable --now docker
+
+get() { aws ssm get-parameter --region "${region}" --with-decryption --name "${ssm_prefix}/$1" --query Parameter.Value --output text; }
+ADMIN_PW="$(get admin_password)"
+DB_PW="$(get db_password)"
+CLIENT_SECRET="$(get kafka_ui_client_secret)"
+
+mkdir -p /opt/keycloak/import
+echo "${realm_json_b64}" | base64 -d | sed "s|__KAFKA_UI_CLIENT_SECRET__|$CLIENT_SECRET|g" > /opt/keycloak/import/realm-kafka.json
+chmod 600 /opt/keycloak/import/realm-kafka.json
+
+cat > /etc/keycloak.env <<ENV
+KC_DB=postgres
+KC_DB_URL=jdbc:postgresql://${db_host}:5432/${db_name}
+KC_DB_USERNAME=${db_user}
+KC_DB_PASSWORD=$DB_PW
+KC_HOSTNAME=${keycloak_url}
+KC_HOSTNAME_STRICT=true
+KC_HTTP_ENABLED=true
+KC_PROXY_HEADERS=xforwarded
+KC_HEALTH_ENABLED=true
+KC_METRICS_ENABLED=true
+KC_BOOTSTRAP_ADMIN_USERNAME=admin
+KC_BOOTSTRAP_ADMIN_PASSWORD=$ADMIN_PW
+ENV
+chmod 600 /etc/keycloak.env
+
+docker rm -f keycloak 2>/dev/null || true
+docker run -d --name keycloak --restart=always \
+  --env-file /etc/keycloak.env \
+  -p 8080:8080 -p 9000:9000 \
+  -v /opt/keycloak/import:/opt/keycloak/data/import:ro \
+  --log-driver=awslogs --log-opt awslogs-region=${region} --log-opt awslogs-group=/keycloak --log-opt awslogs-create-group=true \
+  "${keycloak_image}" start --import-realm

@@ -1,0 +1,53 @@
+{
+  "realm": "kafka",
+  "enabled": true,
+  "sslRequired": "none",
+  "roles": {
+    "realm": [
+      { "name": "kafka-admin",  "description": "Full access in Kafka UI" },
+      { "name": "kafka-viewer", "description": "Read-only access in Kafka UI" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "kafka-ui",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${client_secret}",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": ["${kafka_ui_url}/*"],
+      "webOrigins": ["${kafka_ui_url}"],
+      "defaultClientScopes": ["openid", "profile", "email", "roles"],
+      "protocolMappers": [
+        {
+          "name": "realm roles -> roles claim",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "config": {
+            "claim.name": "roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "alice", "enabled": true, "email": "alice@example.com", "emailVerified": true,
+      "credentials": [{ "type": "password", "value": "alice123", "temporary": false }],
+      "realmRoles": ["kafka-admin"]
+    },
+    {
+      "username": "bob", "enabled": true, "email": "bob@example.com", "emailVerified": true,
+      "credentials": [{ "type": "password", "value": "bob123", "temporary": false }],
+      "realmRoles": ["kafka-viewer"]
+    }
+  ]
+}

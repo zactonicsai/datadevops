@@ -1,0 +1,21 @@
+region       = "us-east-1"
+state_bucket = "my-terraform-state"
+state_region = "us-east-1"
+
+dns = { zone_name = "example.com", host = "kafka-ui" }   # must match keycloak.kafka_ui_url in stack 04
+
+kafka_ui = {
+  namespace = "kafka"
+  replicas  = 2
+  image_tag = "v1.5.0"
+}
+kafka_ui_client_secret = "a-long-random-secret"   # same value as stack 04
+
+lb_internal      = true                            # admin tool: VPN only
+lb_allowed_cidrs = ["10.0.0.0/8"]
+
+# Bring-your-own examples:
+# security_group = { create = false, existing_id = "sg-shared-alb" }
+# certificate    = { create = false, existing_arn = "arn:aws:acm:...:certificate/wildcard" }
+# target_group   = { create = false, existing_arn = "arn:aws:elasticloadbalancing:...:targetgroup/kafka-ui/abc" }
+# load_balancer  = { create = false, existing_arn = "arn:...:loadbalancer/app/shared/abc", existing_https_listener_arn = "arn:...:listener/app/shared/abc/def" }

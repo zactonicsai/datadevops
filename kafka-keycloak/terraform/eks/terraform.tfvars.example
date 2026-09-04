@@ -1,0 +1,7 @@
+region                  = "us-east-1"
+route53_zone_name       = "example.com"
+keycloak_admin_password = "change-me"
+keycloak_db_password    = "change-me-too"
+kafka_ui_client_secret  = "a-long-random-secret"
+kafka_ui_alb_scheme     = "internet-facing"
+kafka_ui_allowed_cidrs  = ["203.0.113.0/24"]   # your office/VPN egress

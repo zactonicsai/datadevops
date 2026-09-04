@@ -1,0 +1,20 @@
+region       = "us-east-1"
+state_bucket = "my-terraform-state"
+state_region = "us-east-1"
+
+# Option A: create a new VPC
+vpc = {
+  create   = true
+  cidr     = "10.42.0.0/16"
+  az_count = 3
+}
+
+# Option B: use an existing VPC/subnets (subnets should already carry the kubernetes.io/role/* tags)
+# vpc = {
+#   create                      = false
+#   existing_vpc_id             = "vpc-0123456789abcdef0"
+#   existing_public_subnet_ids  = ["subnet-aaa", "subnet-bbb", "subnet-ccc"]
+#   existing_private_subnet_ids = ["subnet-ddd", "subnet-eee", "subnet-fff"]
+# }
+
+eks_cluster_names = ["kafka-keycloak-data"]

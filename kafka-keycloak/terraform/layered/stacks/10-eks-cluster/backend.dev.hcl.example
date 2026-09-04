@@ -1,0 +1,5 @@
+bucket         = "my-tf-state-bucket"
+key            = "kafka-keycloak/dev/10-eks-cluster.tfstate"
+region         = "us-east-1"
+dynamodb_table = "terraform-locks"
+encrypt        = true

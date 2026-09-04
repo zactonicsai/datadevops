@@ -1,0 +1,11 @@
+output "keycloak_url" { value = local.url }
+output "issuer_uri" { value = "${local.url}/realms/kafka" }
+output "alb_dns_name" { value = module.alb.dns_name }
+output "alb_security_group_id" { value = module.sg_alb.id }
+output "app_security_group_id" { value = module.sg_app.id }
+output "target_group_arn" { value = module.tg.arn }
+output "launch_template_id" { value = module.lt.id }
+output "instance_role_arn" { value = module.instance_role.arn }
+output "db_endpoint" { value = module.db.endpoint }
+output "certificate_arn" { value = module.cert.arn }
+output "ssm_parameters" { value = module.secrets.parameter_names }

@@ -1,0 +1,35 @@
+region       = "us-east-1"
+state_bucket = "my-terraform-state"
+state_region = "us-east-1"
+
+dns = { zone_name = "example.com", host = "auth" }
+
+keycloak = {
+  version        = "26.3.0"
+  instance_type  = "t3.medium"
+  instance_count = 2
+  key_name       = "my-keypair"
+  kafka_ui_url   = "https://kafka-ui.example.com"
+}
+
+keycloak_admin_password = "change-me"
+db_password             = "change-me-too"
+kafka_ui_client_secret  = "a-long-random-secret"
+test_users = {
+  alice = { password = "alice123", roles = ["kafka-admin"] }
+  bob   = { password = "bob123", roles = ["kafka-viewer"] }
+}
+
+lb_allowed_cidrs = ["0.0.0.0/0"]   # login page must be reachable by users
+lb_internal      = false
+
+# ---- Bring-your-own examples (uncomment what you already have) ----
+# subnets         = { lb_subnet_ids = ["subnet-a", "subnet-b"], instance_subnet_ids = ["subnet-c", "subnet-d"] }
+# security_groups = { lb = { create = false, existing_id = "sg-alb" }, instance = { create = false, existing_id = "sg-app" } }
+# instance_role   = { create = false, existing_role_name = "shared-ec2-ssm-role" }
+# launch_template = { create = false, existing_id = "lt-0123" }
+# certificate     = { create = false, existing_arn = "arn:aws:acm:us-east-1:123456789012:certificate/abc" }
+# target_group    = { create = false, existing_arn = "arn:aws:elasticloadbalancing:...:targetgroup/keycloak/abc" }
+# load_balancer   = { create = false, existing_arn = "arn:aws:elasticloadbalancing:...:loadbalancer/app/shared/abc",
+#                     existing_https_listener_arn = "arn:aws:elasticloadbalancing:...:listener/app/shared/abc/def" }
+# database        = { create = false, existing = { address = "db.abc.us-east-1.rds.amazonaws.com", db_name = "keycloak", username = "keycloak" } }

@@ -1,0 +1,11 @@
+# Copy to ~/.terraformrc (or set TF_CLI_CONFIG_FILE) to make `terraform init` fully offline
+# after running scripts/mirror-providers.sh once.
+provider_installation {
+  filesystem_mirror {
+    path    = "/ABSOLUTE/PATH/TO/terraform/eks/providers-mirror"
+    include = ["*/*"]
+  }
+  direct {
+    exclude = ["*/*"]
+  }
+}

@@ -1,0 +1,32 @@
+region       = "us-east-1"
+state_bucket = "my-terraform-state"
+state_region = "us-east-1"
+
+node_groups = {
+  general = {
+    instance_types = ["m6i.large"]
+    scaling        = { desired = 2, min = 2, max = 4 }
+    labels         = { workload = "general" }
+  }
+  kafka = {
+    instance_types = ["m6i.xlarge"]
+    scaling        = { desired = 3, min = 3, max = 5 }
+    labels         = { workload = "kafka" }
+    taints         = [{ key = "workload", value = "kafka", effect = "NO_SCHEDULE" }]
+  }
+}
+
+# Custom launch template (IMDSv2, 80 GiB gp3 root, SSH key):
+launch_template = {
+  enabled     = true
+  key_name    = "my-keypair"
+  root_volume = { size = 80 }
+}
+# ...or reuse an existing one: launch_template = { enabled = true, existing_id = "lt-0123456789abcdef0" }
+
+# Reuse an existing node role: node_role = { create = false, existing_role_name = "shared-eks-node-role" }
+
+namespaces = {
+  kafka      = { "pod-security.kubernetes.io/enforce" = "baseline" }
+  monitoring = {}
+}
