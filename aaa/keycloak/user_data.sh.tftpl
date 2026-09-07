@@ -1,0 +1,42 @@
+#!/bin/bash
+set -euxo pipefail
+
+dnf install -y docker
+systemctl enable --now docker
+
+# docker compose plugin
+ARCH=$(uname -m)
+mkdir -p /usr/local/lib/docker/cli-plugins
+curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$${ARCH}" \
+  -o /usr/local/lib/docker/cli-plugins/docker-compose
+chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+
+mkdir -p /opt/keycloak && cd /opt/keycloak
+
+cat > .env <<ENV
+KC_DB_URL=jdbc:postgresql://${db_host}:5432/${db_name}
+KC_DB_USERNAME=${db_user}
+KC_DB_PASSWORD=${db_password}
+KC_BOOTSTRAP_ADMIN_USERNAME=${admin_user}
+KC_BOOTSTRAP_ADMIN_PASSWORD=${admin_password}
+ENV
+chmod 600 .env
+
+cat > compose.yaml <<COMPOSE
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:${keycloak_version}
+    command: start
+    env_file: .env
+    environment:
+      KC_DB: postgres
+      KC_HTTP_ENABLED: "true"          # TLS terminates at the ALB
+      KC_HOSTNAME: https://${keycloak_domain}
+      KC_PROXY_HEADERS: xforwarded     # trust ALB X-Forwarded-* headers
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+COMPOSE
+
+docker compose up -d

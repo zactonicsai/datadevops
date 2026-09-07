@@ -1,2 +1,4 @@
 .DS_Store
 nifid1/.env
+.terraform.lock.hcl
+.terraform/
